@@ -80,7 +80,7 @@ impl LogSubscriber {
         if log::set_boxed_logger(Box::new(log_subscriber.clone())).is_err() {
             eprintln!("Failed to set `LogSubscriber` as global log subscriber")
         }
-        log::set_max_level(LevelFilter::Error);
+        log::set_max_level(LevelFilter::Debug);
         log_subscriber
     }
 
@@ -94,7 +94,7 @@ impl LogSubscriber {
 
 impl Log for LogSubscriber {
     fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= Level::Error
+        metadata.level() <= Level::Debug
     }
 
     fn log(&self, record: &Record) {
