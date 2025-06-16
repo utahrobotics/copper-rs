@@ -52,7 +52,6 @@ impl Decode<()> for AprilTagDetections {
         })
     }
 }
-
 // implement serde support for AprilTagDetections
 // This is so it can be logged with debug!.
 impl Serialize for AprilTagDetections {
@@ -134,10 +133,16 @@ impl AprilTagDetections {
 pub struct AprilTags {
     detector: Detector,
     tag_params: TagParams,
+    scratch: Vec<u8>,
 }
 
 #[cfg(not(unix))]
 pub struct AprilTags {}
+
+#[cfg(not(windows))]
+use jpeg_decoder::{Decoder as JpegDecoder, PixelFormat as JpegPixelFormat};
+#[cfg(not(windows))]
+use std::io::Cursor;
 
 #[cfg(not(windows))]
 fn image_from_cuimage<A>(cu_image: &CuImage<A>) -> ManuallyDrop<Image>
@@ -152,6 +157,20 @@ where
             width: cu_image.format.width as i32,
             height: cu_image.format.height as i32,
             stride: cu_image.format.stride as i32,
+        });
+        let ptr = Box::into_raw(low_level_img);
+        ManuallyDrop::new(Image::from_raw(ptr))
+    }
+}
+
+#[cfg(not(windows))]
+fn image_from_raw_parts(ptr: *mut u8, width: u32, height: u32, stride: u32) -> ManuallyDrop<Image> {
+    unsafe {
+        let low_level_img = Box::new(image_u8_t {
+            buf: ptr,
+            width: width as i32,
+            height: height as i32,
+            stride: stride as i32,
         });
         let ptr = Box::into_raw(low_level_img);
         ManuallyDrop::new(Image::from_raw(ptr))
@@ -215,6 +234,7 @@ impl<'cl> CuTask<'cl> for AprilTags {
             return Ok(Self {
                 detector,
                 tag_params,
+                scratch: Vec::new(),
             });
         }
         Ok(Self {
@@ -229,6 +249,7 @@ impl<'cl> CuTask<'cl> for AprilTags {
                 cy: CY,
                 tagsize: TAG_SIZE,
             },
+            scratch: Vec::new(),
         })
     }
 
@@ -240,9 +261,122 @@ impl<'cl> CuTask<'cl> for AprilTags {
     ) -> CuResult<()> {
         let mut result = AprilTagDetections::new();
         if let Some(payload) = input.payload() {
-            let image = image_from_cuimage(payload);
+            // Fast grayscale conversion / extraction based on pixel format
+            let pixel_format = std::str::from_utf8(&payload.format.pixel_format)
+                .unwrap_or("")
+                .trim_end_matches('\0');
+
+            let image = match pixel_format {
+                // Already 8-bit luma plane – no conversion needed.
+                "GRAY" | "NV12" => image_from_cuimage(payload),
+
+                // YUYV 4:2:2 – extract every other byte (Y channel)
+                "YUYV" => {
+                    let width = payload.format.width as usize;
+                    let height = payload.format.height as usize;
+                    let src_stride = payload.format.stride as usize;
+
+                    // Ensure scratch buffer is big enough and has deterministic capacity
+                    let required = width * height;
+                    if self.scratch.len() < required {
+                        self.scratch.resize(required, 0);
+                    }
+
+                    payload.buffer_handle.with_inner(|raw_buffer| {
+                        let src: &[u8] = raw_buffer;
+                        for y in 0..height {
+                            let src_row = &src[y * src_stride..y * src_stride + src_stride];
+                            let dst_row = &mut self.scratch[y * width..(y + 1) * width];
+                            for x in 0..width {
+                                // Y is stored at even indices (U0 Y0 V0 Y1)
+                                dst_row[x] = src_row[x * 2];
+                            }
+                        }
+                    });
+
+                    // Build an apriltag image on top of the scratch buffer (zero-copy)
+                    image_from_raw_parts(
+                        self.scratch.as_mut_ptr(),
+                        payload.format.width,
+                        payload.format.height,
+                        payload.format.width, // stride == width for luma image
+                    )
+                }
+                // MJPEG / JPEG – decode compressed bitstream to grayscale.
+                "MJPG" | "JPEG" | "JPG" => {
+                    // Acquire JPEG bytes
+                    let jpeg_bytes = payload.buffer_handle.with_inner(|raw| raw.to_vec());
+
+                    let mut decoder = JpegDecoder::new(Cursor::new(jpeg_bytes));
+                    let pixels = match decoder.decode() {
+                        Ok(p) => p,
+                        Err(e) => {
+                            println!(
+                                "[cu_apriltag] JPEG decode failed: {e}, skipping detection."
+                            );
+                            output.metadata.tov = input.metadata.tov;
+                            output.set_payload(result);
+                            return Ok(());
+                        }
+                    };
+
+                    let info = decoder.info().ok_or_else(|| {
+                        CuError::from("jpeg-decoder missing info after decode")
+                    })?;
+
+                    let (width, height) = (info.width as usize, info.height as usize);
+
+                    // Ensure scratch buffer size
+                    let required = width * height;
+                    if self.scratch.len() < required {
+                        self.scratch.resize(required, 0);
+                    }
+
+                    match info.pixel_format {
+                        JpegPixelFormat::L8 => {
+                            self.scratch[..required].copy_from_slice(&pixels[..required]);
+                        }
+                        JpegPixelFormat::RGB24 => {
+                            // Convert RGB to grayscale using BT.601 luma approximation
+                            for i in 0..required {
+                                let r = pixels[3 * i] as u32;
+                                let g = pixels[3 * i + 1] as u32;
+                                let b = pixels[3 * i + 2] as u32;
+                                self.scratch[i] = ((r * 299 + g * 587 + b * 114) / 1000) as u8;
+                            }
+                        }
+                        other => {
+                            println!(
+                                "[cu_apriltag] Unsupported JPEG pixel format {:?}, skipping.",
+                                other
+                            );
+                            output.metadata.tov = input.metadata.tov;
+                            output.set_payload(result);
+                            return Ok(());
+                        }
+                    }
+
+                    image_from_raw_parts(
+                        self.scratch.as_mut_ptr(),
+                        width as u32,
+                        height as u32,
+                        width as u32,
+                    )
+                }
+                // Unsupported / unrecognised formats – skip detection gracefully.
+                other => {
+                    println!(
+                        "[cu_apriltag] Unsupported pixel format '{other}', skipping detection."
+                    );
+                    output.metadata.tov = input.metadata.tov;
+                    output.set_payload(result);
+                    return Ok(());
+                }
+            };
+
             let detections = self.detector.detect(&image);
             for detection in detections {
+
                 if let Some(aprilpose) = detection.estimate_tag_pose(&self.tag_params) {
                     let translation = aprilpose.translation();
                     let rotation = aprilpose.rotation();
@@ -335,7 +469,6 @@ mod tests {
             let detections = detections
                 .filtered_by_decision_margin(150.0)
                 .collect::<Vec<_>>();
-
             assert_eq!(detections.len(), 1);
             assert_eq!(detections[0].0, 4);
             return Ok(());
