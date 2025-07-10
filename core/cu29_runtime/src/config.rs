@@ -13,7 +13,7 @@ use ron::extensions::Extensions;
 use ron::value::Value as RonValue;
 use ron::{Number, Options};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::Display;
 use std::fs::read_to_string;
@@ -1123,11 +1123,16 @@ fn process_includes(
                     result.cnx = Some(included_cnx);
                 } else {
                     let mut cnx = result.cnx.take().unwrap();
+                    let existing_task_ids: std::collections::HashSet<String> = result
+                        .tasks
+                        .as_ref()
+                        .map(|tasks| tasks.iter().map(|t| t.id.clone()).collect())
+                        .unwrap_or_default();
+                    
                     for included_c in included_cnx {
-                        if !cnx
-                            .iter()
-                            .any(|c| c.src == included_c.src && c.dst == included_c.dst)
-                        {
+                        if existing_task_ids.contains(&included_c.src) 
+                           && existing_task_ids.contains(&included_c.dst)
+                           && !cnx.iter().any(|c| c.src == included_c.src && c.dst == included_c.dst) {
                             cnx.push(included_c);
                         }
                     }
