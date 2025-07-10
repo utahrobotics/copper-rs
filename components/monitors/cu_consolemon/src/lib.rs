@@ -35,8 +35,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{io, thread};
 use tui_nodes::{Connection, NodeGraph, NodeLayout};
-use std::rc::Rc;
-use std::cell::RefCell;
 use tui_widgets::scrollview::{ScrollView, ScrollViewState};
 
 #[cfg(feature = "debug_pane")]
@@ -192,10 +190,6 @@ struct NodesScrollableWidgetState {
     node_types: Vec<NodeType>,
     connections: Vec<Connection>,
     statuses: Arc<Mutex<Vec<TaskStatus>>>,
-    // Cache a pre-computed graph so we don't run expensive layout every frame.
-    precomputed_graph: Rc<RefCell<Option<NodeGraph<'static>>>>,
-    /// Size of the virtual canvas used for the graph. Kept to avoid recomputing.
-    content_size: Size,
     nodes_scrollable_state: ScrollViewState,
 }
 
@@ -236,43 +230,13 @@ impl NodesScrollableWidgetState {
                 }
             }
         }
-        let node_ids: Vec<String> = config_nodes
-            .iter()
-            .map(|n| format!(" {} ", n.get_id()))
-            .collect();
-
-        let leaked_titles: Vec<&'static str> = node_ids
-            .into_iter()
-            .map(|s| Box::leak(s.into_boxed_str()) as &'static str)
-            .collect();
-
-        let node_layouts: Vec<NodeLayout<'static>> = leaked_titles
-            .iter()
-            .map(|title| NodeLayout::new((NODE_WIDTH, NODE_HEIGHT)).with_title(*title))
-            .collect();
-
-        let content_size = Size::new(200, 100);
-        let mut precomputed_graph = NodeGraph::new(
-            node_layouts,
-            connections.clone(),
-            content_size.width as usize,
-            content_size.height as usize,
-        );
-        precomputed_graph.calculate();
-
         NodesScrollableWidgetState {
             config_nodes,
             node_types,
             connections,
-            statuses: errors,
-            precomputed_graph: Rc::new(RefCell::new(Some(precomputed_graph))),
-            content_size,
             nodes_scrollable_state: ScrollViewState::default(),
+            statuses: errors,
         }
-    }
-
-    fn new_simple(config: &CuConfig, errors: Arc<Mutex<Vec<TaskStatus>>>) -> Self {
-        Self::new(config, errors, None)
     }
 }
 
@@ -280,19 +244,16 @@ struct NodesScrollableWidget<'a> {
     _marker: PhantomData<&'a ()>,
 }
 
-struct GraphWrapper {
-    shared: Rc<RefCell<Option<NodeGraph<'static>>>>,
+struct GraphWrapper<'a> {
+    inner: NodeGraph<'a>,
 }
 
-impl Widget for GraphWrapper {
+impl Widget for GraphWrapper<'_> {
     fn render(self, area: Rect, buf: &mut Buffer)
     where
         Self: Sized,
     {
-        let mut maybe_graph = self.shared.borrow_mut();
-        if let Some(mut graph) = maybe_graph.take() {
-            graph.render(area, buf, &mut ());
-        }
+        self.inner.render(area, buf, &mut ())
     }
 }
 
@@ -308,16 +269,30 @@ impl StatefulWidget for NodesScrollableWidget<'_> {
     type State = NodesScrollableWidgetState;
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        // Re-use the pre-computed graph stored in the state.
-        let mut scroll_view = ScrollView::new(state.content_size);
+        let node_ids: Vec<String> = state
+            .config_nodes
+            .iter()
+            .map(|node| format!(" {} ", node.get_id()))
+            .collect();
+        let node_layouts = state
+            .config_nodes
+            .iter()
+            .zip(node_ids.iter())
+            .map(|(_, node_id)| {
+                NodeLayout::new((NODE_WIDTH, NODE_HEIGHT)).with_title(node_id.as_str())
+            })
+            .collect();
 
-        let zones = {
-            let mut maybe_graph = state.precomputed_graph.borrow_mut();
-            let graph = maybe_graph
-                .as_mut()
-                .expect("Graph should be present in state");
-            graph.split(scroll_view.area())
-        };
+        let content_size = Size::new(200, 100);
+        let mut scroll_view = ScrollView::new(content_size);
+        let mut graph = NodeGraph::new(
+            node_layouts,
+            state.connections.clone(),
+            content_size.width as usize,
+            content_size.height as usize,
+        );
+        graph.calculate();
+        let zones = graph.split(scroll_view.area());
 
         {
             let mut statuses = state.statuses.lock().unwrap();
@@ -348,12 +323,12 @@ impl StatefulWidget for NodesScrollableWidget<'_> {
         }
 
         scroll_view.render_widget(
-            GraphWrapper { shared: state.precomputed_graph.clone() },
+            GraphWrapper { inner: graph },
             Rect {
                 x: 0,
                 y: 0,
-                width: state.content_size.width,
-                height: state.content_size.height,
+                width: content_size.width,
+                height: content_size.height,
             },
         );
         scroll_view.render(area, buf, &mut state.nodes_scrollable_state);
@@ -422,7 +397,7 @@ impl UI {
     ) -> UI {
         init_error_hooks();
         let nodes_scrollable_widget_state =
-            NodesScrollableWidgetState::new_simple(&config, task_statuses.clone());
+            NodesScrollableWidgetState::new(&config, task_statuses.clone());
 
         Self {
             task_ids,
