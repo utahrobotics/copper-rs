@@ -1,14 +1,13 @@
 use circular_buffer::CircularBuffer;
-use cu29::clock::{CuTime, Tov};
-use cu29::cutask::{CuMsg, CuMsgPayload};
-use cu29::{CuError, CuResult};
+use cu29::prelude::*;
 
 /// An augmented circular buffer that allows for time-based operations.
-pub struct TimeboundCircularBuffer<const S: usize, P>
+pub struct TimeboundCircularBuffer<const S: usize, P, M>
 where
     P: CuMsgPayload,
+    M: Metadata,
 {
-    pub inner: CircularBuffer<S, CuMsg<P>>,
+    pub inner: CircularBuffer<S, CuStampedData<P, M>>,
 }
 
 #[allow(dead_code)]
@@ -28,7 +27,7 @@ fn extract_tov_time_right(tov: &Tov) -> Option<CuTime> {
     }
 }
 
-impl<const S: usize, P> Default for TimeboundCircularBuffer<S, P>
+impl<const S: usize, P> Default for TimeboundCircularBuffer<S, P, CuMsgMetadata>
 where
     P: CuMsgPayload,
 {
@@ -37,14 +36,14 @@ where
     }
 }
 
-impl<const S: usize, P> TimeboundCircularBuffer<S, P>
+impl<const S: usize, P> TimeboundCircularBuffer<S, P, CuMsgMetadata>
 where
     P: CuMsgPayload,
 {
     pub fn new() -> Self {
         TimeboundCircularBuffer {
             // It is assumed to be sorted by time with non overlapping ranges if they are Tov::Range
-            inner: CircularBuffer::<S, CuMsg<P>>::new(),
+            inner: CircularBuffer::<S, CuStampedData<P, CuMsgMetadata>>::new(),
         }
     }
 
@@ -54,8 +53,8 @@ where
         &self,
         start_time: CuTime,
         end_time: CuTime,
-    ) -> impl Iterator<Item = &CuMsg<P>> {
-        self.inner.iter().filter(move |msg| match msg.metadata.tov {
+    ) -> impl Iterator<Item = &CuStampedData<P, CuMsgMetadata>> {
+        self.inner.iter().filter(move |msg| match msg.tov {
             Tov::Time(time) => time >= start_time && time <= end_time,
             Tov::Range(range) => range.start >= start_time && range.end <= end_time,
             _ => false,
@@ -68,7 +67,7 @@ where
         let drain_end = self
             .inner
             .iter()
-            .position(|msg| match msg.metadata.tov {
+            .position(|msg| match msg.tov {
                 Tov::Time(time) => time >= time_horizon,
                 Tov::Range(range) => range.end >= time_horizon,
                 _ => false,
@@ -83,7 +82,7 @@ where
     pub fn most_recent_time(&self) -> CuResult<Option<CuTime>> {
         self.inner
             .iter()
-            .map(|msg| extract_tov_time_right(&msg.metadata.tov))
+            .map(|msg| extract_tov_time_right(&msg.tov))
             .try_fold(None, |acc, time| {
                 let time = time.ok_or_else(|| {
                     CuError::from("Trying to align temporal data with no time information")
@@ -95,18 +94,18 @@ where
     }
 
     /// Push a message into the buffer.
-    pub fn push(&mut self, msg: CuMsg<P>) {
+    pub fn push(&mut self, msg: CuStampedData<P, CuMsgMetadata>) {
         self.inner.push_back(msg);
     }
 }
 
 #[macro_export]
 macro_rules! alignment_buffers {
-    ($struct_name:ident, $($name:ident: TimeboundCircularBuffer<$size:expr, CuMsg<$payload:ty>>),*) => {
+    ($struct_name:ident, $($name:ident: TimeboundCircularBuffer<$size:expr, CuStampedData<$payload:ty, CuMsgMetadata>>),*) => {
         struct $struct_name {
             target_alignment_window: cu29::clock::CuDuration, // size of the most recent data window to align
             stale_data_horizon: cu29::clock::CuDuration,  // time horizon for purging stale data
-            $(pub $name: $crate::buffers::TimeboundCircularBuffer<$size, $payload>),*
+            $(pub $name: $crate::buffers::TimeboundCircularBuffer<$size, $payload, CuMsgMetadata>),*
         }
 
         impl $struct_name {
@@ -114,7 +113,7 @@ macro_rules! alignment_buffers {
                 Self {
                     target_alignment_window,
                     stale_data_horizon,
-                    $($name: $crate::buffers::TimeboundCircularBuffer::<$size, $payload>::new()),*
+                    $($name: $crate::buffers::TimeboundCircularBuffer::<$size, $payload, CuMsgMetadata>::new()),*
                 }
             }
 
@@ -130,7 +129,7 @@ macro_rules! alignment_buffers {
             #[allow(dead_code)]
             pub fn get_latest_aligned_data(
                 &mut self,
-            ) -> Option<($(impl Iterator<Item = &cu29::cutask::CuMsg<$payload>>),*)> {
+            ) -> Option<($(impl Iterator<Item = &cu29::cutask::CuStampedData<$payload, CuMsgMetadata>>),*)> {
                 // Now find the min of the max of the last time for all buffers
                 // meaning the most recent time at which all buffers have data
                 let most_recent_time = [
@@ -157,12 +156,12 @@ pub use alignment_buffers;
 #[cfg(test)]
 mod tests {
     use cu29::clock::Tov;
-    use cu29::cutask::CuMsg;
+    use cu29::cutask::*;
     use std::time::Duration;
 
     #[test]
     fn simple_init_test() {
-        alignment_buffers!(AlignmentBuffers, buffer1: TimeboundCircularBuffer<10, CuMsg<u32>>, buffer2: TimeboundCircularBuffer<12, CuMsg<u64>>);
+        alignment_buffers!(AlignmentBuffers, buffer1: TimeboundCircularBuffer<10, CuStampedData<u32, CuMsgMetadata>>, buffer2: TimeboundCircularBuffer<12, CuStampedData<u64, CuMsgMetadata>>);
 
         let buffers =
             AlignmentBuffers::new(Duration::from_secs(1).into(), Duration::from_secs(2).into());
@@ -172,13 +171,13 @@ mod tests {
 
     #[test]
     fn purge_test() {
-        alignment_buffers!(AlignmentBuffers, buffer1: TimeboundCircularBuffer<10, CuMsg<u32>>, buffer2: TimeboundCircularBuffer<12, CuMsg<u32>>);
+        alignment_buffers!(AlignmentBuffers, buffer1: TimeboundCircularBuffer<10, CuStampedData<u32, CuMsgMetadata>>, buffer2: TimeboundCircularBuffer<12, CuStampedData<u32, CuMsgMetadata>>);
 
         let mut buffers =
             AlignmentBuffers::new(Duration::from_secs(1).into(), Duration::from_secs(2).into());
 
-        let mut msg1 = CuMsg::new(Some(1));
-        msg1.metadata.tov = Tov::Time(Duration::from_secs(1).into());
+        let mut msg1 = CuStampedData::new(Some(1));
+        msg1.tov = Tov::Time(Duration::from_secs(1).into());
         buffers.buffer1.inner.push_back(msg1.clone());
         buffers.buffer2.inner.push_back(msg1);
         // within the horizon
@@ -195,8 +194,8 @@ mod tests {
     fn empty_buffers_test() {
         alignment_buffers!(
             AlignmentBuffers,
-            buffer1: TimeboundCircularBuffer<10, CuMsg<u32>>,
-            buffer2: TimeboundCircularBuffer<12, CuMsg<u32>>
+            buffer1: TimeboundCircularBuffer<10, CuStampedData<u32, CuMsgMetadata>>,
+            buffer2: TimeboundCircularBuffer<12, CuStampedData<u32, CuMsgMetadata>>
         );
 
         let mut buffers = AlignmentBuffers::new(
@@ -212,8 +211,8 @@ mod tests {
     fn horizon_and_window_alignment_test() {
         alignment_buffers!(
             AlignmentBuffers,
-            buffer1: TimeboundCircularBuffer<10, CuMsg<u32>>,
-            buffer2: TimeboundCircularBuffer<12, CuMsg<u32>>
+            buffer1: TimeboundCircularBuffer<10, CuStampedData<u32, CuMsgMetadata>>,
+            buffer2: TimeboundCircularBuffer<12, CuStampedData<u32, CuMsgMetadata>>
         );
 
         let mut buffers = AlignmentBuffers::new(
@@ -222,17 +221,17 @@ mod tests {
         );
 
         // Insert messages with timestamps
-        let mut msg1 = CuMsg::new(Some(1));
-        msg1.metadata.tov = Tov::Time(Duration::from_secs(1).into());
+        let mut msg1 = CuStampedData::new(Some(1));
+        msg1.tov = Tov::Time(Duration::from_secs(1).into());
         buffers.buffer1.inner.push_back(msg1.clone());
         buffers.buffer2.inner.push_back(msg1);
 
-        let mut msg2 = CuMsg::new(Some(3));
-        msg2.metadata.tov = Tov::Time(Duration::from_secs(3).into());
+        let mut msg2 = CuStampedData::new(Some(3));
+        msg2.tov = Tov::Time(Duration::from_secs(3).into());
         buffers.buffer2.inner.push_back(msg2);
 
-        let mut msg3 = CuMsg::new(Some(4));
-        msg3.metadata.tov = Tov::Time(Duration::from_secs(4).into());
+        let mut msg3 = CuStampedData::new(Some(4));
+        msg3.tov = Tov::Time(Duration::from_secs(4).into());
         buffers.buffer1.inner.push_back(msg3.clone());
         buffers.buffer2.inner.push_back(msg3);
 

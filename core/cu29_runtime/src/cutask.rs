@@ -7,7 +7,10 @@ use bincode::enc::{Encode, Encoder};
 use bincode::error::{DecodeError, EncodeError};
 use compact_str::{CompactString, ToCompactString};
 use cu29_clock::{PartialCuTimeRange, RobotClock, Tov};
-use cu29_traits::{CuCompactString, CuResult, ErasedCuMsg, COMPACT_STRING_CAPACITY};
+use cu29_traits::{
+    CuCompactString, CuMsgMetadataTrait, CuResult, ErasedCuStampedData, Metadata,
+    COMPACT_STRING_CAPACITY,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::{Debug, Display, Formatter};
@@ -21,22 +24,27 @@ pub trait CuMsgPack<'cl> {}
 impl<T: Default + Debug + Clone + Encode + Decode<()> + Serialize + Sized> CuMsgPayload for T {}
 
 macro_rules! impl_cu_msg_pack {
-    ($(($($ty:ident),*)),*) => {
+    ($( ( $( ($ty:ident, $md:ident) ),* ) ),*) => {
         $(
-            impl<'cl, $($ty: CuMsgPayload + 'cl),*> CuMsgPack<'cl> for ( $( &'cl CuMsg<$ty>, )* ) {}
+            impl<'cl, $( $ty: CuMsgPayload + 'cl, $md: cu29_traits::Metadata ),*> CuMsgPack<'cl> for (
+                $( &'cl CuStampedData<$ty, $md>, )*
+            ) {}
         )*
     };
 }
 
-impl<'cl, T: CuMsgPayload> CuMsgPack<'cl> for (&'cl CuMsg<T>,) {}
-impl<'cl, T: CuMsgPayload> CuMsgPack<'cl> for &'cl CuMsg<T> {}
-impl<'cl, T: CuMsgPayload> CuMsgPack<'cl> for (&'cl mut CuMsg<T>,) {}
-impl<'cl, T: CuMsgPayload> CuMsgPack<'cl> for &'cl mut CuMsg<T> {}
+impl<'cl, T: CuMsgPayload, M: Metadata> CuMsgPack<'cl> for (&'cl CuStampedData<T, M>,) {}
+impl<'cl, T: CuMsgPayload, M: Metadata> CuMsgPack<'cl> for &'cl CuStampedData<T, M> {}
+impl<'cl, T: CuMsgPayload, M: Metadata> CuMsgPack<'cl> for (&'cl mut CuStampedData<T, M>,) {}
+impl<'cl, T: CuMsgPayload, M: Metadata> CuMsgPack<'cl> for &'cl mut CuStampedData<T, M> {}
 impl CuMsgPack<'_> for () {}
 
 // Apply the macro to generate implementations for tuple sizes up to 5
 impl_cu_msg_pack! {
-    (T1, T2), (T1, T2, T3), (T1, T2, T3, T4), (T1, T2, T3, T4, T5) // TODO: continue if necessary
+    ((T1, M1), (T2, M2)),
+    ((T1, M1), (T2, M2), (T3, M3)),
+    ((T1, M1), (T2, M2), (T3, M3), (T4, M4)),
+    ((T1, M1), (T2, M2), (T3, M3), (T4, M4), (T5, M5))
 }
 
 // A convenience macro to get from a payload or a list of payloads to a proper CuMsg or CuMsgPack
@@ -44,11 +52,11 @@ impl_cu_msg_pack! {
 #[macro_export]
 macro_rules! input_msg {
     ($lifetime:lifetime, $ty:ty) => {
-        &$lifetime CuMsg<$ty>
+        &$lifetime CuStampedData<$ty, CuMsgMetadata>
     };
     ($lifetime:lifetime, $($ty:ty),*) => {
         (
-            $( &$lifetime CuMsg<$ty>, )*
+            $( &$lifetime CuStampedData<$ty, CuMsgMetadata>, )*
         )
     };
 }
@@ -57,22 +65,21 @@ macro_rules! input_msg {
 #[macro_export]
 macro_rules! output_msg {
     ($lifetime:lifetime, $ty:ty) => {
-        &$lifetime mut CuMsg<$ty>
+        &$lifetime mut CuStampedData<$ty, CuMsgMetadata>
     };
 }
 
-/// CuMsgMetadata is a structure that contains metadata common to all CuMsgs.
+/// CuMsgMetadata is a structure that contains metadata common to all CuStampedDataSet.
 #[derive(Debug, Clone, bincode::Encode, bincode::Decode, Serialize, Deserialize)]
 pub struct CuMsgMetadata {
     /// The time range used for the processing of this message
     pub process_time: PartialCuTimeRange,
-    /// The time of validity of the message.
-    /// It can be undefined (None), one measure point or a range of measures (TimeRange).
-    pub tov: Tov,
     /// A small string for real time feedback purposes.
     /// This is useful for to display on the field when the tasks are operating correctly.
     pub status_txt: CuCompactString,
 }
+
+impl cu29_traits::Metadata for CuMsgMetadata {}
 
 impl CuMsgMetadata {
     pub fn set_status(&mut self, status: impl ToCompactString) {
@@ -83,10 +90,6 @@ impl CuMsgMetadata {
 impl cu29_traits::CuMsgMetadataTrait for CuMsgMetadata {
     fn process_time(&self) -> PartialCuTimeRange {
         self.process_time
-    }
-
-    fn tov(&self) -> Tov {
-        self.tov
     }
 
     fn status_txt(&self) -> &CuCompactString {
@@ -106,35 +109,41 @@ impl Display for CuMsgMetadata {
 
 /// CuMsg is the envelope holding the msg payload and the metadata between tasks.
 #[derive(Default, Debug, Clone, bincode::Encode, bincode::Decode, Serialize)]
-pub struct CuMsg<T>
+pub struct CuStampedData<T, M>
 where
     T: CuMsgPayload,
+    M: cu29_traits::Metadata,
 {
     /// This payload is the actual data exchanged between tasks.
     payload: Option<T>,
 
+    /// The time of validity of the message.
+    /// It can be undefined (None), one measure point or a range of measures (TimeRange).
+    pub tov: Tov,
+
     /// This metadata is the data that is common to all messages.
-    pub metadata: CuMsgMetadata,
+    pub metadata: M,
 }
 
 impl Default for CuMsgMetadata {
     fn default() -> Self {
         CuMsgMetadata {
             process_time: PartialCuTimeRange::default(),
-            tov: Tov::default(),
             status_txt: CuCompactString(CompactString::with_capacity(COMPACT_STRING_CAPACITY)),
         }
     }
 }
 
-impl<T> CuMsg<T>
+impl<T, M> CuStampedData<T, M>
 where
     T: CuMsgPayload,
+    M: Metadata,
 {
     pub fn new(payload: Option<T>) -> Self {
-        CuMsg {
+        CuStampedData {
             payload,
-            metadata: CuMsgMetadata::default(),
+            tov: Tov::default(),
+            metadata: M::default(),
         }
     }
     pub fn payload(&self) -> Option<&T> {
@@ -154,20 +163,29 @@ where
     }
 }
 
-impl<T> ErasedCuMsg for CuMsg<T>
+impl<T, M> ErasedCuStampedData for CuStampedData<T, M>
 where
     T: CuMsgPayload,
+    M: CuMsgMetadataTrait + Metadata,
 {
-    fn metadata(&self) -> &dyn cu29_traits::CuMsgMetadataTrait {
-        &self.metadata
-    }
-
     fn payload(&self) -> Option<&dyn erased_serde::Serialize> {
         self.payload
             .as_ref()
             .map(|p| p as &dyn erased_serde::Serialize)
     }
+
+    fn tov(&self) -> Tov {
+        self.tov
+    }
+
+    fn metadata(&self) -> &dyn CuMsgMetadataTrait {
+        &self.metadata
+    }
 }
+
+/// This is the robotics message type for Copper with the correct Metadata type
+/// that will be used by the runtime.
+pub type CuMsg<T> = CuStampedData<T, CuMsgMetadata>;
 
 /// The internal state of a task needs to be serializable
 /// so the framework can take a snapshot of the task graph.

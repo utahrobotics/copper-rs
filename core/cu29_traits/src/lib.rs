@@ -80,31 +80,31 @@ pub enum UnifiedLogType {
     FrozenTasks,       // Log of all frozen state of the tasks.
     LastEntry,         // This is a special entry that is used to signal the end of the log.
 }
+/// Represent the minimum set of traits to be usable as Metadata in Copper.
+pub trait Metadata: Default + Debug + Clone + Encode + Decode<()> + Serialize {}
+
+impl Metadata for () {}
 
 /// Key metadata piece attached to every message in Copper.
 pub trait CuMsgMetadataTrait {
     /// The time range used for the processing of this message
     fn process_time(&self) -> PartialCuTimeRange;
 
-    /// The time of validity ie. matching time in the real world of this measure or
-    /// computation derived from those measures.
-    /// It can be undefined (None), one measure point or a range of measures (TimeRange).
-    fn tov(&self) -> Tov;
-
     /// Small status text for user UI to get the realtime state of task (max 24 chrs)
     fn status_txt(&self) -> &CuCompactString;
 }
 
-/// A generic trait to expose the generated CuMsgs from the task graph.
-pub trait ErasedCuMsg {
-    fn metadata(&self) -> &dyn CuMsgMetadataTrait;
+/// A generic trait to expose the generated CuStampedDataSet from the task graph.
+pub trait ErasedCuStampedData {
     fn payload(&self) -> Option<&dyn erased_serde::Serialize>;
+    fn tov(&self) -> Tov;
+    fn metadata(&self) -> &dyn CuMsgMetadataTrait;
 }
 
-/// Trait to get a vector of type-erased CuMsgs
+/// Trait to get a vector of type-erased CuStampedDataSet
 /// This is used for generic serialization of the copperlists
-pub trait ErasedCuMsgs {
-    fn cumsgs(&self) -> Vec<&dyn ErasedCuMsg>;
+pub trait ErasedCuStampedDataSet {
+    fn cumsgs(&self) -> Vec<&dyn ErasedCuStampedData>;
 }
 
 /// Trait to trace back from the CopperList the origin of the messages
@@ -114,13 +114,18 @@ pub trait MatchingTasks {
 
 /// A CopperListTuple needs to be encodable, decodable and fixed size in memory.
 pub trait CopperListTuple:
-    bincode::Encode + bincode::Decode<()> + Debug + Serialize + ErasedCuMsgs + MatchingTasks
+    bincode::Encode + bincode::Decode<()> + Debug + Serialize + ErasedCuStampedDataSet + MatchingTasks
 {
 } // Decode forces Sized already
 
 // Also anything that follows this contract can be a payload (blanket implementation)
 impl<T> CopperListTuple for T where
-    T: bincode::Encode + bincode::Decode<()> + Debug + Serialize + ErasedCuMsgs + MatchingTasks
+    T: bincode::Encode
+        + bincode::Decode<()>
+        + Debug
+        + Serialize
+        + ErasedCuStampedDataSet
+        + MatchingTasks
 {
 }
 
