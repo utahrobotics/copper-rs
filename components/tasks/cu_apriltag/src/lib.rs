@@ -33,11 +33,8 @@ const CY: f64 = 520.0;
 #[cfg(not(windows))]
 const FAMILY: &str = "tag16h5";
 
-pub type ImageWithId = (Box<String>, CuImage<Vec<u8>>);
-
 #[derive(Default, Debug, Clone, Encode)]
 pub struct AprilTagDetections {
-    pub camera_id: Box<String>,
     pub ids: CuArrayVec<usize, MAX_DETECTIONS>,
     pub poses: CuArrayVec<CuPose<f32>, MAX_DETECTIONS>,
     pub decision_margins: CuArrayVec<f32, MAX_DETECTIONS>,
@@ -48,15 +45,14 @@ impl Decode<()> for AprilTagDetections {
         let ids = CuArrayVec::<usize, MAX_DETECTIONS>::decode(decoder)?;
         let poses = CuArrayVec::<CuPose<f32>, MAX_DETECTIONS>::decode(decoder)?;
         let decision_margins = CuArrayVec::<f32, MAX_DETECTIONS>::decode(decoder)?;
-        let camera_id: Box<String> = Box::decode(decoder)?;
         Ok(AprilTagDetections {
             ids,
             poses,
             decision_margins,
-            camera_id
         })
     }
 }
+
 // implement serde support for AprilTagDetections
 // This is so it can be logged with debug!.
 impl Serialize for AprilTagDetections {
@@ -64,8 +60,7 @@ impl Serialize for AprilTagDetections {
         let CuArrayVec(ids) = &self.ids;
         let CuArrayVec(poses) = &self.poses;
         let CuArrayVec(decision_margins) = &self.decision_margins;
-        let camera_id= &self.camera_id;
-        let mut tup = serializer.serialize_tuple(ids.len() + 1)?;
+        let mut tup = serializer.serialize_tuple(ids.len())?;
 
         ids.iter()
             .zip(poses.iter())
@@ -74,7 +69,7 @@ impl Serialize for AprilTagDetections {
             .for_each(|(id, pose, margin)| {
                 tup.serialize_element(&(id, pose, margin)).unwrap();
             });
-        tup.serialize_element(camera_id)?;
+
         tup.end()
     }
 }
@@ -90,7 +85,7 @@ impl<'de> Deserialize<'de> for AprilTagDetections {
             type Value = AprilTagDetections;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a tuple of (id, pose, decision_margin) and camera_id")
+                formatter.write_str("a tuple of (id, pose, decision_margin)")
             }
 
             fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
@@ -98,25 +93,19 @@ impl<'de> Deserialize<'de> for AprilTagDetections {
                 A: serde::de::SeqAccess<'de>,
             {
                 let mut detections = AprilTagDetections::new();
-                for _ in 0..MAX_DETECTIONS {
-                    if let Some((id, pose, decision_margin)) = seq.next_element()? {
-                        let CuArrayVec(ids) = &mut detections.ids;
-                        ids.push(id);
-                        let CuArrayVec(poses) = &mut detections.poses;
-                        poses.push(pose);
-                        let CuArrayVec(decision_margins) = &mut detections.decision_margins;
-                        decision_margins.push(decision_margin);
-                    } else {
-                        break;
-                    }
+                while let Some((id, pose, decision_margin)) = seq.next_element()? {
+                    let CuArrayVec(ids) = &mut detections.ids;
+                    ids.push(id);
+                    let CuArrayVec(poses) = &mut detections.poses;
+                    poses.push(pose);
+                    let CuArrayVec(decision_margins) = &mut detections.decision_margins;
+                    decision_margins.push(decision_margin);
                 }
-                let camera_id = seq.next_element()?.ok_or_else(|| serde::de::Error::invalid_length(MAX_DETECTIONS, &self))?;
-                detections.camera_id = camera_id;
                 Ok(detections)
             }
         }
 
-        deserializer.deserialize_tuple(MAX_DETECTIONS + 1, AprilTagDetectionsVisitor)
+        deserializer.deserialize_tuple(MAX_DETECTIONS, AprilTagDetectionsVisitor)
     }
 }
 
@@ -145,17 +134,10 @@ impl AprilTagDetections {
 pub struct AprilTags {
     detector: Detector,
     tag_params: TagParams,
-    scratch: Vec<u8>,
-    camera_id: Box<String>,
 }
 
 #[cfg(not(unix))]
 pub struct AprilTags {}
-
-#[cfg(not(windows))]
-use jpeg_decoder::{Decoder as JpegDecoder, PixelFormat as JpegPixelFormat};
-#[cfg(not(windows))]
-use std::io::Cursor;
 
 #[cfg(not(windows))]
 fn image_from_cuimage<A>(cu_image: &CuImage<A>) -> ManuallyDrop<Image>
@@ -170,20 +152,6 @@ where
             width: cu_image.format.width as i32,
             height: cu_image.format.height as i32,
             stride: cu_image.format.stride as i32,
-        });
-        let ptr = Box::into_raw(low_level_img);
-        ManuallyDrop::new(Image::from_raw(ptr))
-    }
-}
-
-#[cfg(not(windows))]
-fn image_from_raw_parts(ptr: *mut u8, width: u32, height: u32, stride: u32) -> ManuallyDrop<Image> {
-    unsafe {
-        let low_level_img = Box::new(image_u8_t {
-            buf: ptr,
-            width: width as i32,
-            height: height as i32,
-            stride: stride as i32,
         });
         let ptr = Box::into_raw(low_level_img);
         ManuallyDrop::new(Image::from_raw(ptr))
@@ -214,11 +182,8 @@ impl<'cl> CuTask<'cl> for AprilTags {
     }
 }
 
-// pub type ImageWithId = (Box<String>, CuImage<Vec<u8>>);
-
 #[cfg(not(windows))]
 impl<'cl> CuTask<'cl> for AprilTags {
-    // camera_id, image
     type Input = input_msg!('cl, CuImage<Vec<u8>>);
     type Output = output_msg!('cl, AprilTagDetections);
 
@@ -247,16 +212,9 @@ impl<'cl> CuTask<'cl> for AprilTags {
                 .add_family_bits(family, bits_corrected as usize)
                 .build()
                 .unwrap();
-            let camera_id = if let Some(id) = config.get::<String>("camera_id") {
-                Box::new(id)
-            } else {
-                Box::new(String::new())
-            };
             return Ok(Self {
                 detector,
                 tag_params,
-                scratch: Vec::new(),
-                camera_id,
             });
         }
         Ok(Self {
@@ -271,8 +229,6 @@ impl<'cl> CuTask<'cl> for AprilTags {
                 cy: CY,
                 tagsize: TAG_SIZE,
             },
-            scratch: Vec::new(),
-            camera_id: Box::new(String::new()),
         })
     }
 
@@ -284,121 +240,9 @@ impl<'cl> CuTask<'cl> for AprilTags {
     ) -> CuResult<()> {
         let mut result = AprilTagDetections::new();
         if let Some(payload) = input.payload() {
-            // Set camera ID either from config or leave empty
-            result.camera_id = self.camera_id.clone();
-            let payload = payload;
-            // Fast grayscale conversion / extraction based on pixel format
-            let pixel_format = std::str::from_utf8(&payload.format.pixel_format)
-                .unwrap_or("")
-                .trim_end_matches('\0');
-
-            let image = match pixel_format {
-                // Already 8-bit luma plane – no conversion needed.
-                "GRAY" | "NV12" => image_from_cuimage(payload),
-
-                // YUYV 4:2:2 – extract every other byte (Y channel)
-                "YUYV" => {
-                    let width = payload.format.width as usize;
-                    let height = payload.format.height as usize;
-                    let src_stride = payload.format.stride as usize;
-
-                    let required = width * height;
-                    if self.scratch.len() < required {
-                        self.scratch.resize(required, 0);
-                    }
-
-                    payload.buffer_handle.with_inner(|raw_buffer| {
-                        let src: &[u8] = raw_buffer;
-                        for y in 0..height {
-                            let src_row = &src[y * src_stride..y * src_stride + src_stride];
-                            let dst_row = &mut self.scratch[y * width..(y + 1) * width];
-                            for x in 0..width {
-                                // Y is stored at even indices (U0 Y0 V0 Y1)
-                                dst_row[x] = src_row[x * 2];
-                            }
-                        }
-                    });
-
-                    image_from_raw_parts(
-                        self.scratch.as_mut_ptr(),
-                        payload.format.width,
-                        payload.format.height,
-                        payload.format.width, // stride == width for luma image
-                    )
-                }
-                // MJPEG / JPEG – decode compressed bitstream to grayscale.
-                "MJPG" | "JPEG" | "JPG" => {
-                    let jpeg_bytes = payload.buffer_handle.with_inner(|raw| raw.to_vec());
-
-                    let mut decoder = JpegDecoder::new(Cursor::new(jpeg_bytes));
-                    let pixels = match decoder.decode() {
-                        Ok(p) => p,
-                        Err(e) => {
-                            println!(
-                                "[cu_apriltag] JPEG decode failed: {e}, skipping detection."
-                            );
-                            output.metadata.tov = input.metadata.tov;
-                            output.set_payload(result);
-                            return Ok(());
-                        }
-                    };
-
-                    let info = decoder.info().ok_or_else(|| {
-                        CuError::from("jpeg-decoder missing info after decode")
-                    })?;
-
-                    let (width, height) = (info.width as usize, info.height as usize);
-
-                    // Ensure scratch buffer size
-                    let required = width * height;
-                    if self.scratch.len() < required {
-                        self.scratch.resize(required, 0);
-                    }
-
-                    match info.pixel_format {
-                        JpegPixelFormat::L8 => {
-                            self.scratch[..required].copy_from_slice(&pixels[..required]);
-                        }
-                        JpegPixelFormat::RGB24 => {
-                            // Convert RGB to grayscale using BT.601 luma approximation
-                            for i in 0..required {
-                                let r = pixels[3 * i] as u32;
-                                let g = pixels[3 * i + 1] as u32;
-                                let b = pixels[3 * i + 2] as u32;
-                                self.scratch[i] = ((r * 299 + g * 587 + b * 114) / 1000) as u8;
-                            }
-                        }
-                        other => {
-                            return Err(CuError::new_with_cause(
-                                "Unsupported JPEG pixel format",
-                                std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    format!("Unsupported JPEG pixel format: {other:?}"),
-                                ),
-                            ));
-                        }
-                    }
-
-                    image_from_raw_parts(
-                        self.scratch.as_mut_ptr(),
-                        width as u32,
-                        height as u32,
-                        width as u32,
-                    )
-                }
-                // Unsupported / unrecognised formats – skip detection gracefully.
-                other => {
-                    return Err(CuError::new_with_cause(
-                        "Unsupported pixel format", 
-                        std::io::Error::new(std::io::ErrorKind::Other, 
-                        other))
-                    );
-                }
-            };
-
+            let image = image_from_cuimage(payload);
             let detections = self.detector.detect(&image);
             for detection in detections {
-
                 if let Some(aprilpose) = detection.estimate_tag_pose(&self.tag_params) {
                     let translation = aprilpose.translation();
                     let rotation = aprilpose.rotation();
@@ -493,6 +337,7 @@ mod tests {
             let detections = detections
                 .filtered_by_decision_margin(150.0)
                 .collect::<Vec<_>>();
+
             assert_eq!(detections.len(), 1);
             assert_eq!(detections[0].0, 4);
             return Ok(());
