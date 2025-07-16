@@ -207,6 +207,45 @@ impl Transform3D<f64> {
     }
 }
 
+
+pub trait Transform3DCast {
+    fn cast(&self) -> Transform3D<f64>;
+}
+
+impl Transform3DCast for Transform3D<f32> {
+    fn cast(&self) -> Transform3D<f64> {
+        let mat_f32 = self.to_matrix();
+        let mat_f64: [[f64; 4]; 4] = [
+            [
+                mat_f32[0][0] as f64,
+                mat_f32[0][1] as f64,
+                mat_f32[0][2] as f64,
+                mat_f32[0][3] as f64,
+            ],
+            [
+                mat_f32[1][0] as f64,
+                mat_f32[1][1] as f64,
+                mat_f32[1][2] as f64,
+                mat_f32[1][3] as f64,
+            ],
+            [
+                mat_f32[2][0] as f64,
+                mat_f32[2][1] as f64,
+                mat_f32[2][2] as f64,
+                mat_f32[2][3] as f64,
+            ],
+            [
+                mat_f32[3][0] as f64,
+                mat_f32[3][1] as f64,
+                mat_f32[3][2] as f64,
+                mat_f32[3][3] as f64,
+            ],
+        ];
+        Transform3D::from_matrix(mat_f64)
+    }
+}
+
+
 impl Transform3D<f32> {
     pub fn translation(&self) -> [Length32; 3] {
         let mat = self.to_matrix();
@@ -1043,5 +1082,38 @@ mod tests {
         assert_eq!(mat_transposed.w_axis.x, 5.0);
         assert_eq!(mat_transposed.w_axis.y, 6.0);
         assert_eq!(mat_transposed.w_axis.z, 7.0);
+    }
+
+    #[test]
+    fn test_transform3d_cast() {
+        // Create a Transform3D<f32> with some test values
+        let transform_f32 = Transform3D::<f32>::from_matrix([
+            [1.0, 0.5, 0.25, 2.5],
+            [0.75, 1.0, 0.125, 3.25],
+            [0.375, 0.625, 1.0, 4.125],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+
+        // Cast to f64
+        let transform_f64 = transform_f32.cast();
+
+        // Verify the cast preserves the values
+        let mat_f32 = transform_f32.to_matrix();
+        let mat_f64 = transform_f64.to_matrix();
+
+        let epsilon = 1e-10;
+        for i in 0..4 {
+            for j in 0..4 {
+                let expected = mat_f32[i][j] as f64;
+                assert!(
+                    (mat_f64[i][j] - expected).abs() < epsilon,
+                    "Element at [{},{}] differs: {} vs expected {}",
+                    i,
+                    j,
+                    mat_f64[i][j],
+                    expected
+                );
+            }
+        }
     }
 }
