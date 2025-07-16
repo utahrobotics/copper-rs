@@ -35,6 +35,7 @@ const FAMILY: &str = "tag16h5";
 
 #[derive(Default, Debug, Clone, Encode)]
 pub struct AprilTagDetections {
+    pub camera_id: Box<String>,
     pub ids: CuArrayVec<usize, MAX_DETECTIONS>,
     pub poses: CuArrayVec<CuPose<f32>, MAX_DETECTIONS>,
     pub decision_margins: CuArrayVec<f32, MAX_DETECTIONS>,
@@ -45,7 +46,9 @@ impl Decode<()> for AprilTagDetections {
         let ids = CuArrayVec::<usize, MAX_DETECTIONS>::decode(decoder)?;
         let poses = CuArrayVec::<CuPose<f32>, MAX_DETECTIONS>::decode(decoder)?;
         let decision_margins = CuArrayVec::<f32, MAX_DETECTIONS>::decode(decoder)?;
+        let camera_id: Box<String> = Box::decode(decoder)?;
         Ok(AprilTagDetections {
+            camera_id,
             ids,
             poses,
             decision_margins,
@@ -60,7 +63,9 @@ impl Serialize for AprilTagDetections {
         let CuArrayVec(ids) = &self.ids;
         let CuArrayVec(poses) = &self.poses;
         let CuArrayVec(decision_margins) = &self.decision_margins;
-        let mut tup = serializer.serialize_tuple(ids.len())?;
+        let camera_id= &self.camera_id;
+
+        let mut tup = serializer.serialize_tuple(ids.len() + 1)?;
 
         ids.iter()
             .zip(poses.iter())
@@ -69,7 +74,7 @@ impl Serialize for AprilTagDetections {
             .for_each(|(id, pose, margin)| {
                 tup.serialize_element(&(id, pose, margin)).unwrap();
             });
-
+        tup.serialize_element(camera_id)?;
         tup.end()
     }
 }
@@ -85,7 +90,7 @@ impl<'de> Deserialize<'de> for AprilTagDetections {
             type Value = AprilTagDetections;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a tuple of (id, pose, decision_margin)")
+                formatter.write_str("a tuple of (id, pose, decision_margin) and camera_id")     
             }
 
             fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
@@ -101,11 +106,14 @@ impl<'de> Deserialize<'de> for AprilTagDetections {
                     let CuArrayVec(decision_margins) = &mut detections.decision_margins;
                     decision_margins.push(decision_margin);
                 }
+                let camera_id = seq.next_element()?.ok_or_else(|| serde::de::Error::invalid_length(MAX_DETECTIONS, &self))?;
+
+                detections.camera_id = camera_id;
                 Ok(detections)
             }
         }
 
-        deserializer.deserialize_tuple(MAX_DETECTIONS, AprilTagDetectionsVisitor)
+        deserializer.deserialize_tuple(MAX_DETECTIONS + 1, AprilTagDetectionsVisitor)
     }
 }
 
@@ -134,6 +142,7 @@ impl AprilTagDetections {
 pub struct AprilTags {
     detector: Detector,
     tag_params: TagParams,
+    camera_id: Box<String>,
 }
 
 #[cfg(not(unix))]
@@ -208,6 +217,12 @@ impl<'cl> CuTask<'cl> for AprilTags {
                 tagsize,
             };
 
+            let camera_id = if let Some(id) = config.get::<String>("camera_id") {
+                Box::new(id)
+            } else {
+                Box::new(String::new())
+            };
+
             let detector = DetectorBuilder::default()
                 .add_family_bits(family, bits_corrected as usize)
                 .build()
@@ -215,6 +230,7 @@ impl<'cl> CuTask<'cl> for AprilTags {
             return Ok(Self {
                 detector,
                 tag_params,
+                camera_id
             });
         }
         Ok(Self {
@@ -229,6 +245,7 @@ impl<'cl> CuTask<'cl> for AprilTags {
                 cy: CY,
                 tagsize: TAG_SIZE,
             },
+            camera_id: Box::new(String::new())
         })
     }
 
