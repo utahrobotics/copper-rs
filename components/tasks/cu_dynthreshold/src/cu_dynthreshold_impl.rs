@@ -110,6 +110,7 @@ pub struct DynThreshold {
     height: u32,
     width: u32,
     block_radius: u32,
+    process_counter: u32,
 }
 
 impl Freezable for DynThreshold {}
@@ -137,15 +138,20 @@ impl<'cl> CuTask<'cl> for DynThreshold {
             width,
             height,
             block_radius,
+            process_counter: 0,
         })
     }
 
     fn process(
         &mut self,
-        _clock: &RobotClock,
+        clock: &RobotClock,
         input: Self::Input,
         output: Self::Output,
     ) -> CuResult<()> {
+        self.process_counter += 1;
+        if self.process_counter % 300 == 0 {
+            info!("DYN_THRESHOLD_LATENCY: counter: {}, clock.now(): {} us", self.process_counter, clock.now().as_nanos() /1000);
+        }
         if input.payload().is_none() {
             debug!("DynThreshold: No payload in input message, skipping.");
             return Ok(());

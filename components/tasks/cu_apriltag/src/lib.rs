@@ -143,6 +143,7 @@ pub struct AprilTags {
     detector: Detector,
     tag_params: TagParams,
     camera_id: Box<String>,
+    process_counter: u32
 }
 
 #[cfg(not(unix))]
@@ -230,7 +231,8 @@ impl<'cl> CuTask<'cl> for AprilTags {
             return Ok(Self {
                 detector,
                 tag_params,
-                camera_id
+                camera_id,
+                process_counter: 0
             });
         }
         Ok(Self {
@@ -245,16 +247,21 @@ impl<'cl> CuTask<'cl> for AprilTags {
                 cy: CY,
                 tagsize: TAG_SIZE,
             },
-            camera_id: Box::new(String::new())
+            camera_id: Box::new(String::new()),
+            process_counter: 0
         })
     }
 
     fn process(
         &mut self,
-        _clock: &RobotClock,
+        clock: &RobotClock,
         input: Self::Input,
         output: Self::Output,
     ) -> CuResult<()> {
+        self.process_counter += 1;
+        if self.process_counter % 300 == 0 {
+            info!("CU_APRILTAG_LATENCY: counter: {}, clock.now(): {} us", self.process_counter, clock.now().as_nanos() /1000);
+        }
         let mut result = AprilTagDetections::new();
         if let Some(payload) = input.payload() {
             let image = image_from_cuimage(payload);
