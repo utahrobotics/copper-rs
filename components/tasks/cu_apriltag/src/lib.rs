@@ -7,6 +7,8 @@ use apriltag::{Detector, DetectorBuilder, Family, Image, TagParams};
 use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError};
 #[cfg(unix)]
 use std::thread;
+#[cfg(unix)]
+use libc;
 
 #[cfg(unix)]
 use apriltag_sys::image_u8_t;
@@ -246,12 +248,17 @@ impl<'cl> CuTask<'cl> for AprilTags {
             let worker_family_cfg = family_cfg.clone();
             let worker_camera_id = camera_id.clone();
             let worker = thread::spawn(move || {
+                // lower priority of this worker thread (nice +5)
+                #[allow(unused_unsafe)]
+                unsafe {
+                    libc::setpriority(libc::PRIO_PROCESS, 0, 5);
+                }
                 // Build detector inside the thread without capturing non-Send types
                 let family: Family = worker_family_cfg.parse().unwrap();
                 let mut detector = DetectorBuilder::default()
-                    .add_family_bits(family, bits_corrected as usize)
-                    .build()
-                    .unwrap();
+                .add_family_bits(family, bits_corrected as usize)
+                .build()
+                .unwrap();
 
                 for job in img_rx {
                     let mut result = AprilTagDetections::new();
@@ -310,11 +317,11 @@ impl<'cl> CuTask<'cl> for AprilTags {
         let (det_tx, det_rx) = bounded::<AprilTagDetections>(2);
 
         let tag_params = TagParams {
-            fx: FX,
-            fy: FY,
-            cx: CX,
-            cy: CY,
-            tagsize: TAG_SIZE,
+                fx: FX,
+                fy: FY,
+                cx: CX,
+                cy: CY,
+                tagsize: TAG_SIZE,
         };
 
         let default_family_cfg = FAMILY.to_string();
@@ -323,6 +330,11 @@ impl<'cl> CuTask<'cl> for AprilTags {
         let worker_family_cfg = default_family_cfg.clone();
         let worker_camera_id = default_camera_id.clone();
         let worker = thread::spawn(move || {
+            // lower priority
+            #[allow(unused_unsafe)]
+            unsafe {
+                libc::setpriority(libc::PRIO_PROCESS, 0, 5);
+            }
             let family: Family = worker_family_cfg.parse().unwrap();
             let mut detector = DetectorBuilder::default()
                 .add_family_bits(family, 1)
@@ -330,7 +342,7 @@ impl<'cl> CuTask<'cl> for AprilTags {
                 .unwrap();
 
             for job in img_rx {
-                let mut result = AprilTagDetections::new();
+        let mut result = AprilTagDetections::new();
                 let cu_tmp = CuImage {
                     seq: 0,
                     format: job.format,
@@ -338,33 +350,33 @@ impl<'cl> CuTask<'cl> for AprilTags {
                 };
                 let image = image_from_cuimage(&cu_tmp);
                 let detections = detector.detect(&image);
-                for detection in detections {
+            for detection in detections {
                     if let Some(aprilpose) = detection.estimate_tag_pose(&tag_params) {
-                        let translation = aprilpose.translation();
-                        let rotation = aprilpose.rotation();
-                        let mut mat: [[f32; 4]; 4] = [[0.0, 0.0, 0.0, 0.0]; 4];
-                        mat[0][3] = translation.data()[0] as f32;
-                        mat[1][3] = translation.data()[1] as f32;
-                        mat[2][3] = translation.data()[2] as f32;
-                        mat[0][0] = rotation.data()[0] as f32;
-                        mat[0][1] = rotation.data()[3] as f32;
-                        mat[0][2] = rotation.data()[2 * 3] as f32;
-                        mat[1][0] = rotation.data()[1] as f32;
-                        mat[1][1] = rotation.data()[1 + 3] as f32;
-                        mat[1][2] = rotation.data()[1 + 2 * 3] as f32;
-                        mat[2][0] = rotation.data()[2] as f32;
-                        mat[2][1] = rotation.data()[2 + 3] as f32;
-                        mat[2][2] = rotation.data()[2 + 2 * 3] as f32;
+                    let translation = aprilpose.translation();
+                    let rotation = aprilpose.rotation();
+                    let mut mat: [[f32; 4]; 4] = [[0.0, 0.0, 0.0, 0.0]; 4];
+                    mat[0][3] = translation.data()[0] as f32;
+                    mat[1][3] = translation.data()[1] as f32;
+                    mat[2][3] = translation.data()[2] as f32;
+                    mat[0][0] = rotation.data()[0] as f32;
+                    mat[0][1] = rotation.data()[3] as f32;
+                    mat[0][2] = rotation.data()[2 * 3] as f32;
+                    mat[1][0] = rotation.data()[1] as f32;
+                    mat[1][1] = rotation.data()[1 + 3] as f32;
+                    mat[1][2] = rotation.data()[1 + 2 * 3] as f32;
+                    mat[2][0] = rotation.data()[2] as f32;
+                    mat[2][1] = rotation.data()[2 + 3] as f32;
+                    mat[2][2] = rotation.data()[2 + 2 * 3] as f32;
 
-                        let pose = CuPose::<f32>::from_matrix(mat);
+                    let pose = CuPose::<f32>::from_matrix(mat);
                         let CuArrayVec(poses) = &mut result.poses;
                         poses.push(pose);
                         let CuArrayVec(decision_margins) = &mut result.decision_margins;
                         decision_margins.push(detection.decision_margin());
-                        let CuArrayVec(ids) = &mut result.ids;
-                        ids.push(detection.id());
-                    }
+                    let CuArrayVec(ids) = &mut result.ids;
+                    ids.push(detection.id());
                 }
+            }
                 result.camera_id = worker_camera_id.clone();
                 let _ = det_tx.try_send(result);
             }
@@ -401,7 +413,7 @@ impl<'cl> CuTask<'cl> for AprilTags {
         match self.det_rx.try_recv() {
             Ok(mut det) => {
                 det.camera_id = self.camera_id.clone();
-                output.tov = input.tov;
+        output.tov = input.tov;
                 output.set_payload(det);
             }
             Err(TryRecvError::Empty) => {
