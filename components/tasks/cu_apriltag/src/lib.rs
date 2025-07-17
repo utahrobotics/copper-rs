@@ -256,13 +256,9 @@ impl<'cl> CuTask<'cl> for AprilTags {
                 // Build detector inside the thread without capturing non-Send types
                 let family: Family = worker_family_cfg.parse().unwrap();
                 let mut detector = DetectorBuilder::default()
-                    .add_family_bits(family, bits_corrected as usize)
-                    .build()
-                    .unwrap();
-
-                // Performance settings
-                detector.set_decimation(2.0);
-                detector.set_refine_edges(false);
+                .add_family_bits(family, bits_corrected as usize)
+                .build()
+                .unwrap();
 
                 for job in img_rx {
                     let mut result = AprilTagDetections::new();
@@ -344,10 +340,6 @@ impl<'cl> CuTask<'cl> for AprilTags {
                 .add_family_bits(family, 1)
                 .build()
                 .unwrap();
-
-            detector.set_decimation(2.0);
-            detector.set_refine_edges(false);
-            detector.set_thread_number(1);
 
             for job in img_rx {
         let mut result = AprilTagDetections::new();
