@@ -279,7 +279,7 @@ impl<'cl> CuTask<'cl> for AprilTags {
                     let start = Instant::now();
                     let detections = detector.detect(&image);
                     let elapsed_ms = start.elapsed().as_millis();
-                    if elapsed_ms > 40 {
+                    if elapsed_ms > 6 {
                         error!("APRILTAG detect() slow: {} ms", elapsed_ms);
                     }
                     for detection in detections {
