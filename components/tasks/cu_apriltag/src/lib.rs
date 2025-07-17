@@ -268,7 +268,6 @@ impl<'cl> CuTask<'cl> for AprilTags {
                 detector.set_thread_number(1);
 
                 for job in img_rx {
-                    let job_start = Instant::now();
                     let mut result = AprilTagDetections::new();
                     // Recreate Image from buffer
                     let cu_tmp = CuImage {
@@ -314,10 +313,6 @@ impl<'cl> CuTask<'cl> for AprilTags {
 
                     // Ignore send errors (main thread may have gone away)
                     let _ = det_tx.try_send(result);
-                    let total_ms = job_start.elapsed().as_millis();
-                    if total_ms > 10 {
-                        error!("APRILTAG worker total job time {} ms", total_ms);
-                    }
                 }
             });
 
@@ -363,7 +358,6 @@ impl<'cl> CuTask<'cl> for AprilTags {
             detector.set_thread_number(1);
 
             for job in img_rx {
-        let job_start = Instant::now();
         let mut result = AprilTagDetections::new();
                 let cu_tmp = CuImage {
                     seq: 0,
@@ -406,10 +400,6 @@ impl<'cl> CuTask<'cl> for AprilTags {
             }
                 result.camera_id = worker_camera_id.clone();
                 let _ = det_tx.try_send(result);
-                let total_ms = job_start.elapsed().as_millis();
-                if total_ms > 10 {
-                    error!("APRILTAG worker total job time {} ms", total_ms);
-                }
             }
         });
 
@@ -433,11 +423,6 @@ impl<'cl> CuTask<'cl> for AprilTags {
             info!("CU_APRILTAG_LATENCY: counter: {}, clock.now(): {} us", self.process_counter, clock.now().as_nanos() /1000);
         }
         if let Some(img) = input.payload() {
-            // log backlog size when queue is not empty
-            let backlog = self.img_tx.len();
-            if backlog > 0 {
-                error!("APRILTAG backlog len={}", backlog);
-            }
             let job = ImageJob {
                 format: img.format,
                 buffer: img.buffer_handle.clone(),
