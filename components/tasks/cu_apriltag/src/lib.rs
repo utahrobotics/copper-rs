@@ -4,7 +4,7 @@ use std::mem::ManuallyDrop;
 #[cfg(unix)]
 use apriltag::{Detector, DetectorBuilder, Family, Image, TagParams};
 #[cfg(unix)]
-use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{sync_channel, SyncSender, Receiver, TryRecvError};
 #[cfg(unix)]
 use std::thread;
 
@@ -144,7 +144,7 @@ impl AprilTagDetections {
 
 #[cfg(unix)]
 pub struct AprilTags {
-    img_tx: Sender<CuImage<Vec<u8>>>,
+    img_tx: SyncSender<CuImage<Vec<u8>>>,
     det_rx: Receiver<AprilTagDetections>,
     camera_id: Box<String>,
     process_counter: u32,
@@ -229,9 +229,9 @@ impl<'cl> CuTask<'cl> for AprilTags {
                 Box::new(String::new())
             };
 
-            // Create lock-free channels
-            let (img_tx, img_rx) = bounded::<CuImage<Vec<u8>>>(2);
-            let (det_tx, det_rx) = bounded::<AprilTagDetections>(2);
+            // Create channels
+            let (img_tx, img_rx) = sync_channel::<CuImage<Vec<u8>>>(1);
+            let (det_tx, det_rx) = std::sync::mpsc::channel::<AprilTagDetections>();
 
             // Spawn worker thread running the detection loop
             let worker_family_cfg = family_cfg.clone();
@@ -279,7 +279,7 @@ impl<'cl> CuTask<'cl> for AprilTags {
                     result.camera_id = worker_camera_id.clone();
 
                     // Ignore send errors (main thread may have gone away)
-                    let _ = det_tx.try_send(result);
+                    let _ = det_tx.send(result);
                 }
             });
 
@@ -292,8 +292,8 @@ impl<'cl> CuTask<'cl> for AprilTags {
             });
         }
         // Default configuration path
-        let (img_tx, img_rx) = bounded::<CuImage<Vec<u8>>>(2);
-        let (det_tx, det_rx) = bounded::<AprilTagDetections>(2);
+        let (img_tx, img_rx) = sync_channel::<CuImage<Vec<u8>>>(1);
+        let (det_tx, det_rx) = std::sync::mpsc::channel::<AprilTagDetections>();
 
         let tag_params = TagParams {
             fx: FX,
@@ -347,7 +347,7 @@ impl<'cl> CuTask<'cl> for AprilTags {
                     }
                 }
                 result.camera_id = worker_camera_id.clone();
-                let _ = det_tx.try_send(result);
+                let _ = det_tx.send(result);
             }
         });
 
