@@ -8,8 +8,6 @@ use crossbeam_channel::{bounded, Receiver, Sender, TryRecvError};
 #[cfg(unix)]
 use std::thread;
 #[cfg(unix)]
-use std::time::Instant;
-#[cfg(unix)]
 use libc;
 
 #[cfg(unix)]
@@ -265,7 +263,6 @@ impl<'cl> CuTask<'cl> for AprilTags {
                 // Performance settings
                 detector.set_decimation(2.0);
                 detector.set_refine_edges(false);
-                detector.set_thread_number(1);
 
                 for job in img_rx {
                     let mut result = AprilTagDetections::new();
@@ -276,12 +273,7 @@ impl<'cl> CuTask<'cl> for AprilTags {
                         buffer_handle: job.buffer.clone(),
                     };
                     let image = image_from_cuimage(&cu_tmp);
-                    let start = Instant::now();
                     let detections = detector.detect(&image);
-                    let elapsed_ms = start.elapsed().as_millis();
-                    if elapsed_ms > 40 {
-                        error!("APRILTAG detect() slow: {} ms", elapsed_ms);
-                    }
                     for detection in detections {
                         if let Some(aprilpose) = detection.estimate_tag_pose(&tag_params) {
                             let translation = aprilpose.translation();
@@ -365,12 +357,7 @@ impl<'cl> CuTask<'cl> for AprilTags {
                     buffer_handle: job.buffer.clone(),
                 };
                 let image = image_from_cuimage(&cu_tmp);
-                let start = Instant::now();
                 let detections = detector.detect(&image);
-                let elapsed_ms = start.elapsed().as_millis();
-                if elapsed_ms > 40 {
-                    error!("APRILTAG detect() slow: {} ms", elapsed_ms);
-                }
             for detection in detections {
                     if let Some(aprilpose) = detection.estimate_tag_pose(&tag_params) {
                     let translation = aprilpose.translation();
