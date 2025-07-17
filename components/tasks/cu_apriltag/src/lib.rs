@@ -315,7 +315,7 @@ impl<'cl> CuTask<'cl> for AprilTags {
                     // Ignore send errors (main thread may have gone away)
                     let _ = det_tx.try_send(result);
                     let total_ms = job_start.elapsed().as_millis();
-                    if total_ms > 10 {
+                    if total_ms > 5 {
                         error!("APRILTAG worker total job time {} ms", total_ms);
                     }
                 }
@@ -374,7 +374,7 @@ impl<'cl> CuTask<'cl> for AprilTags {
                 let start = Instant::now();
                 let detections = detector.detect(&image);
                 let elapsed_ms = start.elapsed().as_millis();
-                if elapsed_ms > 40 {
+                if elapsed_ms > 5 {
                     error!("APRILTAG detect() slow: {} ms", elapsed_ms);
                 }
             for detection in detections {
@@ -407,7 +407,7 @@ impl<'cl> CuTask<'cl> for AprilTags {
                 result.camera_id = worker_camera_id.clone();
                 let _ = det_tx.try_send(result);
                 let total_ms = job_start.elapsed().as_millis();
-                if total_ms > 10 {
+                if total_ms > 5 {
                     error!("APRILTAG worker total job time {} ms", total_ms);
                 }
             }
@@ -428,6 +428,8 @@ impl<'cl> CuTask<'cl> for AprilTags {
         input: Self::Input,
         output: Self::Output,
     ) -> CuResult<()> {
+        use std::time::Instant;
+        let p_start = Instant::now();
         self.process_counter += 1;
         if self.process_counter % 300 == 0 {
             info!("CU_APRILTAG_LATENCY: counter: {}, clock.now(): {} us", self.process_counter, clock.now().as_nanos() /1000);
@@ -442,7 +444,9 @@ impl<'cl> CuTask<'cl> for AprilTags {
                 format: img.format,
                 buffer: img.buffer_handle.clone(),
             };
-            let _ = self.img_tx.try_send(job);
+            if let Err(err) = self.img_tx.try_send(job) {
+                error!("APRILTAG process drop frame: {:?}", err);
+            }
         }
 
         // Try to get detection result.
@@ -458,6 +462,10 @@ impl<'cl> CuTask<'cl> for AprilTags {
             Err(TryRecvError::Disconnected) => {
                 return Err(CuError::from("AprilTag worker thread disconnected"));
             }
+        }
+        let p_elapsed = p_start.elapsed().as_micros();
+        if p_elapsed > 100 {
+            error!("APRILTAG process() slow: {} µs", p_elapsed);
         }
         Ok(())
     }
