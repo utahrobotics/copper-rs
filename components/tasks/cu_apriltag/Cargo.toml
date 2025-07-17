@@ -18,6 +18,7 @@ arrayvec = "0.7.6"
 cu-spatial-payloads = { path = "../../payloads/cu_spatial_payloads", version = "0.8.0" }
 cu-sensor-payloads = { path = "../../payloads/cu_sensor_payloads", version = "0.8.0" }
 jpeg-decoder = "0.3.0"
+crossbeam-channel = "0.5"
 
 [target.'cfg(unix)'.dependencies]
 apriltag = { path = "../../../apriltag-rust/apriltag" }
