@@ -16,8 +16,6 @@ use bincode::error::DecodeError;
 use cu29::bincode::{Decode, Encode};
 use cu29::prelude::*;
 use cu_sensor_payloads::CuImage;
-#[cfg(unix)]
-use cu_sensor_payloads::CuImageBufferFormat;
 use cu_spatial_payloads::Pose as CuPose;
 use serde::ser::SerializeTuple;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -145,15 +143,8 @@ impl AprilTagDetections {
 }
 
 #[cfg(unix)]
-#[derive(Clone)]
-struct ImageJob {
-    format: CuImageBufferFormat,
-    buffer: CuHandle<Vec<u8>>,
-}
-
-#[cfg(unix)]
 pub struct AprilTags {
-    img_tx: Sender<ImageJob>,
+    img_tx: Sender<CuImage<Vec<u8>>>,
     det_rx: Receiver<AprilTagDetections>,
     camera_id: Box<String>,
     process_counter: u32,
@@ -239,7 +230,7 @@ impl<'cl> CuTask<'cl> for AprilTags {
             };
 
             // Create lock-free channels
-            let (img_tx, img_rx) = bounded::<ImageJob>(2);
+            let (img_tx, img_rx) = bounded::<CuImage<Vec<u8>>>(2);
             let (det_tx, det_rx) = bounded::<AprilTagDetections>(2);
 
             // Spawn worker thread running the detection loop
@@ -253,15 +244,10 @@ impl<'cl> CuTask<'cl> for AprilTags {
                     .build()
                     .unwrap();
 
-                for job in img_rx {
+                for img in img_rx {
                     let mut result = AprilTagDetections::new();
-                    // Recreate Image from buffer
-                    let cu_tmp = CuImage {
-                        seq: 0,
-                        format: job.format,
-                        buffer_handle: job.buffer.clone(),
-                    };
-                    let image = image_from_cuimage(&cu_tmp);
+                    // Safe conversion from CuImage to apriltag Image
+                    let image = image_from_cuimage(&img);
                     let detections = detector.detect(&image);
                     for detection in detections {
                         if let Some(aprilpose) = detection.estimate_tag_pose(&tag_params) {
@@ -306,7 +292,7 @@ impl<'cl> CuTask<'cl> for AprilTags {
             });
         }
         // Default configuration path
-        let (img_tx, img_rx) = bounded::<ImageJob>(2);
+        let (img_tx, img_rx) = bounded::<CuImage<Vec<u8>>>(2);
         let (det_tx, det_rx) = bounded::<AprilTagDetections>(2);
 
         let tag_params = TagParams {
@@ -329,14 +315,9 @@ impl<'cl> CuTask<'cl> for AprilTags {
                 .build()
                 .unwrap();
 
-            for job in img_rx {
+            for img in img_rx {
                 let mut result = AprilTagDetections::new();
-                let cu_tmp = CuImage {
-                    seq: 0,
-                    format: job.format,
-                    buffer_handle: job.buffer.clone(),
-                };
-                let image = image_from_cuimage(&cu_tmp);
+                let image = image_from_cuimage(&img);
                 let detections = detector.detect(&image);
                 for detection in detections {
                     if let Some(aprilpose) = detection.estimate_tag_pose(&tag_params) {
@@ -390,11 +371,8 @@ impl<'cl> CuTask<'cl> for AprilTags {
             info!("CU_APRILTAG_LATENCY: counter: {}, clock.now(): {} us", self.process_counter, clock.now().as_nanos() /1000);
         }
         if let Some(img) = input.payload() {
-            let job = ImageJob {
-                format: img.format,
-                buffer: img.buffer_handle.clone(),
-            };
-            let _ = self.img_tx.try_send(job);
+            // cheap clone, buffer is wrapped in an arc
+            let _ = self.img_tx.try_send(img.clone());
         }
 
         // Try to get detection result.
