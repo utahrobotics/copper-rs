@@ -445,7 +445,7 @@ impl<'cl> CuTask<'cl> for AprilTags {
                 buffer: img.buffer_handle.clone(),
             };
             if let Err(err) = self.img_tx.try_send(job) {
-                error!("APRILTAG process drop frame: {:?}", err);
+                error!("APRILTAG process drop frame: {}", err.to_string());
             }
         }
 
