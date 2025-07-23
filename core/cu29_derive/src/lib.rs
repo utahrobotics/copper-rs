@@ -103,12 +103,12 @@ pub fn gen_cumsgs(config_path_lit: TokenStream) -> TokenStream {
             use cu29::bincode::de::Decoder;
             use cu29::bincode::error::DecodeError;
             use cu29::copperlist::CopperList;
-            use cu29::cutask::CuMsgMetadata;
-            use cu29::cutask::CuStampedData;
             use cu29::prelude::ErasedCuStampedData;
             use cu29::prelude::ErasedCuStampedDataSet;
             use cu29::prelude::MatchingTasks;
             use cu29::prelude::Serialize;
+            use cu29::prelude::CuMsg;
+            use cu29::prelude::CuMsgMetadata;
             #support
         }
         use cumsgs::CuStampedDataSet;
@@ -165,7 +165,7 @@ fn gen_culist_support(
             let index = syn::Index::from(*output_position);
             quote! {
                 #[allow(dead_code)]
-                pub fn #fn_name(&self) -> &CuStampedData<#payload_type, CuMsgMetadata> {
+                pub fn #fn_name(&self) -> &CuMsg<#payload_type> {
                     &self.0.#index
                 }
             }
@@ -229,13 +229,13 @@ fn gen_sim_support(runtime_plan: &CuExecutionLoop) -> proc_macro2::TokenStream {
                 let inputs: Vec<Type> = step
                     .input_msg_indices_types
                     .iter()
-                    .map(|(_, t)| parse_str::<Type>(format!("CuStampedData<{t}, CuMsgMetadata>").as_str()).unwrap())
+                    .map(|(_, t)| parse_str::<Type>(format!("CuMsg<{t}>").as_str()).unwrap())
                     .collect();
                 let output: Option<Type> = step
                     .output_msg_index_type
                     .as_ref()
-                    .map(|(_, t)| parse_str::<Type>(format!("CuStampedData<{t}, CuMsgMetadata>").as_str()).unwrap());
-                let no_output = parse_str::<Type>("CuStampedData<(), CuMsgMetadata>").unwrap();
+                    .map(|(_, t)| parse_str::<Type>(format!("CuMsg<{t}>").as_str()).unwrap());
+                let no_output = parse_str::<Type>("CuMsg<()>").unwrap();
                 let output = output.as_ref().unwrap_or(&no_output);
 
                 let inputs_type = if inputs.len() == 1 {
@@ -767,6 +767,8 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                                                 kf_manager.freeze_task(clid, &#task_instance)?;
                                                 #call_sim_callback
                                                 let cumsg_output = &mut msgs.#output_culist_index;
+                                                cumsg_output.metadata.task_id = #tid as u16;
+                                                cumsg_output.metadata.task_name = CuCompactString(CompactString::new(#mission_mod::TASKS_IDS[#tid]));
                                                 cumsg_output.metadata.process_time.start = clock.now().into();
                                                 let maybe_error = if doit {
                                                     #task_instance.process(clock, cumsg_output)
@@ -867,6 +869,8 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                                             let cumsg_input = #inputs_type;
                                             // This is the virtual output for the sink
                                             let cumsg_output = &mut msgs.#output_culist_index;
+                                            cumsg_output.metadata.task_id = #tid as u16;
+                                            cumsg_output.metadata.task_name = CuCompactString(CompactString::new(#mission_mod::TASKS_IDS[#tid]));
                                             cumsg_output.metadata.process_time.start = clock.now().into();
                                             let maybe_error = if doit {#task_instance.process(clock, cumsg_input)} else {Ok(())};
                                             cumsg_output.metadata.process_time.end = clock.now().into();
@@ -958,6 +962,8 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                                             #call_sim_callback
                                             let cumsg_input = #inputs_type;
                                             let cumsg_output = &mut msgs.#output_culist_index;
+                                            cumsg_output.metadata.task_id = #tid as u16;
+                                            cumsg_output.metadata.task_name = CuCompactString(CompactString::new(#mission_mod::TASKS_IDS[#tid]));
                                             cumsg_output.metadata.process_time.start = clock.now().into();
                                             let maybe_error = if doit {#task_instance.process(clock, cumsg_input, cumsg_output)} else {Ok(())};
                                             cumsg_output.metadata.process_time.end = clock.now().into();
@@ -1378,9 +1384,11 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                 use cu29::cutask::CuSrcTask;
                 use cu29::cutask::CuSinkTask;
                 use cu29::cutask::CuTask;
-                use cu29::cutask::CuStampedData;
+                use cu29::cutask::CuMsg;
                 use cu29::cutask::CuMsgMetadata;
                 use cu29::copperlist::CopperList;
+                use cu29::prelude::CuCompactString;
+                use cu29::prelude::CompactString;
                 use cu29::monitoring::CuMonitor; // Trait import.
                 use cu29::monitoring::CuTaskState;
                 use cu29::monitoring::Decision;
@@ -1550,7 +1558,7 @@ fn build_culist_tuple(all_msgs_types_in_culist_order: &[Type]) -> TypeTuple {
         parse_quote! { () }
     } else {
         parse_quote! {
-            ( #( CuStampedData<#all_msgs_types_in_culist_order, CuMsgMetadata> ),* )
+            ( #( CuMsg<#all_msgs_types_in_culist_order> ),* )
         }
     }
 }
@@ -1587,7 +1595,7 @@ fn build_culist_tuple_decode(all_msgs_types_in_culist_order: &[Type]) -> ItemImp
         .iter()
         .map(|i| {
             let t = &all_msgs_types_in_culist_order[*i];
-            quote! { CuStampedData::<#t, CuMsgMetadata>::decode(decoder)? }
+            quote! { CuMsg::<#t>::decode(decoder)? }
         })
         .collect();
 
@@ -1611,11 +1619,24 @@ fn build_culist_erasedcumsgs(all_msgs_types_in_culist_order: &[Type]) -> ItemImp
             quote! { &self.0.#idx as &dyn ErasedCuStampedData }
         })
         .collect();
+    let casted_fields_mut: Vec<_> = indices
+        .iter()
+        .map(|i| {
+            let idx = syn::Index::from(*i);
+            quote! { &mut self.0.#idx as &mut dyn ErasedCuStampedData }
+        })
+        .collect();
     parse_quote! {
         impl ErasedCuStampedDataSet for CuStampedDataSet {
             fn cumsgs(&self) -> Vec<&dyn ErasedCuStampedData> {
                 vec![
                     #(#casted_fields),*
+                ]
+            }
+
+            fn cumsgs_mut(&mut self) -> Vec<&mut dyn ErasedCuStampedData> {
+                vec![
+                    #(#casted_fields_mut),*
                 ]
             }
         }
