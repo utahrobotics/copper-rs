@@ -1,5 +1,9 @@
 #[cfg(unix)]
 use std::mem::ManuallyDrop;
+#[cfg(unix)]
+use std::sync::Arc;
+#[cfg(unix)]
+use std::thread::JoinHandle;
 
 #[cfg(unix)]
 use apriltag::{Detector, DetectorBuilder, Family, Image, TagParams};
@@ -9,6 +13,10 @@ use apriltag_sys::image_u8_t;
 
 use bincode::de::Decoder;
 use bincode::error::DecodeError;
+#[cfg(unix)]
+use crossbeam::atomic::AtomicCell;
+#[cfg(unix)]
+use crossbeam::epoch::Atomic;
 use cu29::bincode::{Decode, Encode};
 use cu29::prelude::*;
 use cu_sensor_payloads::CuImage;
@@ -35,6 +43,7 @@ const FAMILY: &str = "tag16h5";
 
 #[derive(Default, Debug, Clone, Encode)]
 pub struct AprilTagDetections {
+    pub camera_id: Box<String>,
     pub ids: CuArrayVec<usize, MAX_DETECTIONS>,
     pub poses: CuArrayVec<CuPose<f32>, MAX_DETECTIONS>,
     pub decision_margins: CuArrayVec<f32, MAX_DETECTIONS>,
@@ -45,7 +54,9 @@ impl Decode<()> for AprilTagDetections {
         let ids = CuArrayVec::<usize, MAX_DETECTIONS>::decode(decoder)?;
         let poses = CuArrayVec::<CuPose<f32>, MAX_DETECTIONS>::decode(decoder)?;
         let decision_margins = CuArrayVec::<f32, MAX_DETECTIONS>::decode(decoder)?;
+        let camera_id: Box<String> = Box::decode(decoder)?;
         Ok(AprilTagDetections {
+            camera_id,
             ids,
             poses,
             decision_margins,
@@ -60,7 +71,9 @@ impl Serialize for AprilTagDetections {
         let CuArrayVec(ids) = &self.ids;
         let CuArrayVec(poses) = &self.poses;
         let CuArrayVec(decision_margins) = &self.decision_margins;
-        let mut tup = serializer.serialize_tuple(ids.len())?;
+        let camera_id= &self.camera_id;
+
+        let mut tup = serializer.serialize_tuple(ids.len() + 1)?;
 
         ids.iter()
             .zip(poses.iter())
@@ -69,7 +82,7 @@ impl Serialize for AprilTagDetections {
             .for_each(|(id, pose, margin)| {
                 tup.serialize_element(&(id, pose, margin)).unwrap();
             });
-
+        tup.serialize_element(camera_id)?;
         tup.end()
     }
 }
@@ -85,7 +98,7 @@ impl<'de> Deserialize<'de> for AprilTagDetections {
             type Value = AprilTagDetections;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a tuple of (id, pose, decision_margin)")
+                formatter.write_str("a tuple of (id, pose, decision_margin) and camera_id")     
             }
 
             fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
@@ -101,11 +114,14 @@ impl<'de> Deserialize<'de> for AprilTagDetections {
                     let CuArrayVec(decision_margins) = &mut detections.decision_margins;
                     decision_margins.push(decision_margin);
                 }
+                let camera_id = seq.next_element()?.ok_or_else(|| serde::de::Error::invalid_length(MAX_DETECTIONS, &self))?;
+
+                detections.camera_id = camera_id;
                 Ok(detections)
             }
         }
 
-        deserializer.deserialize_tuple(MAX_DETECTIONS, AprilTagDetectionsVisitor)
+        deserializer.deserialize_tuple(MAX_DETECTIONS + 1, AprilTagDetectionsVisitor)
     }
 }
 
@@ -132,8 +148,12 @@ impl AprilTagDetections {
 
 #[cfg(unix)]
 pub struct AprilTags {
-    detector: Detector,
     tag_params: TagParams,
+    camera_id: Box<String>,
+    process_counter: u32,
+    latest_detection: Arc<AtomicCell<Option<AprilTagDetections>>>,
+    latest_img: Arc<AtomicCell<Option<CuImage<Vec<u8>>>>>,
+    detector_thread: JoinHandle<()>,
 }
 
 #[cfg(not(unix))]
@@ -191,9 +211,8 @@ impl<'cl> CuTask<'cl> for AprilTags {
     where
         Self: Sized,
     {
-        if let Some(config) = _config {
+        let (tag_params, camera_id, family_str, bits_corrected) = if let Some(config) = _config {
             let family_cfg: String = config.get("family").unwrap_or(FAMILY.to_string());
-            let family: Family = family_cfg.parse().unwrap();
             let bits_corrected: u32 = config.get("bits_corrected").unwrap_or(1);
             let tagsize = config.get("tag_size").unwrap_or(TAG_SIZE);
             let fx = config.get("fx").unwrap_or(FX);
@@ -208,27 +227,80 @@ impl<'cl> CuTask<'cl> for AprilTags {
                 tagsize,
             };
 
-            let detector = DetectorBuilder::default()
-                .add_family_bits(family, bits_corrected as usize)
-                .build()
-                .unwrap();
-            return Ok(Self {
-                detector,
-                tag_params,
-            });
-        }
-        Ok(Self {
-            detector: DetectorBuilder::default()
-                .add_family_bits(FAMILY.parse::<Family>().unwrap(), 1)
-                .build()
-                .unwrap(),
-            tag_params: TagParams {
+            let camera_id = if let Some(id) = config.get::<String>("camera_id") {
+                Box::new(id)
+            } else {
+                Box::new(String::new())
+            };
+            (tag_params, camera_id, family_cfg, bits_corrected)
+        } else {
+            let tag_params = TagParams {
                 fx: FX,
                 fy: FY,
                 cx: CX,
                 cy: CY,
                 tagsize: TAG_SIZE,
-            },
+            };
+            (tag_params, Box::new(String::new()), FAMILY.to_string(), 1u32)
+        };
+
+        let latest_img: Arc<AtomicCell<Option<CuImage<Vec<u8>>>>> = Arc::new(AtomicCell::new(None));
+        let latest_detection = Arc::new(AtomicCell::new(None));
+        let latest_img_clone = latest_img.clone();
+        let latest_detection_clone = latest_detection.clone();
+        let tag_params_clone = tag_params.clone();
+        
+        let detector_thread = std::thread::spawn(move || {
+            let family: Family = family_str.parse().unwrap();
+            let mut detector = DetectorBuilder::default()
+                .add_family_bits(family, bits_corrected as usize)
+                .build()
+                .unwrap();
+
+            loop {
+                let Some(img) = latest_img_clone.take() else {
+                    continue;
+                };
+                let image = image_from_cuimage(&img);
+                let detections = detector.detect(&image);
+                let mut result = AprilTagDetections::new();
+                for detection in detections {
+                    if let Some(aprilpose) = detection.estimate_tag_pose(&tag_params_clone) {
+                        let translation = aprilpose.translation();
+                        let rotation = aprilpose.rotation();
+                        let mut mat: [[f32; 4]; 4] = [[0.0, 0.0, 0.0, 0.0]; 4];
+                        mat[0][3] = translation.data()[0] as f32;
+                        mat[1][3] = translation.data()[1] as f32;
+                        mat[2][3] = translation.data()[2] as f32;
+                        mat[0][0] = rotation.data()[0] as f32;
+                        mat[0][1] = rotation.data()[3] as f32;
+                        mat[0][2] = rotation.data()[2 * 3] as f32;
+                        mat[1][0] = rotation.data()[1] as f32;
+                        mat[1][1] = rotation.data()[1 + 3] as f32;
+                        mat[1][2] = rotation.data()[1 + 2 * 3] as f32;
+                        mat[2][0] = rotation.data()[2] as f32;
+                        mat[2][1] = rotation.data()[2 + 3] as f32;
+                        mat[2][2] = rotation.data()[2 + 2 * 3] as f32;
+                        let pose = CuPose::<f32>::from_matrix(mat);
+                        let CuArrayVec(detections) = &mut result.poses;
+                        detections.push(pose);
+                        let CuArrayVec(decision_margin) = &mut result.decision_margins;
+                        decision_margin.push(detection.decision_margin());
+                        let CuArrayVec(ids) = &mut result.ids;
+                        ids.push(detection.id());
+                    }
+                }
+                latest_detection_clone.store(Some(result));
+            }
+        });
+        
+        Ok(Self {
+            tag_params,
+            camera_id,
+            process_counter: 0,
+            latest_detection,
+            latest_img,
+            detector_thread
         })
     }
 
@@ -238,38 +310,19 @@ impl<'cl> CuTask<'cl> for AprilTags {
         input: Self::Input,
         output: Self::Output,
     ) -> CuResult<()> {
-        let mut result = AprilTagDetections::new();
-        if let Some(payload) = input.payload() {
-            let image = image_from_cuimage(payload);
-            let detections = self.detector.detect(&image);
-            for detection in detections {
-                if let Some(aprilpose) = detection.estimate_tag_pose(&self.tag_params) {
-                    let translation = aprilpose.translation();
-                    let rotation = aprilpose.rotation();
-                    let mut mat: [[f32; 4]; 4] = [[0.0, 0.0, 0.0, 0.0]; 4];
-                    mat[0][3] = translation.data()[0] as f32;
-                    mat[1][3] = translation.data()[1] as f32;
-                    mat[2][3] = translation.data()[2] as f32;
-                    mat[0][0] = rotation.data()[0] as f32;
-                    mat[0][1] = rotation.data()[3] as f32;
-                    mat[0][2] = rotation.data()[2 * 3] as f32;
-                    mat[1][0] = rotation.data()[1] as f32;
-                    mat[1][1] = rotation.data()[1 + 3] as f32;
-                    mat[1][2] = rotation.data()[1 + 2 * 3] as f32;
-                    mat[2][0] = rotation.data()[2] as f32;
-                    mat[2][1] = rotation.data()[2 + 3] as f32;
-                    mat[2][2] = rotation.data()[2 + 2 * 3] as f32;
-
-                    let pose = CuPose::<f32>::from_matrix(mat);
-                    let CuArrayVec(detections) = &mut result.poses;
-                    detections.push(pose);
-                    let CuArrayVec(decision_margin) = &mut result.decision_margins;
-                    decision_margin.push(detection.decision_margin());
-                    let CuArrayVec(ids) = &mut result.ids;
-                    ids.push(detection.id());
-                }
+        let result = if let Some(payload) = input.payload() {
+            self.latest_img.store(Some(payload.clone()));
+            if let Some(detection) = self.latest_detection.take() {
+                let mut detection = detection;
+                detection.camera_id = self.camera_id.clone();
+                detection
+            } else {
+                AprilTagDetections::new()
             }
+        } else {
+            AprilTagDetections::new()
         };
+        
         output.tov = input.tov;
         output.set_payload(result);
         Ok(())
