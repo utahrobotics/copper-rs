@@ -116,7 +116,7 @@ cu-sensor-payloads = { path = "components/payloads/cu_sensor_payloads", version 
 cu-ros-payloads = { path = "components/payloads/cu_ros_payloads", version = "0.8.0" }
 
 # External serialization
-bincode = { version = "2.0.1", features = ["derive"] }
+bincode = { version = "=2.0.1", features = ["derive"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_derive = { version = "1.0.219", features = ["default"] }
 
@@ -125,7 +125,7 @@ clap = { version = "4.5.38", features = ["derive"] }
 
 # External proc macros
 proc-macro2 = { version = "1.0.95" }
-quote = "1.0.40"                                  # proc macros
+quote = "1.0.40"                                   # proc macros
 syn = { version = "2.0.101", features = ["full"] } # proc macros
 
 # Unit of measure to be consistent across the project
@@ -141,7 +141,11 @@ derive_more = { version = "2.0.1", features = ["full"] }
 tempfile = "3.20.0"
 
 # rerun
-rerun = { version = "0.23.2", default-features = false, features = ["sdk", "server", "log"] }
+rerun = { version = "0.23.2", default-features = false, features = [
+    "sdk",
+    "server",
+    "log",
+] }
 
 # smallvec to avoid heap allocations
 smallvec = { version = "1.15.0", features = ["serde"] }
@@ -153,6 +157,6 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
-strip = "symbols"  # or "debuginfo" or true
+strip = "symbols"    # or "debuginfo" or true
 debug = false
 incremental = false
