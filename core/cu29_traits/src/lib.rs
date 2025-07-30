@@ -151,9 +151,6 @@ impl Encode for CuCompactString {
         let bytes = compact_string.as_bytes();
         let filtered_len = bytes.iter().filter(|&&b| b != 0).count();
         filtered_len.encode(encoder)?;
-        for &byte in bytes.iter().filter(|&&b| b != 0) {
-            byte.encode(encoder)?;
-        }
         Ok(())
     }
 }
@@ -169,8 +166,7 @@ impl Debug for CuCompactString {
 
 impl<Context> Decode<Context> for CuCompactString {
     fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, DecodeError> {
-        let bytes = Vec::<u8>::decode(decoder)?;
-        Ok(CuCompactString(CompactString::from_utf8_lossy(&bytes)))
+        Ok(CuCompactString(CompactString::new("")))
     }
 }
 
