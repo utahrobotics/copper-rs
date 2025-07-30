@@ -148,8 +148,13 @@ pub struct CuCompactString(pub CompactString);
 impl Encode for CuCompactString {
     fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
         let CuCompactString(ref compact_string) = self;
-        let bytes = &compact_string.as_bytes();
-        bytes.encode(encoder)
+        let bytes = compact_string.as_bytes();
+        let filtered_len = bytes.iter().filter(|&&b| b != 0).count();
+        filtered_len.encode(encoder)?;
+        for &byte in bytes.iter().filter(|&&b| b != 0) {
+            byte.encode(encoder)?;
+        }
+        Ok(())
     }
 }
 
@@ -164,10 +169,8 @@ impl Debug for CuCompactString {
 
 impl<Context> Decode<Context> for CuCompactString {
     fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, DecodeError> {
-        let bytes = <Vec<u8> as Decode<D::Context>>::decode(decoder)?; // Decode into a byte buffer
-        let compact_string =
-            CompactString::from_utf8(bytes).map_err(|e| DecodeError::Utf8 { inner: e })?;
-        Ok(CuCompactString(compact_string))
+        let bytes = Vec::<u8>::decode(decoder)?;
+        Ok(CuCompactString(CompactString::from_utf8_lossy(&bytes)))
     }
 }
 
