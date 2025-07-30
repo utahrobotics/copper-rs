@@ -144,19 +144,10 @@ impl CuTask for DynThreshold {
 
     fn process(
         &mut self,
-
         _clock: &RobotClock,
         input: &Self::Input<'_>,
         output: &mut Self::Output<'_>,
     ) -> CuResult<()> {
-        self.process_counter += 1;
-        if self.process_counter % 300 == 0 {
-            info!(
-                "DYN_THRESHOLD_LATENCY: counter: {}, clock.now(): {} us",
-                self.process_counter,
-                clock.now().as_nanos() / 1000
-            );
-        }
         if input.payload().is_none() {
             debug!("DynThreshold: No payload in input message, skipping.");
             return Ok(());
