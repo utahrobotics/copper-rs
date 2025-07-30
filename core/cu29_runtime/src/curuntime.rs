@@ -20,6 +20,7 @@ use bincode::{encode_into_std_write, Decode, Encode};
 use petgraph::prelude::*;
 use petgraph::visit::VisitMap;
 use petgraph::visit::Visitable;
+use rayon::ThreadPool;
 use std::fmt::Debug;
 
 /// Just a simple struct to hold the various bits needed to run a Copper application.
@@ -141,6 +142,9 @@ pub struct CuRuntime<CT, P: CopperListTuple, M: CuMonitor, const NBCL: usize> {
     /// The tuple of all the tasks in order of execution.
     pub tasks: CT,
 
+    /// For backgrounded tasks.
+    pub threadpool: Arc<ThreadPool>,
+
     /// The runtime monitoring.
     pub monitor: M,
 
@@ -201,7 +205,10 @@ impl<CT, P: CopperListTuple + 'static, M: CuMonitor, const NBCL: usize> CuRuntim
         clock: RobotClock,
         config: &CuConfig,
         mission: Option<&str>,
-        tasks_instanciator: impl Fn(Vec<Option<&ComponentConfig>>) -> CuResult<CT>,
+        tasks_instanciator: impl for<'c> Fn(
+            Vec<Option<&'c ComponentConfig>>,
+            Arc<ThreadPool>,
+        ) -> CuResult<CT>,
         monitor_instanciator: impl Fn(&CuConfig) -> M,
         copperlists_logger: impl WriteStream<CopperList<P>> + 'static,
         keyframes_logger: impl WriteStream<KeyFrame> + 'static,
@@ -212,7 +219,16 @@ impl<CT, P: CopperListTuple + 'static, M: CuMonitor, const NBCL: usize> CuRuntim
             .iter()
             .map(|(_, node)| node.get_instance_config())
             .collect();
-        let tasks = tasks_instanciator(all_instances_configs)?;
+
+        // TODO: make that configurable
+        let threadpool = Arc::new(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(2) // default to 4 threads if not specified
+                .build()
+                .expect("Could not create the threadpool"),
+        );
+
+        let tasks = tasks_instanciator(all_instances_configs, threadpool.clone())?;
 
         let monitor = monitor_instanciator(config);
 
@@ -252,6 +268,7 @@ impl<CT, P: CopperListTuple + 'static, M: CuMonitor, const NBCL: usize> CuRuntim
 
         let runtime = Self {
             tasks,
+            threadpool,
             monitor,
             clock,
             copperlists_manager,
@@ -624,8 +641,8 @@ mod tests {
 
     impl Freezable for TestSource {}
 
-    impl CuSrcTask<'_> for TestSource {
-        type Output = ();
+    impl CuSrcTask for TestSource {
+        type Output<'m> = ();
         fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
         where
             Self: Sized,
@@ -633,7 +650,11 @@ mod tests {
             Ok(Self {})
         }
 
-        fn process(&mut self, _clock: &RobotClock, _empty_msg: Self::Output) -> CuResult<()> {
+        fn process(
+            &mut self,
+            _clock: &RobotClock,
+            _empty_msg: &mut Self::Output<'_>,
+        ) -> CuResult<()> {
             Ok(())
         }
     }
@@ -642,8 +663,8 @@ mod tests {
 
     impl Freezable for TestSink {}
 
-    impl CuSinkTask<'_> for TestSink {
-        type Input = ();
+    impl CuSinkTask for TestSink {
+        type Input<'m> = ();
 
         fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
         where
@@ -652,7 +673,7 @@ mod tests {
             Ok(Self {})
         }
 
-        fn process(&mut self, _clock: &RobotClock, _input: Self::Input) -> CuResult<()> {
+        fn process(&mut self, _clock: &RobotClock, _input: &Self::Input<'_>) -> CuResult<()> {
             Ok(())
         }
     }
@@ -678,7 +699,10 @@ mod tests {
         }
     }
 
-    fn tasks_instanciator(all_instances_configs: Vec<Option<&ComponentConfig>>) -> CuResult<Tasks> {
+    fn tasks_instanciator(
+        all_instances_configs: Vec<Option<&ComponentConfig>>,
+        _threadpool: Arc<ThreadPool>,
+    ) -> CuResult<Tasks> {
         Ok((
             TestSource::new(all_instances_configs[0])?,
             TestSink::new(all_instances_configs[1])?,
@@ -724,6 +748,7 @@ mod tests {
         graph.add_node(Node::new("a", "TestSource")).unwrap();
         graph.add_node(Node::new("b", "TestSink")).unwrap();
         graph.connect(0, 1, "()").unwrap();
+
         let mut runtime = CuRuntime::<Tasks, Msgs, NoMonitor, 2>::new(
             RobotClock::default(),
             &config,

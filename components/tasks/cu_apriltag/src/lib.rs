@@ -181,9 +181,9 @@ where
 impl Freezable for AprilTags {}
 
 #[cfg(windows)]
-impl<'cl> CuTask<'cl> for AprilTags {
-    type Input = input_msg!('cl, CuImage<Vec<u8>>);
-    type Output = output_msg!('cl, AprilTagDetections);
+impl CuTask for AprilTags {
+    type Input<'m> = input_msg!(CuImage<Vec<u8>>);
+    type Output<'m> = output_msg!(AprilTagDetections);
 
     fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
     where
@@ -195,17 +195,17 @@ impl<'cl> CuTask<'cl> for AprilTags {
     fn process(
         &mut self,
         _clock: &RobotClock,
-        _input: Self::Input,
-        _output: Self::Output,
+        _input: &Self::Input<'_>,
+        _output: &mut Self::Output<'_>,
     ) -> CuResult<()> {
         Ok(())
     }
 }
 
 #[cfg(not(windows))]
-impl<'cl> CuTask<'cl> for AprilTags {
-    type Input = input_msg!('cl, CuImage<Vec<u8>>);
-    type Output = output_msg!('cl, AprilTagDetections);
+impl CuTask for AprilTags {
+    type Input<'m> = input_msg!(CuImage<Vec<u8>>);
+    type Output<'m> = output_msg!(AprilTagDetections);
 
     fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
     where
@@ -307,8 +307,8 @@ impl<'cl> CuTask<'cl> for AprilTags {
     fn process(
         &mut self,
         _clock: &RobotClock,
-        input: Self::Input,
-        output: Self::Output,
+        input: &Self::Input<'_>,
+        output: &mut Self::Output<'_>,
     ) -> CuResult<()> {
         let result = if let Some(payload) = input.payload() {
             self.latest_img.store(Some(payload.clone()));

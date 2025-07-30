@@ -44,6 +44,7 @@ members = [
     "components/tasks/cu_pid",
     "components/tasks/cu_ratelimit",
     "components/testing/cu_udp_inject",
+    "examples/cu_background_task",
     "examples/cu_caterpillar",
     "examples/cu_config_gen",
     "examples/cu_config_variation",
@@ -53,6 +54,7 @@ members = [
     "examples/cu_monitoring",
     "examples/cu_missions",
     "examples/cu_multisources",
+    "examples/cu_nologging_tasks",
     "examples/cu_pointclouds",
     "examples/cu_rp_balancebot",
     "examples/cu_standalone_structlog",
@@ -141,7 +143,8 @@ derive_more = { version = "2.0.1", features = ["full"] }
 tempfile = "3.20.0"
 
 # rerun
-rerun = { version = "0.23.2", default-features = false, features = [
+
+rerun = { version = "0.24.0", default-features = false, features = [
     "sdk",
     "server",
     "log",

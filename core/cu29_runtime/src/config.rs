@@ -187,19 +187,38 @@ impl Display for Value {
     }
 }
 
+/// Configuration for logging in the node.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NodeLogging {
+    enabled: bool,
+}
+
 /// A node in the configuration graph.
 /// A node represents a Task in the system Graph.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Node {
+    /// Unique node identifier.
     id: String,
 
+    /// Task rust struct underlying type, e.g. "mymodule::Sensor", etc.
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     type_: Option<String>,
 
+    /// Config passed to the task.
     #[serde(skip_serializing_if = "Option::is_none")]
     config: Option<ComponentConfig>,
 
+    /// Missions for which this task is run.
     missions: Option<Vec<String>>,
+
+    /// Run this task in the background:
+    /// ie. Will be set to run on a background thread and until it is finished `CuTask::process` will return None.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    background: Option<bool>,
+
+    /// Config passed to the task.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    logging: Option<NodeLogging>,
 }
 
 impl Node {
@@ -208,9 +227,10 @@ impl Node {
         Node {
             id: id.to_string(),
             type_: Some(ptype.to_string()),
-            // base_period_ns: None,
             config: None,
             missions: None,
+            background: None,
+            logging: None,
         }
     }
 
@@ -220,19 +240,33 @@ impl Node {
     }
 
     #[allow(dead_code)]
+    pub fn get_type(&self) -> &str {
+        self.type_.as_ref().unwrap()
+    }
+
+    #[allow(dead_code)]
     pub fn set_type(mut self, name: Option<String>) -> Self {
         self.type_ = name;
         self
     }
 
     #[allow(dead_code)]
-    pub fn get_type(&self) -> &str {
-        self.type_.as_ref().unwrap()
+    pub fn is_background(&self) -> bool {
+        self.background.unwrap_or(false)
     }
 
     #[allow(dead_code)]
     pub fn get_instance_config(&self) -> Option<&ComponentConfig> {
         self.config.as_ref()
+    }
+
+    #[allow(dead_code)]
+    pub fn is_logging_enabled(&self) -> bool {
+        if let Some(logging) = &self.logging {
+            logging.enabled
+        } else {
+            true
+        }
     }
 
     #[allow(dead_code)]
@@ -361,7 +395,7 @@ impl CuGraph {
                     .map(|edge| edge.id().index())
                     .collect();
                 if edges.is_empty() {
-                    panic!("A CuSrcTask is configured with no task connected to it.")
+                    return None;
                 }
                 let cnx = self
                     .0

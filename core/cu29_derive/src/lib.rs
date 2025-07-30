@@ -1,5 +1,3 @@
-extern crate proc_macro;
-
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use std::fs::read_to_string;
@@ -10,6 +8,8 @@ use syn::{
     TypeTuple,
 };
 
+#[cfg(feature = "macro_debug")]
+use crate::format::rustfmt_generated_code;
 use crate::utils::config_id_to_enum;
 use cu29_runtime::config::CuConfig;
 use cu29_runtime::config::{read_configuration, CuGraph};
@@ -18,9 +18,6 @@ use cu29_runtime::curuntime::{
 };
 use cu29_traits::CuResult;
 use proc_macro2::{Ident, Span};
-
-#[cfg(feature = "macro_debug")]
-use crate::format::rustfmt_generated_code;
 
 mod format;
 mod utils;
@@ -225,7 +222,7 @@ fn gen_sim_support(runtime_plan: &CuExecutionLoop) -> proc_macro2::TokenStream {
         .map(|unit| match unit {
             CuExecutionUnit::Step(step) => {
                 let enum_entry_name = config_id_to_enum(step.node.get_id().as_str());
-                let enum_ident = Ident::new(&enum_entry_name, proc_macro2::Span::call_site());
+                let enum_ident = Ident::new(&enum_entry_name, Span::call_site());
                 let inputs: Vec<Type> = step
                     .input_msg_indices_types
                     .iter()
@@ -238,10 +235,13 @@ fn gen_sim_support(runtime_plan: &CuExecutionLoop) -> proc_macro2::TokenStream {
                 let no_output = parse_str::<Type>("CuMsg<()>").unwrap();
                 let output = output.as_ref().unwrap_or(&no_output);
 
-                let inputs_type = if inputs.len() == 1 {
-                    quote! { &'a #(#inputs)* }
+                let inputs_type = if inputs.is_empty() {
+                    quote! { () }
+                } else if inputs.len() == 1 {
+                    let input = inputs.first().unwrap();
+                    quote! { &'a #input }
                 } else {
-                    quote! { (#(&'a #inputs),*) }
+                    quote! { &'a (#(&'a #inputs),*) }
                 };
 
                 quote! {
@@ -270,6 +270,7 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
     #[cfg(feature = "macro_debug")]
     eprintln!("[entry]");
     let mut application_struct = parse_macro_input!(input as ItemStruct);
+
     let application_name = &application_struct.ident;
     let builder_name = format_ident!("{}Builder", application_name);
 
@@ -374,48 +375,62 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
             .expect("Could not make an identifier of the mission name");
 
         #[cfg(feature = "macro_debug")]
+        eprintln!("[extract tasks ids & types]");
+        let task_specs = CuTaskSpecSet::from_graph(graph);
+
+        #[cfg(feature = "macro_debug")]
         eprintln!("[runtime plan for mission {mission}]");
         let runtime_plan: CuExecutionLoop = match compute_runtime_plan(graph) {
             Ok(plan) => plan,
             Err(e) => return return_error(format!("Could not compute runtime plan: {e}")),
         };
+
         #[cfg(feature = "macro_debug")]
         eprintln!("{runtime_plan:?}");
 
-        #[cfg(feature = "macro_debug")]
-        eprintln!("[extract tasks ids & types]");
-        let (all_tasks_ids, all_tasks_cutype, all_tasks_types_names, all_tasks_types) =
-            extract_tasks_types(graph);
-
-        let all_sim_tasks_types: Vec<Type> = all_tasks_ids
+        let all_sim_tasks_types: Vec<Type> = task_specs.ids
             .iter()
-            .zip(&all_tasks_cutype)
-            .zip(&all_tasks_types)
-            .map(|((task_id, cutype), stype)| match cutype {
-                CuTaskType::Source => {
-                    let msg_type = graph
-                        .get_node_output_msg_type(task_id.as_str())
-                        .unwrap_or_else(|| panic!("CuSrcTask {task_id} should have an outgoing connection with a valid output msg type"));
-                    let sim_task_name = format!("cu29::simulation::CuSimSrcTask<{msg_type}>");
-                    parse_str(sim_task_name.as_str()).unwrap_or_else(|_| panic!("Could not build the placeholder for simulation: {sim_task_name}"))
+            .zip(&task_specs.cutypes)
+            .zip(&task_specs.sim_task_types)
+            .zip(&task_specs.background_flags)
+            .map(|(((task_id, cutype), stype), background)| {
+                match cutype {
+                    CuTaskType::Source => {
+                        if *background {
+                            panic!("CuSrcTask {task_id} cannot be a background task, it should be a regular task.");
+                        }
+                        let msg_type = graph
+                            .get_node_output_msg_type(task_id.as_str())
+                            .unwrap_or_else(|| panic!("CuSrcTask {task_id} should have an outgoing connection with a valid output msg type"));
+                        let sim_task_name = format!("cu29::simulation::CuSimSrcTask<{msg_type}>");
+                        parse_str(sim_task_name.as_str()).unwrap_or_else(|_| panic!("Could not build the placeholder for simulation: {sim_task_name}"))
+                    }
+                    CuTaskType::Regular => {
+                        // TODO: wrap that correctly in a background task if background is true.
+                        stype.clone()
+                    },
+                    CuTaskType::Sink => {
+                        if *background {
+                            panic!("CuSinkTask {task_id} cannot be a background task, it should be a regular task.");
+                        }
+                        let msg_type = graph
+                            .get_node_input_msg_type(task_id.as_str())
+                            .unwrap_or_else(|| panic!("CuSinkTask {task_id} should have an incoming connection with a valid input msg type"));
+                        let sim_task_name = format!("cu29::simulation::CuSimSinkTask<{msg_type}>");
+                        parse_str(sim_task_name.as_str()).unwrap_or_else(|_| panic!("Could not build the placeholder for simulation: {sim_task_name}"))
+                    }
                 }
-                CuTaskType::Regular => stype.clone(),
-                CuTaskType::Sink => {
-                    let msg_type = graph
-                        .get_node_input_msg_type(task_id.as_str())
-                        .unwrap_or_else(|| panic!("CuSinkTask {task_id} should have an incoming connection with a valid input msg type"));
-                    let sim_task_name = format!("cu29::simulation::CuSimSinkTask<{msg_type}>");
-                    parse_str(sim_task_name.as_str()).unwrap_or_else(|_| panic!("Could not build the placeholder for simulation: {sim_task_name}"))
-                }
-            })
-            .collect();
+    })
+    .collect();
 
         #[cfg(feature = "macro_debug")]
         eprintln!("[build task tuples]");
+
+        let task_types = &task_specs.task_types;
         // Build the tuple of all those types
         // note the extraneous, at the end is to make the tuple work even if this is only one element
         let task_types_tuple: TypeTuple = parse_quote! {
-            (#(#all_tasks_types),*,)
+            (#(#task_types),*,)
         };
 
         let task_types_tuple_sim: TypeTuple = parse_quote! {
@@ -424,41 +439,50 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
 
         #[cfg(feature = "macro_debug")]
         eprintln!("[gen instances]");
-
+        // FIXME: implement here the threadpool emulation.
         let task_sim_instances_init_code = all_sim_tasks_types.iter().enumerate().map(|(index, ty)| {
             let additional_error_info = format!(
                 "Failed to get create instance for {}, instance index {}.",
-                all_tasks_types_names[index], index
+                task_specs.type_names[index], index
             );
 
             quote! {
-            <#ty>::new(all_instances_configs[#index]).map_err(|e| e.add_cause(#additional_error_info))?
+                <#ty>::new(all_instances_configs[#index]).map_err(|e| e.add_cause(#additional_error_info))?
+            }
+        }).collect::<Vec<_>>();
+
+        let task_instances_init_code = task_specs.instantiation_types.iter().zip(&task_specs.background_flags).enumerate().map(|(index, (task_type, background))| {
+            let additional_error_info = format!(
+                "Failed to get create instance for {}, instance index {}.",
+                task_specs.type_names[index], index
+            );
+            if *background {
+                quote! {
+                    #task_type::new(all_instances_configs[#index], threadpool).map_err(|e| e.add_cause(#additional_error_info))?
+                }
+            } else {
+                quote! {
+                    #task_type::new(all_instances_configs[#index]).map_err(|e| e.add_cause(#additional_error_info))?
+                }
             }
         }).collect::<Vec<_>>();
 
         // Generate the code to create instances of the nodes
         // It maps the types to their index
-        let (task_instances_init_code,
+        let (
             task_restore_code,
             start_calls,
             stop_calls,
             preprocess_calls,
-            postprocess_calls): (Vec<_>, Vec<_>, Vec<_>, Vec<_>, Vec<_>, Vec<_>) = itertools::multiunzip(all_tasks_types
-            .iter()
-            .enumerate()
-            .map(|(index, ty)| {
+            postprocess_calls,
+            ): (Vec<_>, Vec<_>, Vec<_>, Vec<_>, Vec<_>) = itertools::multiunzip(
+            (0..task_specs.task_types.len())
+            .map(|index| {
                 let task_index = int2sliceindex(index as u32);
                 let task_tuple_index = syn::Index::from(index);
-                let task_enum_name = config_id_to_enum(&all_tasks_ids[index]);
-                let enum_name = Ident::new(&task_enum_name, proc_macro2::Span::call_site());
-                let additional_error_info = format!(
-                    "Failed to get create instance for {}, instance index {}.",
-                    all_tasks_types_names[index], index
-                );
-                (   // Task instances initialization
-                    quote! {
-                        #ty::new(all_instances_configs[#index]).map_err(|e| e.add_cause(#additional_error_info))?
-                    },
+                let task_enum_name = config_id_to_enum(&task_specs.ids[index]);
+                let enum_name = Ident::new(&task_enum_name, Span::call_site());
+                (
                     // Tasks keyframe restore code
                     quote! {
                         tasks.#task_tuple_index.thaw(&mut decoder).map_err(|e| CuError::new_with_cause("Failed to thaw", e))?
@@ -670,7 +694,7 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
         // This records the task ids in call order.
         let mut taskid_call_order: Vec<usize> = Vec::new();
 
-        let runtime_plan_code: Vec<proc_macro2::TokenStream> = runtime_plan.steps
+        let runtime_plan_code_and_logging: Vec<(proc_macro2::TokenStream, proc_macro2::TokenStream)> = runtime_plan.steps
             .iter()
             .map(|unit| {
                 match unit {
@@ -705,13 +729,13 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                         let tid = step.node_id as usize;
                         taskid_call_order.push(tid);
 
-                        let task_enum_name = config_id_to_enum(&all_tasks_ids[tid]);
+                        let task_enum_name = config_id_to_enum(&task_specs.ids[tid]);
                         let enum_name = Ident::new(&task_enum_name, proc_macro2::Span::call_site());
 
-                        let process_call = match step.task_type {
+                        let (process_call, preprocess_logging) = match step.task_type {
                             CuTaskType::Source => {
-                                if let Some((index, _)) = &step.output_msg_index_type {
-                                    let output_culist_index = int2sliceindex(*index);
+                                if let Some((output_index, _)) = &step.output_msg_index_type {
+                                    let output_culist_index = int2sliceindex(*output_index);
 
                                     let monitoring_action = quote! {
                                         debug!("Task {}: Error during process: {}", #mission_mod::TASKS_IDS[#tid], &error);
@@ -759,7 +783,7 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                                        }
                                     };
 
-                                    quote! {
+                                    (quote! {  // process call
                                         {
                                             #comment_tokens
                                             {
@@ -781,7 +805,31 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                                                 }
                                             }
                                         }
+                                    }, {  // logging preprocess
+                                        if !task_specs.logging_enabled[*output_index as usize] {
+
+                                            #[cfg(feature = "macro_debug")]
+                                            eprintln!(
+                                                "{} -> Logging Disabled",
+                                                step.node.get_id(),
+                                            );
+
+
+                                            let output_culist_index = int2sliceindex(*output_index);
+                                            quote! {
+                                                let mut cumsg_output = &mut culist.msgs.0.#output_culist_index;
+                                                cumsg_output.clear_payload();
+                                            }
+                                        } else {
+                                            #[cfg(feature = "macro_debug")]
+                                            eprintln!(
+                                                "{} -> Logging Enabled",
+                                                step.node.get_id(),
+                                            );
+                                            quote!() // do nothing
+                                        }
                                     }
+                                    )
                                 } else {
                                     panic!("Source task should have an output message index.");
                                 }
@@ -821,7 +869,7 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                                     let call_sim_callback = if sim_mode {
                                         let inputs_type = if indices.len() == 1 {
                                             // Not a tuple for a single input
-                                            quote! { #(&msgs.#indices)* }
+                                            quote! { #(msgs.#indices)* }
                                         } else {
                                             // A tuple for multiple inputs
                                             quote! { (#(&msgs.#indices),*) }
@@ -829,7 +877,7 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
 
                                         quote! {
                                             let doit = {
-                                                let cumsg_input = #inputs_type;
+                                                let cumsg_input = &#inputs_type;
                                                 // This is the virtual output for the sink
                                                 let cumsg_output = &mut msgs.#output_culist_index;
                                                 let state = cu29::simulation::CuTaskCallbackState::Process(cumsg_input, cumsg_output);
@@ -854,19 +902,19 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
 
                                     let inputs_type = if indices.len() == 1 {
                                         // Not a tuple for a single input
-                                        quote! { #(&msgs.#indices)* }
+                                        quote! { #(msgs.#indices)* }
                                     } else {
                                         // A tuple for multiple inputs
                                         quote! { (#(&msgs.#indices),*) }
                                     };
 
-                                    quote! {
+                                    (quote! {
                                         {
                                             #comment_tokens
                                             // Maybe freeze the task if this is a "key frame"
                                             kf_manager.freeze_task(clid, &#task_instance)?;
                                             #call_sim_callback
-                                            let cumsg_input = #inputs_type;
+                                            let cumsg_input = &#inputs_type;
                                             // This is the virtual output for the sink
                                             let cumsg_output = &mut msgs.#output_culist_index;
                                             cumsg_output.metadata.task_id = #tid as u16;
@@ -878,7 +926,9 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                                                 #monitoring_action
                                             }
                                         }
-                                    }
+                                    }, {
+                                        quote!() // do nothing for logging
+                                    })
                                 } else {
                                     panic!("Sink tasks should have a virtual output message index.");
                                 }
@@ -917,7 +967,7 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                                     let call_sim_callback = if sim_mode {
                                         let inputs_type = if indices.len() == 1 {
                                             // Not a tuple for a single input
-                                            quote! { #(&msgs.#indices)* }
+                                            quote! { #(msgs.#indices)* }
                                         } else {
                                             // A tuple for multiple inputs
                                             quote! { (#(&msgs.#indices),*) }
@@ -925,7 +975,7 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
 
                                         quote! {
                                             let doit = {
-                                                let cumsg_input = #inputs_type;
+                                                let cumsg_input = &#inputs_type;
                                                 let cumsg_output = &mut msgs.#output_culist_index;
                                                 let state = cu29::simulation::CuTaskCallbackState::Process(cumsg_input, cumsg_output);
                                                 let ovr = sim_callback(SimStep::#enum_name(state));
@@ -949,18 +999,19 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                                     let indices = step.input_msg_indices_types.iter().map(|(index, _)| int2sliceindex(*index));
                                     let inputs_type = if indices.len() == 1 {
                                         // Not a tuple for a single input
-                                        quote! { #(&msgs.#indices)* }
+                                        quote! { #(msgs.#indices)* }
                                     } else {
                                         // A tuple for multiple inputs
                                         quote! { (#(&msgs.#indices),*) }
                                     };
-                                    quote! {
+
+                                    (quote! {
                                         {
                                             #comment_tokens
                                             // Maybe freeze the task if this is a "key frame"
                                             kf_manager.freeze_task(clid, &#task_instance)?;
                                             #call_sim_callback
-                                            let cumsg_input = #inputs_type;
+                                            let cumsg_input = &#inputs_type;
                                             let cumsg_output = &mut msgs.#output_culist_index;
                                             cumsg_output.metadata.task_id = #tid as u16;
                                             cumsg_output.metadata.task_name = CuCompactString(CompactString::new(#mission_mod::TASKS_IDS[#tid]));
@@ -971,14 +1022,35 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                                                 #monitoring_action
                                             }
                                         }
-                                    }
+                                    }, {
+
+                                    if !task_specs.logging_enabled[*output_index as usize] {
+                                        #[cfg(feature = "macro_debug")]
+                                        eprintln!(
+                                            "{} -> Logging Disabled",
+                                            step.node.get_id(),
+                                        );
+                                        let output_culist_index = int2sliceindex(*output_index);
+                                        quote! {
+                                                let mut cumsg_output = &mut culist.msgs.0.#output_culist_index;
+                                                cumsg_output.clear_payload();
+                                            }
+                                   } else {
+                                        #[cfg(feature = "macro_debug")]
+                                        eprintln!(
+                                            "{} -> Logging Enabled",
+                                            step.node.get_id(),
+                                        );
+                                         quote!() // do nothing logging is enabled
+                                   }
+                                })
                                 } else {
                                     panic!("Regular task should have an output message index.");
                                 }
                             }
                         };
 
-                        process_call
+                        (process_call, preprocess_logging)
                     }
                     CuExecutionUnit::Loop(_) => todo!("Needs to be implemented"),
                 }
@@ -987,7 +1059,8 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
         eprintln!("[Culist access order:  {taskid_call_order:?}]");
 
         // Give a name compatible with a struct to match the task ids to their output in the CuStampedDataSet tuple.
-        let all_tasks_member_ids: Vec<String> = all_tasks_ids
+        let all_tasks_member_ids: Vec<String> = task_specs
+            .ids
             .iter()
             .map(|name| utils::config_id_to_struct_member(name.as_str()))
             .collect();
@@ -1045,7 +1118,7 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
             None
         };
 
-        let sim_callback_on_new_calls = all_tasks_ids.iter().enumerate().map(|(i, id)| {
+        let sim_callback_on_new_calls = task_specs.ids.iter().enumerate().map(|(i, id)| {
             let enum_name = config_id_to_enum(id);
             let enum_ident = Ident::new(&enum_name, Span::call_site());
             quote! {
@@ -1067,6 +1140,9 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
         } else {
             None
         };
+
+        let (runtime_plan_code, preprocess_logging_calls): (Vec<_>, Vec<_>) =
+            itertools::multiunzip(runtime_plan_code_and_logging);
 
         #[cfg(feature = "macro_debug")]
         eprintln!("[build the run methods]");
@@ -1094,6 +1170,10 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                     #(#runtime_plan_code)*
                 } // drop(msgs);
                 monitor.process_copperlist(&#mission_mod::collect_metadata(&culist))?;
+
+                // here drop the payloads if we don't want them to be logged.
+                #(#preprocess_logging_calls)*
+
                 cl_manager.end_of_processing(clid)?;
                 kf_manager.end_of_processing(clid)?;
 
@@ -1153,7 +1233,7 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
             quote!(CuTasks)
         };
 
-        let tasks_instanciator = if sim_mode {
+        let tasks_instanciator_fn = if sim_mode {
             quote!(tasks_instanciator_sim)
         } else {
             quote!(tasks_instanciator)
@@ -1216,12 +1296,13 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                         1024 * 1024 * 10, // 10 MiB
                     );
 
+
                     let application = Ok(#application_name {
                         copper_runtime: CuRuntime::<#mission_mod::#tasks_type, #mission_mod::CuStampedDataSet, #monitor_type, #DEFAULT_CLNB>::new(
                             clock,
                             &config,
                             Some(#mission),
-                            #mission_mod::#tasks_instanciator,
+                            #mission_mod::#tasks_instanciator_fn,
                             #mission_mod::monitor_instanciator,
                             copperlist_stream,
                             keyframes_stream)?, // FIXME: gbin
@@ -1361,6 +1442,7 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
             }
         };
 
+        let ids = task_specs.ids;
         // Convert the modified struct back into a TokenStream
         let mission_mod_tokens = quote! {
             mod #mission_mod {
@@ -1373,9 +1455,11 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                 use cu29::bincode::de::Decoder;
                 use cu29::bincode::de::DecoderImpl;
                 use cu29::bincode::error::DecodeError;
+                use cu29::rayon::ThreadPool;
                 use cu29::clock::RobotClock;
                 use cu29::config::CuConfig;
                 use cu29::config::ComponentConfig;
+                use cu29::cuasynctask::CuAsyncTask;
                 use cu29::curuntime::CuRuntime;
                 use cu29::curuntime::KeyFrame;
                 use cu29::curuntime::CopperContext;
@@ -1419,18 +1503,18 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                 #[allow(dead_code)]
                 pub type CuSimTasks = #task_types_tuple_sim;
 
-                pub const TASKS_IDS: &'static [&'static str] = &[#( #all_tasks_ids ),*];
+                pub const TASKS_IDS: &'static [&'static str] = &[#( #ids ),*];
 
                 #culist_support
 
                 #sim_support
 
-                pub fn tasks_instanciator(all_instances_configs: Vec<Option<&ComponentConfig>>) -> CuResult<CuTasks> {
+                pub fn tasks_instanciator<'c>(all_instances_configs: Vec<Option<&'c ComponentConfig>>, threadpool: Arc<ThreadPool>) -> CuResult<CuTasks> {
                     Ok(( #(#task_instances_init_code),*, ))
                 }
 
                 #[allow(dead_code)]
-                pub fn tasks_instanciator_sim(all_instances_configs: Vec<Option<&ComponentConfig>>) -> CuResult<CuSimTasks> {
+                pub fn tasks_instanciator_sim(all_instances_configs: Vec<Option<&ComponentConfig>>, _threadpool: Arc<ThreadPool>) -> CuResult<CuSimTasks> {
                     Ok(( #(#task_sim_instances_init_code),*, ))
                 }
 
@@ -1460,7 +1544,7 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
         use default::#application_name;
         }
     } else {
-        quote! {}
+        quote!() // do nothing
     };
 
     let result: proc_macro2::TokenStream = quote! {
@@ -1497,36 +1581,130 @@ fn config_full_path(config_file: &str) -> String {
     filename.to_string()
 }
 
-/// Extract all the tasks types in their index order and their ids.
-fn extract_tasks_types(graph: &CuGraph) -> (Vec<String>, Vec<CuTaskType>, Vec<String>, Vec<Type>) {
-    let all_id_nodes = graph.get_all_nodes();
-
-    // Get all the tasks Ids
-    let all_tasks_ids: Vec<String> = all_id_nodes
+fn extract_tasks_output_types(graph: &CuGraph) -> Vec<Option<Type>> {
+    let result = graph
+        .get_all_nodes()
         .iter()
-        .map(|(_, node)| node.get_id().to_string())
-        .collect();
-
-    let all_task_cutype: Vec<CuTaskType> = all_id_nodes
-        .iter()
-        .map(|(id, _)| find_task_type_for_id(graph, *id))
-        .collect();
-
-    // Collect all the type names used by our configs.
-    let all_types_names: Vec<String> = all_id_nodes
-        .iter()
-        .map(|(_, node)| node.get_type().to_string())
-        .collect();
-
-    // Transform them as Rust types
-    let all_types: Vec<Type> = all_types_names
-        .iter()
-        .map(|name| {
-            parse_str(name)
-                .unwrap_or_else(|_| panic!("Could not transform {name} into a Task Rust type."))
+        .map(|(_, node)| {
+            let id = node.get_id();
+            let type_str = graph.get_node_output_msg_type(id.as_str());
+            let result = type_str.map(|type_str| {
+                let result = parse_str::<Type>(type_str.as_str())
+                    .expect("Could not parse output message type.");
+                result
+            });
+            result
         })
         .collect();
-    (all_tasks_ids, all_task_cutype, all_types_names, all_types)
+    result
+}
+
+struct CuTaskSpecSet {
+    pub ids: Vec<String>,
+    pub cutypes: Vec<CuTaskType>,
+    pub background_flags: Vec<bool>,
+    pub logging_enabled: Vec<bool>,
+    pub type_names: Vec<String>,
+    pub task_types: Vec<Type>,
+    pub instantiation_types: Vec<Type>,
+    pub sim_task_types: Vec<Type>,
+    #[allow(dead_code)]
+    pub output_types: Vec<Option<Type>>,
+}
+
+impl CuTaskSpecSet {
+    pub fn from_graph(graph: &CuGraph) -> Self {
+        let all_id_nodes = graph.get_all_nodes();
+
+        let ids = all_id_nodes
+            .iter()
+            .map(|(_, node)| node.get_id().to_string())
+            .collect();
+
+        let cutypes = all_id_nodes
+            .iter()
+            .map(|(id, _)| find_task_type_for_id(graph, *id))
+            .collect();
+
+        let background_flags: Vec<bool> = all_id_nodes
+            .iter()
+            .map(|(_, node)| node.is_background())
+            .collect();
+
+        let logging_enabled: Vec<bool> = all_id_nodes
+            .iter()
+            .map(|(_, node)| node.is_logging_enabled())
+            .collect();
+
+        let type_names: Vec<String> = all_id_nodes
+            .iter()
+            .map(|(_, node)| node.get_type().to_string())
+            .collect();
+
+        let output_types = extract_tasks_output_types(graph);
+
+        let task_types = type_names
+            .iter()
+            .zip(background_flags.iter())
+            .zip(output_types.iter())
+            .map(|((name, &background), output_type)| {
+                let name_type = parse_str::<Type>(name).unwrap_or_else(|error| {
+                    panic!("Could not transform {name} into a Task Rust type: {error}");
+                });
+                if background {
+                    if let Some(output_type) = output_type {
+                        parse_quote!(cu29::cuasynctask::CuAsyncTask<#name_type, #output_type>)
+                    } else {
+                        panic!("{name}: If a task is background, it has to have an output");
+                    }
+                } else {
+                    name_type
+                }
+            })
+            .collect();
+
+        let instantiation_types = type_names
+            .iter()
+            .zip(background_flags.iter())
+            .zip(output_types.iter())
+            .map(|((name, &background), output_type)| {
+                let name_type = parse_str::<Type>(name).unwrap_or_else(|error| {
+                    panic!("Could not transform {name} into a Task Rust type: {error}");
+                });
+                if background {
+                    if let Some(output_type) = output_type {
+                        parse_quote!(cu29::cuasynctask::CuAsyncTask::<#name_type, #output_type>)
+                    } else {
+                        panic!("{name}: If a task is background, it has to have an output");
+                    }
+                } else {
+                    name_type
+                }
+            })
+            .collect();
+
+        let sim_task_types = type_names
+            .iter()
+            .map(|name| {
+                parse_str::<Type>(name).unwrap_or_else(|err| {
+                    eprintln!("Could not transform {name} into a Task Rust type.");
+                    panic!("{err}")
+                })
+            })
+            .collect();
+
+        Self {
+            ids,
+            cutypes,
+            background_flags,
+            logging_enabled,
+            type_names,
+            task_types,
+            instantiation_types,
+            sim_task_types,
+            output_types,
+        }
+    }
 }
 
 fn extract_msg_types(runtime_plan: &CuExecutionLoop) -> Vec<Type> {

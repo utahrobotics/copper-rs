@@ -45,6 +45,7 @@ html-escape = "0.2"
 threadpool = "1.8.1"
 crossbeam = "0.8.4"
 jemallocator = { version = "0.5", optional = true }
+rayon = { version = "*" }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 cudarc = { version = "0.16.4", optional = true, features = [
