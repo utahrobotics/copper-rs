@@ -79,8 +79,6 @@ pub struct CuMsgMetadata {
     pub status_txt: CuCompactString,
     /// The ID of the task that generated this message (index into TASKS_IDS)
     pub task_id: u16,
-    /// The name of the task that generated this message
-    pub task_name: CuCompactString,
 }
 
 impl Metadata for CuMsgMetadata {}
@@ -102,10 +100,6 @@ impl CuMsgMetadataTrait for CuMsgMetadata {
 
     fn task_id(&self) -> u16 {
         self.task_id
-    }
-
-    fn task_name(&self) -> &CuCompactString {
-        &self.task_name
     }
 }
 
@@ -143,7 +137,6 @@ impl Default for CuMsgMetadata {
             process_time: PartialCuTimeRange::default(),
             status_txt: CuCompactString(CompactString::with_capacity(COMPACT_STRING_CAPACITY)),
             task_id: 0,
-            task_name: CuCompactString(CompactString::with_capacity(COMPACT_STRING_CAPACITY)),
         }
     }
 }

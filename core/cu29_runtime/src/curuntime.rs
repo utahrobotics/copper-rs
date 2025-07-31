@@ -35,15 +35,12 @@ pub struct CopperListsManager<P: CopperListTuple, const NBCL: usize> {
     pub inner: CuListsManager<P, NBCL>,
     /// Logger for the copper lists (messages between tasks)
     pub logger: Option<Box<dyn WriteStream<CopperList<P>>>>,
-    /// Task names to be excluded from logging
-    pub excluded_tasks: Vec<String>,
 }
 
 impl<P: CopperListTuple, const NBCL: usize> CopperListsManager<P, NBCL> {
     pub fn end_of_processing(&mut self, culistid: u32) -> CuResult<()> {
         let mut is_top = true;
         let mut nb_done = 0;
-        let excluded_tasks = &self.excluded_tasks;
         for cl in self.inner.iter_mut() {
             if cl.id == culistid && cl.get_state() == CopperListState::Processing {
                 cl.change_state(CopperListState::DoneProcessing);
@@ -51,12 +48,6 @@ impl<P: CopperListTuple, const NBCL: usize> CopperListsManager<P, NBCL> {
             if is_top && cl.get_state() == CopperListState::DoneProcessing {
                 if let Some(logger) = &mut self.logger {
                     cl.change_state(CopperListState::BeingSerialized);
-
-                    // Apply task filtering before logging
-                    if !excluded_tasks.is_empty() {
-                        Self::apply_task_filtering(excluded_tasks, cl);
-                    }
-
                     logger.log(cl)?;
                 }
                 cl.change_state(CopperListState::Free);
@@ -73,16 +64,6 @@ impl<P: CopperListTuple, const NBCL: usize> CopperListsManager<P, NBCL> {
 
     pub fn available_copper_lists(&self) -> usize {
         NBCL - self.inner.len()
-    }
-
-    fn apply_task_filtering(excluded_tasks: &Vec<String>, cl: &mut CopperList<P>) {
-        for msg in cl.msgs.cumsgs_mut() {
-            let metadata = msg.metadata();
-            let task_name = metadata.task_name().0.as_str();
-            if excluded_tasks.contains(&task_name.to_string()) {
-                msg.clear_payload();
-            }
-        }
     }
 }
 
@@ -257,7 +238,6 @@ impl<CT, P: CopperListTuple + 'static, M: CuMonitor, const NBCL: usize> CuRuntim
         let copperlists_manager = CopperListsManager {
             inner: CuListsManager::new(),
             logger: copperlists_logger,
-            excluded_tasks,
         };
 
         let keyframes_manager = KeyFramesManager {

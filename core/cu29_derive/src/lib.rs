@@ -792,7 +792,6 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                                                 #call_sim_callback
                                                 let cumsg_output = &mut msgs.#output_culist_index;
                                                 cumsg_output.metadata.task_id = #tid as u16;
-                                                cumsg_output.metadata.task_name = CuCompactString(CompactString::new(#mission_mod::TASKS_IDS[#tid]));
                                                 cumsg_output.metadata.process_time.start = clock.now().into();
                                                 let maybe_error = if doit {
                                                     #task_instance.process(clock, cumsg_output)
@@ -918,7 +917,6 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                                             // This is the virtual output for the sink
                                             let cumsg_output = &mut msgs.#output_culist_index;
                                             cumsg_output.metadata.task_id = #tid as u16;
-                                            cumsg_output.metadata.task_name = CuCompactString(CompactString::new(#mission_mod::TASKS_IDS[#tid]));
                                             cumsg_output.metadata.process_time.start = clock.now().into();
                                             let maybe_error = if doit {#task_instance.process(clock, cumsg_input)} else {Ok(())};
                                             cumsg_output.metadata.process_time.end = clock.now().into();
@@ -1014,7 +1012,6 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                                             let cumsg_input = &#inputs_type;
                                             let cumsg_output = &mut msgs.#output_culist_index;
                                             cumsg_output.metadata.task_id = #tid as u16;
-                                            cumsg_output.metadata.task_name = CuCompactString(CompactString::new(#mission_mod::TASKS_IDS[#tid]));
                                             cumsg_output.metadata.process_time.start = clock.now().into();
                                             let maybe_error = if doit {#task_instance.process(clock, cumsg_input, cumsg_output)} else {Ok(())};
                                             cumsg_output.metadata.process_time.end = clock.now().into();

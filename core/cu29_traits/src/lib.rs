@@ -95,9 +95,6 @@ pub trait CuMsgMetadataTrait {
 
     /// The ID of the task that generated this message
     fn task_id(&self) -> u16;
-
-    /// The name of the task that generated this message
-    fn task_name(&self) -> &CuCompactString;
 }
 
 /// A generic trait to expose the generated CuStampedDataSet from the task graph.
