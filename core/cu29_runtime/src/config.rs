@@ -637,7 +637,7 @@ pub struct LoggingConfig {
     pub keyframe_interval: Option<u32>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub copperlist_log_target_hz: Option<u32>,
+    pub target_hz: Option<u32>,
 }
 
 /// Missions are used to generate alternative DAGs within the same configuration.

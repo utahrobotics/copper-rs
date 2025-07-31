@@ -1279,7 +1279,7 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                         default_section_size = section_size_mib as usize * 1024usize * 1024usize;
                     }
 
-                    let cl_log_target_hz = config.logging.as_ref().and_then(|l| l.copperlist_log_target_hz);
+                    let cl_log_target_hz = config.logging.as_ref().and_then(|l| l.target_hz);
                     let copperlist_stream = stream_write::<#mission_mod::CuList>(
                         unified_logger.clone(),
                         UnifiedLogType::CopperList,
