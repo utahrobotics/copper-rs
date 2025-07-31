@@ -1278,11 +1278,13 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                         // Convert MiB to bytes
                         default_section_size = section_size_mib as usize * 1024usize * 1024usize;
                     }
+
+                    let cl_log_target_hz = config.logging.as_ref().and_then(|l| l.copperlist_log_target_hz);
                     let copperlist_stream = stream_write::<#mission_mod::CuList>(
                         unified_logger.clone(),
                         UnifiedLogType::CopperList,
                         default_section_size,
-                        // the 2 sizes are not directly related as we encode the CuList but we can
+                        cl_log_target_hz,                        // the 2 sizes are not directly related as we encode the CuList but we can
                         // assume the encoded size is close or lower than the non encoded one
                         // This is to be sure we have the size of at least a Culist and some.
                     );
@@ -1291,6 +1293,7 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                         unified_logger.clone(),
                         UnifiedLogType::FrozenTasks,
                         1024 * 1024 * 10, // 10 MiB
+                        None
                     );
 
 

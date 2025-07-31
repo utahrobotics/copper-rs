@@ -45,6 +45,7 @@ pub fn basic_copper_setup(
         unified_logger.clone(),
         UnifiedLogType::StructuredLogLine,
         4096 * 10,
+        None,
     );
 
     #[cfg(debug_assertions)]
