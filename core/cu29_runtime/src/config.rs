@@ -301,9 +301,6 @@ pub struct Cnx {
 
     /// Restrict this connection for this list of missions.
     pub missions: Option<Vec<String>>,
-
-    /// Tells Copper if it needs to log the messages.
-    pub store: Option<bool>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -331,7 +328,6 @@ impl CuGraph {
         source: NodeId,
         target: NodeId,
         msg_type: &str,
-        store: Option<bool>,
         missions: Option<Vec<String>>,
     ) -> CuResult<()> {
         let (src_id, dst_id) = (
@@ -355,7 +351,6 @@ impl CuGraph {
                 dst: dst_id,
                 msg: msg_type.to_string(),
                 missions,
-                store,
             },
         );
         Ok(())
@@ -458,7 +453,7 @@ impl CuGraph {
     /// msg_type is the type of message exchanged between the two nodes/tasks.
     #[allow(dead_code)]
     pub fn connect(&mut self, source: NodeId, target: NodeId, msg_type: &str) -> CuResult<()> {
-        self.connect_ext(source, target, msg_type, None, None)
+        self.connect_ext(source, target, msg_type, None)
     }
 }
 
@@ -577,6 +572,8 @@ pub struct CuConfig {
     pub monitor: Option<MonitorConfig>,
     /// Optional logging configuration
     pub logging: Option<LoggingConfig>,
+    /// Optional runtime configuration
+    pub runtime: Option<RuntimeConfig>,
     /// Graph structure - either a single graph or multiple mission-specific graphs
     pub graphs: ConfigGraphs,
 }
@@ -640,6 +637,17 @@ pub struct LoggingConfig {
     pub target_hz: Option<u32>,
 }
 
+#[derive(Serialize, Deserialize, Default, Debug, Clone)]
+pub struct RuntimeConfig {
+    /// Set a CopperList execution rate target in Hz
+    /// It will act as a rate limiter: if the execution is slower than this rate,
+    /// it will continue to execute at "best effort".
+    ///
+    /// The main usecase is to not waste cycles when the system doesn't need an unbounded execution rate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_target_hz: Option<u64>,
+}
+
 /// Missions are used to generate alternative DAGs within the same configuration.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MissionsConfig {
@@ -661,6 +669,7 @@ struct CuConfigRepresentation {
     cnx: Option<Vec<Cnx>>,
     monitor: Option<MonitorConfig>,
     logging: Option<LoggingConfig>,
+    runtime: Option<RuntimeConfig>,
     missions: Option<Vec<MissionsConfig>>,
     includes: Option<Vec<IncludesConfig>>,
 }
@@ -726,7 +735,6 @@ where
                                     src.index() as NodeId,
                                     dst.index() as NodeId,
                                     &c.msg,
-                                    c.store,
                                     Some(cnx_missions.clone()),
                                 )
                                 .map_err(|e| E::from(e.to_string()))?;
@@ -746,13 +754,7 @@ where
                                 E::from(format!("Destination node not found: {}", c.dst))
                             })?;
                         graph
-                            .connect_ext(
-                                src.index() as NodeId,
-                                dst.index() as NodeId,
-                                &c.msg,
-                                c.store,
-                                None,
-                            )
+                            .connect_ext(src.index() as NodeId, dst.index() as NodeId, &c.msg, None)
                             .map_err(|e| E::from(e.to_string()))?;
                     }
                 }
@@ -784,13 +786,7 @@ where
                     .find(|i| graph.get_node(i.index() as NodeId).unwrap().id == c.dst)
                     .ok_or_else(|| E::from(format!("Destination node not found: {}", c.dst)))?;
                 graph
-                    .connect_ext(
-                        src.index() as NodeId,
-                        dst.index() as NodeId,
-                        &c.msg,
-                        c.store,
-                        None,
-                    )
+                    .connect_ext(src.index() as NodeId, dst.index() as NodeId, &c.msg, None)
                     .map_err(|e| E::from(e.to_string()))?;
             }
         }
@@ -799,6 +795,7 @@ where
 
     cuconfig.monitor = representation.monitor.clone();
     cuconfig.logging = representation.logging.clone();
+    cuconfig.runtime = representation.runtime.clone();
 
     Ok(cuconfig)
 }
@@ -845,6 +842,7 @@ impl Serialize for CuConfig {
                     cnx: Some(cnx),
                     monitor: self.monitor.clone(),
                     logging: self.logging.clone(),
+                    runtime: self.runtime.clone(),
                     missions: None,
                     includes: None,
                 }
@@ -885,6 +883,7 @@ impl Serialize for CuConfig {
                     cnx: Some(cnx),
                     monitor: self.monitor.clone(),
                     logging: self.logging.clone(),
+                    runtime: self.runtime.clone(),
                     missions: Some(missions),
                     includes: None,
                 }
@@ -900,6 +899,7 @@ impl Default for CuConfig {
             graphs: Simple(CuGraph(StableDiGraph::new())),
             monitor: None,
             logging: None,
+            runtime: None,
         }
     }
 }
@@ -918,6 +918,7 @@ impl CuConfig {
             graphs: Missions(HashMap::new()),
             monitor: None,
             logging: None,
+            runtime: None,
         }
     }
 
@@ -1056,6 +1057,11 @@ impl CuConfig {
         self.monitor.as_ref()
     }
 
+    #[allow(dead_code)]
+    pub fn get_runtime_config(&self) -> Option<&RuntimeConfig> {
+        self.runtime.as_ref()
+    }
+
     /// Validate the logging configuration to ensure section pre-allocation sizes do not exceed slab sizes.
     /// This method is wrapper around [LoggingConfig::validate]
     pub fn validate_logging_config(&self) -> CuResult<()> {
@@ -1182,6 +1188,10 @@ fn process_includes(
 
             if result.logging.is_none() {
                 result.logging = included_representation.logging;
+            }
+
+            if result.runtime.is_none() {
+                result.runtime = included_representation.runtime;
             }
 
             if let Some(included_missions) = included_representation.missions {
