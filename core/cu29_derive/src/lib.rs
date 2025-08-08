@@ -407,14 +407,17 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
         #[cfg(feature = "macro_debug")]
         eprintln!("{runtime_plan:?}");
 
-        let all_sim_tasks_types: Vec<Type> = task_specs.ids
+        let all_sim_tasks_types: Vec<Type> = task_specs
+            .ids
             .iter()
             .zip(&task_specs.cutypes)
             .zip(&task_specs.sim_task_types)
             .zip(&task_specs.background_flags)
-            .map(|(((task_id, cutype), stype), background)| {
+            .enumerate()
+            .map(|(node_idx, (((task_id, cutype), stype), background))| {
                 match cutype {
                     CuTaskType::Source => {
+
                         if *background {
                             panic!("CuSrcTask {task_id} cannot be a background task, it should be a regular task.");
                         }
@@ -422,25 +425,61 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                             .get_node_output_msg_type(task_id.as_str())
                             .unwrap_or_else(|| panic!("CuSrcTask {task_id} should have an outgoing connection with a valid output msg type"));
                         let sim_task_name = format!("cu29::simulation::CuSimSrcTask<{msg_type}>");
-                        parse_str(sim_task_name.as_str()).unwrap_or_else(|_| panic!("Could not build the placeholder for simulation: {sim_task_name}"))
+                        parse_str(sim_task_name.as_str())
+                            .unwrap_or_else(|_| panic!("Could not build the placeholder for simulation: {sim_task_name}"))
                     }
                     CuTaskType::Regular => {
-                        // TODO: wrap that correctly in a background task if background is true.
+                        // use the real task type in sim
                         stype.clone()
-                    },
+                    }
                     CuTaskType::Sink => {
                         if *background {
                             panic!("CuSinkTask {task_id} cannot be a background task, it should be a regular task.");
                         }
-                        let msg_type = graph
-                            .get_node_input_msg_type(task_id.as_str())
-                            .unwrap_or_else(|| panic!("CuSinkTask {task_id} should have an incoming connection with a valid input msg type"));
-                        let sim_task_name = format!("cu29::simulation::CuSimSinkTask<{msg_type}>");
-                        parse_str(sim_task_name.as_str()).unwrap_or_else(|_| panic!("Could not build the placeholder for simulation: {sim_task_name}"))
+
+                        // Build tuple of ALL input payload types for this node from the runtime plan
+                        let input_type_list: Vec<String> = runtime_plan
+                            .steps
+                            .iter()
+                            .filter_map(|unit| {
+                                if let cu29_runtime::curuntime::CuExecutionUnit::Step(step) = unit {
+                                    if step.node_id as usize == node_idx {
+                                        Some(
+                                            step.input_msg_indices_types
+                                                .iter()
+                                                .map(|(_, t)| t.clone())
+                                                .collect::<Vec<String>>(),
+                                        )
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            })
+                            .next()
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "CuSinkTask {task_id}: No runtime step found to infer input types"
+                                )
+                            });
+
+                        let input_tuple = if input_type_list.len() == 1 {
+                            input_type_list[0].clone()
+                        } else {
+                            format!("({})", input_type_list.join(", "))
+                        };
+
+                        let sim_task_name =
+                            format!("cu29::simulation::CuSimSinkTask<{input_tuple}>");
+                        parse_str(sim_task_name.as_str())
+                            .unwrap_or_else(|_| {
+                                panic!("Could not build simulation placeholder: {sim_task_name}")
+                            })
                     }
                 }
-    })
-    .collect();
+            })
+            .collect();
 
         #[cfg(feature = "macro_debug")]
         eprintln!("[build task tuples]");
