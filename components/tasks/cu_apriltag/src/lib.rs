@@ -71,7 +71,7 @@ impl Serialize for AprilTagDetections {
         let CuArrayVec(ids) = &self.ids;
         let CuArrayVec(poses) = &self.poses;
         let CuArrayVec(decision_margins) = &self.decision_margins;
-        let camera_id= &self.camera_id;
+        let camera_id = &self.camera_id;
 
         let mut tup = serializer.serialize_tuple(ids.len() + 1)?;
 
@@ -98,7 +98,7 @@ impl<'de> Deserialize<'de> for AprilTagDetections {
             type Value = AprilTagDetections;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                formatter.write_str("a tuple of (id, pose, decision_margin) and camera_id")     
+                formatter.write_str("a tuple of (id, pose, decision_margin) and camera_id")
             }
 
             fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
@@ -114,7 +114,9 @@ impl<'de> Deserialize<'de> for AprilTagDetections {
                     let CuArrayVec(decision_margins) = &mut detections.decision_margins;
                     decision_margins.push(decision_margin);
                 }
-                let camera_id = seq.next_element()?.ok_or_else(|| serde::de::Error::invalid_length(MAX_DETECTIONS, &self))?;
+                let camera_id = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::invalid_length(MAX_DETECTIONS, &self))?;
 
                 detections.camera_id = camera_id;
                 Ok(detections)
@@ -241,7 +243,12 @@ impl CuTask for AprilTags {
                 cy: CY,
                 tagsize: TAG_SIZE,
             };
-            (tag_params, Box::new(String::new()), FAMILY.to_string(), 1u32)
+            (
+                tag_params,
+                Box::new(String::new()),
+                FAMILY.to_string(),
+                1u32,
+            )
         };
 
         let latest_img: Arc<AtomicCell<Option<CuImage<Vec<u8>>>>> = Arc::new(AtomicCell::new(None));
@@ -249,7 +256,7 @@ impl CuTask for AprilTags {
         let latest_img_clone = latest_img.clone();
         let latest_detection_clone = latest_detection.clone();
         let tag_params_clone = tag_params.clone();
-        
+
         let detector_thread = std::thread::spawn(move || {
             let family: Family = family_str.parse().unwrap();
             let mut detector = DetectorBuilder::default()
@@ -293,14 +300,14 @@ impl CuTask for AprilTags {
                 latest_detection_clone.store(Some(result));
             }
         });
-        
+
         Ok(Self {
             tag_params,
             camera_id,
             process_counter: 0,
             latest_detection,
             latest_img,
-            detector_thread
+            detector_thread,
         })
     }
 
@@ -322,7 +329,7 @@ impl CuTask for AprilTags {
         } else {
             AprilTagDetections::new()
         };
-        
+
         output.tov = input.tov;
         output.set_payload(result);
         Ok(())
