@@ -74,7 +74,19 @@ impl ComponentConfig {
 
 /// Wrapper around the ron::Value to allow for custom serialization.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct Value(RonValue);
+pub struct Value(pub RonValue);
+
+impl<T> From<Value> for Vec<T>
+where
+    T: From<Value>,
+{
+    fn from(value: Value) -> Self {
+        match value.0 {
+            RonValue::Seq(seq) => seq.into_iter().map(|v| T::from(Value(v))).collect(),
+            _ => panic!("Expected sequence value"), // or return empty vec, or use Result
+        }
+    }
+}
 
 // Macro for implementing From<T> for Value where T is a numeric type
 macro_rules! impl_from_numeric_for_value {
