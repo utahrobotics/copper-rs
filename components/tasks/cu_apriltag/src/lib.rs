@@ -284,7 +284,6 @@ impl CuTask for AprilTags {
     {
         if let Some(config) = _config {
             let family_cfg: String = config.get("family").unwrap_or(FAMILY.to_string());
-            let family: Family = family_cfg.parse().unwrap();
             let bits_corrected: u32 = config.get("bits_corrected").unwrap_or(1);
             let tagsize = config.get("tag_size").unwrap_or(TAG_SIZE);
             let fx = config.get("fx").unwrap_or(FX);
