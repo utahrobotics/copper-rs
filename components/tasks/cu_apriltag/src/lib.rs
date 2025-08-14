@@ -1,7 +1,7 @@
 #[cfg(unix)]
-use std::mem::ManuallyDrop;
+use std::cell::RefCell;
 #[cfg(unix)]
-use std::sync::{Arc, Mutex};
+use std::mem::ManuallyDrop;
 
 #[cfg(unix)]
 use apriltag::{Detector, DetectorBuilder, Family, Image, TagParams};
@@ -142,12 +142,28 @@ impl AprilTagDetections {
     }
 }
 
+// Thread-local storage for detector configuration
+#[cfg(unix)]
+#[derive(Clone)]
+struct DetectorConfig {
+    family_str: String, // Store as string to avoid Clone/PartialEq issues
+    bits_corrected: usize,
+    tag_params: TagParams,
+}
+
+#[cfg(unix)]
+thread_local! {
+    static DETECTOR: RefCell<Option<Detector>> = RefCell::new(None);
+    static DETECTOR_CONFIG: RefCell<Option<DetectorConfig>> = RefCell::new(None);
+}
+
 #[cfg(unix)]
 pub struct AprilTags {
-    // has to be thread safe in order to be a background task
-    detector: Arc<Mutex<Detector>>,
     tag_params: TagParams,
     camera_id: Box<String>,
+    // Store configuration for detector creation
+    family_str: String, // Store as string instead of Family enum
+    bits_corrected: usize,
 }
 
 #[cfg(not(unix))]
@@ -169,6 +185,67 @@ where
         });
         let ptr = Box::into_raw(low_level_img);
         ManuallyDrop::new(Image::from_raw(ptr))
+    }
+}
+
+#[cfg(unix)]
+impl AprilTags {
+    fn ensure_detector_initialized(&self) -> CuResult<()> {
+        DETECTOR_CONFIG.with(|config_cell| {
+            let mut config = config_cell.borrow_mut();
+            let current_config = DetectorConfig {
+                family_str: self.family_str.clone(),
+                bits_corrected: self.bits_corrected,
+                tag_params: self.tag_params.clone(),
+            };
+
+            // Check if we need to reinitialize the detector
+            let needs_init = match config.as_ref() {
+                None => true,
+                Some(existing) => {
+                    existing.family_str != current_config.family_str
+                        || existing.bits_corrected != current_config.bits_corrected
+                }
+            };
+
+            if needs_init {
+                DETECTOR.with(|detector_cell| {
+                    let mut detector = detector_cell.borrow_mut();
+                    let family: Family = self
+                        .family_str
+                        .parse()
+                        .map_err(|e| CuError::new_with_cause("Failed to parse family", e))?;
+                    *detector = Some(
+                        DetectorBuilder::default()
+                            .add_family_bits(family, self.bits_corrected)
+                            .build()
+                            .map_err(|e| CuError::new_with_cause("Failed to build detector", e))?,
+                    );
+                    *config = Some(current_config);
+                    Ok(())
+                })
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    fn with_detector<F, R>(&self, f: F) -> CuResult<R>
+    where
+        F: FnOnce(&mut Detector) -> R,
+    {
+        self.ensure_detector_initialized()?;
+
+        DETECTOR.with(|detector_cell| {
+            let mut detector = detector_cell.borrow_mut();
+            match detector.as_mut() {
+                Some(d) => Ok(f(d)),
+                None => Err(CuError::new_with_cause(
+                    "Detector not initialized",
+                    std::io::Error::new(std::io::ErrorKind::Other, "detector not found"),
+                )),
+            }
+        })
     }
 }
 
@@ -223,23 +300,14 @@ impl CuTask for AprilTags {
             };
             let camera_id = config.get("camera_id").expect("provide camera id");
 
-            let detector = DetectorBuilder::default()
-                .add_family_bits(family, bits_corrected as usize)
-                .build()
-                .unwrap();
             return Ok(Self {
-                detector: Arc::new(Mutex::new(detector)),
                 tag_params,
                 camera_id: Box::new(camera_id),
+                family_str: family_cfg,
+                bits_corrected: bits_corrected as usize,
             });
         }
         Ok(Self {
-            detector: Arc::new(Mutex::new(
-                DetectorBuilder::default()
-                    .add_family_bits(FAMILY.parse::<Family>().unwrap(), 1)
-                    .build()
-                    .unwrap(),
-            )),
             tag_params: TagParams {
                 fx: FX,
                 fy: FY,
@@ -248,6 +316,8 @@ impl CuTask for AprilTags {
                 tagsize: TAG_SIZE,
             },
             camera_id: Box::new("cam_front".to_string()),
+            family_str: FAMILY.to_string(),
+            bits_corrected: 1,
         })
     }
 
@@ -259,13 +329,12 @@ impl CuTask for AprilTags {
     ) -> CuResult<()> {
         let mut result = AprilTagDetections::new();
         result.camera_id = self.camera_id.clone();
+
         if let Some(payload) = input.payload() {
             let image = image_from_cuimage(payload);
-            let detections = self
-                .detector
-                .lock()
-                .map_err(|e| CuError::new_with_cause("getting detector lock failed", e))?
-                .detect(&image);
+
+            let detections = self.with_detector(|detector| detector.detect(&image))?;
+
             for detection in detections {
                 if let Some(aprilpose) = detection.estimate_tag_pose(&self.tag_params) {
                     let translation = aprilpose.translation();
@@ -293,7 +362,8 @@ impl CuTask for AprilTags {
                     ids.push(detection.id());
                 }
             }
-        };
+        }
+
         output.tov = input.tov;
         output.set_payload(result);
         Ok(())
