@@ -1,5 +1,7 @@
 #[cfg(unix)]
 use std::mem::ManuallyDrop;
+#[cfg(unix)]
+use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
 use apriltag::{Detector, DetectorBuilder, Family, Image, TagParams};
@@ -142,7 +144,8 @@ impl AprilTagDetections {
 
 #[cfg(unix)]
 pub struct AprilTags {
-    detector: Detector,
+    // has to be thread safe in order to be a background task
+    detector: Arc<Mutex<Detector>>,
     tag_params: TagParams,
     camera_id: Box<String>,
 }
@@ -225,16 +228,18 @@ impl CuTask for AprilTags {
                 .build()
                 .unwrap();
             return Ok(Self {
-                detector,
+                detector: Arc::new(Mutex::new(detector)),
                 tag_params,
                 camera_id: Box::new(camera_id),
             });
         }
         Ok(Self {
-            detector: DetectorBuilder::default()
-                .add_family_bits(FAMILY.parse::<Family>().unwrap(), 1)
-                .build()
-                .unwrap(),
+            detector: Arc::new(Mutex::new(
+                DetectorBuilder::default()
+                    .add_family_bits(FAMILY.parse::<Family>().unwrap(), 1)
+                    .build()
+                    .unwrap(),
+            )),
             tag_params: TagParams {
                 fx: FX,
                 fy: FY,
@@ -256,7 +261,11 @@ impl CuTask for AprilTags {
         result.camera_id = self.camera_id.clone();
         if let Some(payload) = input.payload() {
             let image = image_from_cuimage(payload);
-            let detections = self.detector.detect(&image);
+            let detections = self
+                .detector
+                .lock()
+                .map_err(|e| CuError::new_with_cause("getting detector lock failed", e))?
+                .detect(&image);
             for detection in detections {
                 if let Some(aprilpose) = detection.estimate_tag_pose(&self.tag_params) {
                     let translation = aprilpose.translation();
