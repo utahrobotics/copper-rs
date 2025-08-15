@@ -581,6 +581,14 @@ mod nalgebra_integration {
         }
     }
 
+    impl Default for EncodableIsometry {
+        fn default() -> Self {
+            let identity = Isometry3::identity();
+            EncodableIsometry::from_na(&identity)
+                .unwrap_or_else(|| EncodableIsometry { inner: [0.0; 16] })
+        }
+    }
+
     impl From<&Transform3D<f64>> for Isometry3<f64> {
         fn from(pose: &Transform3D<f64>) -> Self {
             let mat_array = pose.to_matrix();
