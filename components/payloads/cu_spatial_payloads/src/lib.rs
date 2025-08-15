@@ -585,7 +585,6 @@ mod nalgebra_integration {
         fn default() -> Self {
             let identity = Isometry3::identity();
             EncodableIsometry::from_na(&identity)
-                .unwrap_or_else(|| EncodableIsometry { inner: [0.0; 16] })
         }
     }
 
