@@ -207,7 +207,6 @@ impl Transform3D<f64> {
     }
 }
 
-
 pub trait Transform3DCast {
     fn cast(&self) -> Transform3D<f64>;
 }
@@ -244,7 +243,6 @@ impl Transform3DCast for Transform3D<f32> {
         Transform3D::from_matrix(mat_f64)
     }
 }
-
 
 impl Transform3D<f32> {
     pub fn translation(&self) -> [Length32; 3] {
@@ -557,7 +555,31 @@ mod faer_integration {
 #[cfg(feature = "nalgebra")]
 mod nalgebra_integration {
     use super::Transform3D;
-    use nalgebra::{Isometry3, Matrix3, Matrix4, Rotation3, Translation3, Vector3};
+
+    use nalgebra::{Isometry3, Matrix3, Matrix4, Rotation3, Translation3, UnitQuaternion, Vector3};
+    use serde::{Deserialize, Serialize};
+    #[derive(bincode::Encode, bincode::Decode, Debug, Clone, Copy, Serialize, Deserialize)]
+    pub struct EncodableIsometry {
+        inner: [f64; 16],
+    }
+    impl EncodableIsometry {
+        /// Convert from nalgebra Isometry3 to EncodableIsometry
+        pub fn from_na(isometry: &Isometry3<f64>) -> Self {
+            let matrix = isometry.to_matrix();
+            let slice = matrix.as_slice();
+            let mut inner = [0.0; 16];
+            inner.copy_from_slice(slice);
+            Self { inner }
+        }
+        /// Convert from EncodableIsometry to nalgebra Isometry3
+        pub fn to_na(&self) -> Option<Isometry3<f64>> {
+            let matrix = Matrix4::from_column_slice(&self.inner);
+            let rotation_matrix = matrix.fixed_view::<3, 3>(0, 0).into_owned();
+            let translation = Vector3::new(matrix[(0, 3)], matrix[(1, 3)], matrix[(2, 3)]);
+            let rotation = UnitQuaternion::from_matrix(&rotation_matrix);
+            Some(Isometry3::from_parts(translation.into(), rotation))
+        }
+    }
 
     impl From<&Transform3D<f64>> for Isometry3<f64> {
         fn from(pose: &Transform3D<f64>) -> Self {

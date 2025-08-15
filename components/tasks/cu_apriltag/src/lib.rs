@@ -14,6 +14,7 @@ use bincode::error::DecodeError;
 use cu29::bincode::{Decode, Encode};
 use cu29::prelude::*;
 use cu_sensor_payloads::CuImage;
+use cu_spatial_payloads::EncodableIsometry;
 use cu_spatial_payloads::Pose as CuPose;
 use serde::ser::SerializeTuple;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -38,7 +39,7 @@ const FAMILY: &str = "tag16h5";
 #[derive(Default, Debug, Clone, Encode)]
 pub struct AprilTagDetections {
     pub ids: CuArrayVec<usize, MAX_DETECTIONS>,
-    pub poses: CuArrayVec<CuPose<f32>, MAX_DETECTIONS>,
+    pub poses: CuArrayVec<EncodableIsometry, MAX_DETECTIONS>,
     pub decision_margins: CuArrayVec<f32, MAX_DETECTIONS>,
     pub camera_id: Box<String>,
 }
@@ -46,7 +47,7 @@ pub struct AprilTagDetections {
 impl Decode<()> for AprilTagDetections {
     fn decode<D: Decoder<Context = ()>>(decoder: &mut D) -> Result<Self, DecodeError> {
         let ids = CuArrayVec::<usize, MAX_DETECTIONS>::decode(decoder)?;
-        let poses = CuArrayVec::<CuPose<f32>, MAX_DETECTIONS>::decode(decoder)?;
+        let poses = CuArrayVec::<EncodableIsometry, MAX_DETECTIONS>::decode(decoder)?;
         let decision_margins = CuArrayVec::<f32, MAX_DETECTIONS>::decode(decoder)?;
         let camera_id = Box::<String>::decode(decoder)?;
         Ok(AprilTagDetections {
@@ -128,7 +129,7 @@ impl AprilTagDetections {
     pub fn filtered_by_decision_margin(
         &self,
         threshold: f32,
-    ) -> impl Iterator<Item = (usize, &CuPose<f32>, f32)> {
+    ) -> impl Iterator<Item = (usize, &EncodableIsometry, f32)> {
         let CuArrayVec(ids) = &self.ids;
         let CuArrayVec(poses) = &self.poses;
         let CuArrayVec(decision_margins) = &self.decision_margins;
@@ -336,25 +337,13 @@ impl CuTask for AprilTags {
 
             for detection in detections {
                 if let Some(aprilpose) = detection.estimate_tag_pose(&self.tag_params) {
-                    let translation = aprilpose.translation();
-                    let rotation = aprilpose.rotation();
-                    let mut mat: [[f32; 4]; 4] = [[0.0, 0.0, 0.0, 0.0]; 4];
-                    mat[0][3] = translation.data()[0] as f32;
-                    mat[1][3] = translation.data()[1] as f32;
-                    mat[2][3] = translation.data()[2] as f32;
-                    mat[0][0] = rotation.data()[0] as f32;
-                    mat[0][1] = rotation.data()[3] as f32;
-                    mat[0][2] = rotation.data()[2 * 3] as f32;
-                    mat[1][0] = rotation.data()[1] as f32;
-                    mat[1][1] = rotation.data()[1 + 3] as f32;
-                    mat[1][2] = rotation.data()[1 + 2 * 3] as f32;
-                    mat[2][0] = rotation.data()[2] as f32;
-                    mat[2][1] = rotation.data()[2 + 3] as f32;
-                    mat[2][2] = rotation.data()[2 + 2 * 3] as f32;
+                    use apriltag_nalgebra::PoseExt;
 
-                    let pose = CuPose::<f32>::from_matrix(mat);
+                    let pose_na = aprilpose.to_na();
+                    let encodable_pose = EncodableIsometry::from_na(&pose_na);
+
                     let CuArrayVec(detections) = &mut result.poses;
-                    detections.push(pose);
+                    detections.push(encodable_pose);
                     let CuArrayVec(decision_margin) = &mut result.decision_margins;
                     decision_margin.push(detection.decision_margin());
                     let CuArrayVec(ids) = &mut result.ids;
