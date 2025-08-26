@@ -560,7 +560,7 @@ mod nalgebra_integration {
     use serde::{Deserialize, Serialize};
     #[derive(bincode::Encode, bincode::Decode, Debug, Clone, Copy, Serialize, Deserialize)]
     pub struct EncodableIsometry {
-        inner: [f64; 16],
+        pub inner: [f64; 16],
     }
     impl EncodableIsometry {
         /// Convert from nalgebra Isometry3 to EncodableIsometry
