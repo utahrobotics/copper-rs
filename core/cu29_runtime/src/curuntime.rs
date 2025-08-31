@@ -213,7 +213,7 @@ impl<
         // TODO: make that configurable
         let threadpool = Arc::new(
             rayon::ThreadPoolBuilder::new()
-                .num_threads(2) // default to 4 threads if not specified
+                .num_threads(5) // default to 4 threads if not specified
                 .build()
                 .expect("Could not create the threadpool"),
         );
@@ -236,13 +236,6 @@ impl<
                 DEFAULT_KEYFRAME_INTERVAL,
             ),
         };
-
-        let excluded_tasks = config
-            .logging
-            .as_ref()
-            .and_then(|l| l.excluded_tasks.as_ref())
-            .cloned()
-            .unwrap_or_default();
 
         let copperlists_manager = CopperListsManager {
             inner: CuListsManager::new(),

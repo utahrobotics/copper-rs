@@ -10,7 +10,6 @@ use cu29_log::CuLogLevel;
 use cu29_traits::{CuResult, WriteStream};
 use log::Log;
 
-#[cfg(debug_assertions)]
 use {cu29_log::format_logline, std::collections::HashMap, std::sync::RwLock};
 
 use std::fmt::{Debug, Formatter};
@@ -33,7 +32,6 @@ type WriterPair = (Mutex<LogWriter>, RobotClock);
 
 static WRITER: OnceLock<WriterPair> = OnceLock::new();
 
-#[cfg(debug_assertions)]
 pub static EXTRA_TEXT_LOGGER: RwLock<Option<Box<dyn Log + 'static>>> = RwLock::new(None);
 
 pub struct NullLog;
@@ -69,7 +67,6 @@ impl LoggerRuntime {
                 .set((Mutex::new(Box::new(destination)), clock))
                 .unwrap();
         }
-        #[cfg(debug_assertions)]
         if let Some(logger) = extra_text_logger {
             *EXTRA_TEXT_LOGGER.write().unwrap() = Some(Box::new(logger) as Box<dyn Log>);
         }
@@ -118,7 +115,6 @@ pub fn log(entry: &mut CuLogEntry) -> CuResult<()> {
         eprintln!("Failed to log data: {err}");
     }
     // This is only for debug builds with standard textual logging implemented.
-    #[cfg(debug_assertions)]
     {
         // This scope is important :).
         // if we have not passed a text logger in debug mode, it is ok just move along.
@@ -129,7 +125,6 @@ pub fn log(entry: &mut CuLogEntry) -> CuResult<()> {
 
 /// This version of log is only compiled in debug mode
 /// This allows a normal logging framework to be bridged.
-#[cfg(debug_assertions)]
 pub fn log_debug_mode(
     entry: &mut CuLogEntry,
     format_str: &str, // this is the missing info at runtime.

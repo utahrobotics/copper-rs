@@ -5,7 +5,6 @@ use cu29_log::CuLogLevel;
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::parse::Parser;
-#[cfg(debug_assertions)]
 use syn::spanned::Spanned;
 use syn::Token;
 use syn::{Expr, ExprAssign, ExprLit, Lit};
@@ -106,12 +105,6 @@ fn create_log_entry(input: TokenStream, level: CuLogLevel) -> TokenStream {
         }
     });
 
-    #[cfg(not(debug_assertions))]
-    let log_stmt = quote! {
-        let r = log(&mut log_entry);
-    };
-
-    #[cfg(debug_assertions)]
     let log_stmt = {
         let keys: Vec<_> = named_params
             .iter()
