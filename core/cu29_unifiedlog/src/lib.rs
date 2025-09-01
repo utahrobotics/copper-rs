@@ -24,8 +24,8 @@ const SECTION_MAGIC: [u8; 2] = [0xFA, 0x57];
 #[derive(Encode, Decode, Debug)]
 pub struct MainHeader {
     pub magic: [u8; 4],            // Magic number to identify the file.
-    pub first_section_offset: u16, // This is to align with a page at write time.
-    pub page_size: u16,
+    pub first_section_offset: u32, // This is to align with a page at write time.
+    pub page_size: u32,
 }
 
 impl Display for MainHeader {
@@ -532,8 +532,8 @@ impl UnifiedLoggerWrite {
         // This is the first slab so add the main header.
         let main_header = MainHeader {
             magic: MAIN_MAGIC,
-            first_section_offset: page_size as u16,
-            page_size: page_size as u16,
+            first_section_offset: page_size as u32,
+            page_size: page_size as u32,
         };
         let nb_bytes = encode_into_slice(&main_header, &mut front_slab.mmap_buffer[..], standard())
             .expect("Failed to encode main header");
@@ -620,14 +620,14 @@ impl Drop for UnifiedLoggerWrite {
 fn open_slab_index(
     base_file_path: &Path,
     slab_index: usize,
-) -> io::Result<(File, Mmap, u16, Option<MainHeader>)> {
+) -> io::Result<(File, Mmap, u32, Option<MainHeader>)> {
     let mut options = OpenOptions::new();
     let options = options.read(true);
 
     let file_path = build_slab_path(base_file_path, slab_index);
     let file = options.open(file_path)?;
     let mmap = unsafe { Mmap::map(&file) }?;
-    let mut prolog = 0u16;
+    let mut prolog = 0u32;
     let mut maybe_main_header: Option<MainHeader> = None;
     if slab_index == 0 {
         let main_header: MainHeader;
