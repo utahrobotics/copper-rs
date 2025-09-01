@@ -650,7 +650,7 @@ fn open_slab_index(
         }
 
         // Try to read as new format (version 2) first
-        let main_header = match decode_from_slice::<MainHeader>(&mmap[..], standard()) {
+        let main_header = match decode_from_slice::<MainHeader, _>(&mmap[..], standard()) {
             Ok((header, _)) => header,
             Err(_) => {
                 // Failed to read as v2, try v1 format and convert
@@ -789,8 +789,7 @@ impl UnifiedLoggerRead {
     }
 
     fn read_section_header(&mut self) -> CuResult<SectionHeader> {
-        let section_header: SectionHeader;
-        (section_header, _) = decode_from_slice(
+        let (section_header, _): (SectionHeader, usize) = decode_from_slice(
             &self.current_mmap_buffer[self.current_reading_position..],
             standard(),
         )
