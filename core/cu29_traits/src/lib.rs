@@ -92,9 +92,6 @@ pub trait CuMsgMetadataTrait {
 
     /// Small status text for user UI to get the realtime state of task (max 24 chrs)
     fn status_txt(&self) -> &CuCompactString;
-
-    /// The ID of the task that generated this message
-    fn task_id(&self) -> u16;
 }
 
 /// A generic trait to expose the generated CuStampedDataSet from the task graph.
@@ -102,7 +99,6 @@ pub trait ErasedCuStampedData {
     fn payload(&self) -> Option<&dyn erased_serde::Serialize>;
     fn tov(&self) -> Tov;
     fn metadata(&self) -> &dyn CuMsgMetadataTrait;
-    fn clear_payload(&mut self);
 }
 
 /// Trait to get a vector of type-erased CuStampedDataSet
@@ -151,10 +147,8 @@ pub struct CuCompactString(pub CompactString);
 impl Encode for CuCompactString {
     fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
         let CuCompactString(ref compact_string) = self;
-        let bytes = compact_string.as_bytes();
-        let filtered_len = bytes.iter().filter(|&&b| b != 0).count();
-        filtered_len.encode(encoder)?;
-        Ok(())
+        let bytes = &compact_string.as_bytes();
+        bytes.encode(encoder)
     }
 }
 
@@ -169,7 +163,10 @@ impl Debug for CuCompactString {
 
 impl<Context> Decode<Context> for CuCompactString {
     fn decode<D: Decoder>(decoder: &mut D) -> Result<Self, DecodeError> {
-        Ok(CuCompactString(CompactString::new("")))
+        let bytes = <Vec<u8> as Decode<D::Context>>::decode(decoder)?; // Decode into a byte buffer
+        let compact_string =
+            CompactString::from_utf8(bytes).map_err(|e| DecodeError::Utf8 { inner: e })?;
+        Ok(CuCompactString(compact_string))
     }
 }
 
