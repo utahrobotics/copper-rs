@@ -6,7 +6,6 @@ use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 use std::slice::from_raw_parts_mut;
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{io, mem};
 
 use bincode::config::standard;
@@ -83,8 +82,6 @@ struct MmapStream {
     current_section: SectionHandle,
     current_position: usize,
     minimum_allocation_amount: usize,
-    cl_log_target_hz: Option<u32>,
-    last_seen_log: Option<Instant>,
 }
 
 impl MmapStream {
@@ -92,7 +89,6 @@ impl MmapStream {
         entry_type: UnifiedLogType,
         parent_logger: Arc<Mutex<UnifiedLoggerWrite>>,
         minimum_allocation_amount: usize,
-        cl_log_target_hz: Option<u32>,
     ) -> Self {
         let section = parent_logger
             .lock()
@@ -104,8 +100,6 @@ impl MmapStream {
             current_section: section,
             current_position: 0,
             minimum_allocation_amount,
-            cl_log_target_hz,
-            last_seen_log: None,
         }
     }
 }
@@ -118,13 +112,6 @@ impl Debug for MmapStream {
 
 impl<E: Encode> WriteStream<E> for MmapStream {
     fn log(&mut self, obj: &E) -> CuResult<()> {
-        if let (Some(last_seen), Some(target_hz)) = (&self.last_seen_log, &self.cl_log_target_hz) {
-            if last_seen.elapsed().as_nanos() < (1_000_000_000 / target_hz) as u128 {
-                return Ok(());
-            }
-        }
-
-        self.last_seen_log = Some(Instant::now());
         let dst = self.current_section.get_user_buffer();
         let result = encode_into_slice(obj, dst, standard());
         match result {
@@ -185,14 +172,8 @@ pub fn stream_write<E: Encode>(
     logger: Arc<Mutex<UnifiedLoggerWrite>>,
     entry_type: UnifiedLogType,
     minimum_allocation_amount: usize,
-    cl_log_target_hz: Option<u32>,
 ) -> impl WriteStream<E> {
-    MmapStream::new(
-        entry_type,
-        logger.clone(),
-        minimum_allocation_amount,
-        cl_log_target_hz,
-    )
+    MmapStream::new(entry_type, logger.clone(), minimum_allocation_amount)
 }
 
 /// Holder of the read or write side of the datalogger.
@@ -607,12 +588,14 @@ impl UnifiedLoggerWrite {
 
 impl Drop for UnifiedLoggerWrite {
     fn drop(&mut self) {
+        #[cfg(debug_assertions)]
         eprintln!("Flushing the unified Logger ... "); // Note this cannot be a structured log writing in this log.
 
         let mut section = self.add_section(UnifiedLogType::LastEntry, 80); // TODO: determine that exactly
         self.front_slab.flush_section(&mut section);
         self.garbage_collect_backslabs();
 
+        #[cfg(debug_assertions)]
         eprintln!("Unified Logger flushed."); // Note this cannot be a structured log writing in this log.
     }
 }
@@ -893,12 +876,8 @@ mod tests {
         let tmp_dir = TempDir::new().expect("could not create a tmp dir");
         let (logger, _) = make_a_logger(&tmp_dir, LARGE_SLAB);
         {
-            let _stream = stream_write::<()>(
-                logger.clone(),
-                UnifiedLogType::StructuredLogLine,
-                1024,
-                None,
-            );
+            let _stream =
+                stream_write::<()>(logger.clone(), UnifiedLogType::StructuredLogLine, 1024);
             assert_eq!(
                 logger
                     .lock()
@@ -929,12 +908,7 @@ mod tests {
     fn test_two_sections_self_cleaning_in_order() {
         let tmp_dir = TempDir::new().expect("could not create a tmp dir");
         let (logger, _) = make_a_logger(&tmp_dir, LARGE_SLAB);
-        let s1 = stream_write::<()>(
-            logger.clone(),
-            UnifiedLogType::StructuredLogLine,
-            1024,
-            None,
-        );
+        let s1 = stream_write::<()>(logger.clone(), UnifiedLogType::StructuredLogLine, 1024);
         assert_eq!(
             logger
                 .lock()
@@ -944,12 +918,7 @@ mod tests {
                 .len(),
             1
         );
-        let s2 = stream_write::<()>(
-            logger.clone(),
-            UnifiedLogType::StructuredLogLine,
-            1024,
-            None,
-        );
+        let s2 = stream_write::<()>(logger.clone(), UnifiedLogType::StructuredLogLine, 1024);
         assert_eq!(
             logger
                 .lock()
@@ -982,12 +951,7 @@ mod tests {
     fn test_two_sections_self_cleaning_out_of_order() {
         let tmp_dir = TempDir::new().expect("could not create a tmp dir");
         let (logger, _) = make_a_logger(&tmp_dir, LARGE_SLAB);
-        let s1 = stream_write::<()>(
-            logger.clone(),
-            UnifiedLogType::StructuredLogLine,
-            1024,
-            None,
-        );
+        let s1 = stream_write::<()>(logger.clone(), UnifiedLogType::StructuredLogLine, 1024);
         assert_eq!(
             logger
                 .lock()
@@ -997,12 +961,7 @@ mod tests {
                 .len(),
             1
         );
-        let s2 = stream_write::<()>(
-            logger.clone(),
-            UnifiedLogType::StructuredLogLine,
-            1024,
-            None,
-        );
+        let s2 = stream_write::<()>(logger.clone(), UnifiedLogType::StructuredLogLine, 1024);
         assert_eq!(
             logger
                 .lock()
@@ -1036,12 +995,7 @@ mod tests {
         let tmp_dir = TempDir::new().expect("could not create a tmp dir");
         let (logger, f) = make_a_logger(&tmp_dir, LARGE_SLAB);
         {
-            let mut stream = stream_write(
-                logger.clone(),
-                UnifiedLogType::StructuredLogLine,
-                1024,
-                None,
-            );
+            let mut stream = stream_write(logger.clone(), UnifiedLogType::StructuredLogLine, 1024);
             stream.log(&1u32).unwrap();
             stream.log(&2u32).unwrap();
             stream.log(&3u32).unwrap();
@@ -1089,7 +1043,7 @@ mod tests {
         let tmp_dir = TempDir::new().expect("could not create a tmp dir");
         let (logger, f) = make_a_logger(&tmp_dir, LARGE_SLAB);
         {
-            let mut stream = stream_write(logger.clone(), UnifiedLogType::CopperList, 1024, None);
+            let mut stream = stream_write(logger.clone(), UnifiedLogType::CopperList, 1024);
             let cl0 = CopperList {
                 state: CopperListStateMock::Free,
                 payload: (1u32, 2u32, 3u32),
@@ -1128,7 +1082,7 @@ mod tests {
         let tmp_dir = TempDir::new().expect("could not create a tmp dir");
         let (logger, f) = make_a_logger(&tmp_dir, SMALL_SLAB);
         {
-            let mut stream = stream_write(logger.clone(), UnifiedLogType::CopperList, 1024, None);
+            let mut stream = stream_write(logger.clone(), UnifiedLogType::CopperList, 1024);
             let cl0 = CopperList {
                 state: CopperListStateMock::Free,
                 payload: (1u32, 2u32, 3u32),
