@@ -20,19 +20,10 @@ const MAIN_MAGIC: [u8; 4] = [0xB4, 0xA5, 0x50, 0xFF];
 
 const SECTION_MAGIC: [u8; 2] = [0xFA, 0x57];
 
-/// The legacy main file header of the datalogger (version 1).
-#[derive(Encode, Decode, Debug)]
-pub struct MainHeaderV1 {
-    pub magic: [u8; 4],            // Magic number to identify the file.
-    pub first_section_offset: u16, // This is to align with a page at write time.
-    pub page_size: u16,
-}
-
-/// The main file header of the datalogger (version 2).
+/// The main file header of the datalogger.
 #[derive(Encode, Decode, Debug)]
 pub struct MainHeader {
     pub magic: [u8; 4],            // Magic number to identify the file.
-    pub version: u32,              // Version number for format compatibility.
     pub first_section_offset: u32, // This is to align with a page at write time.
     pub page_size: u32,
 }
@@ -44,7 +35,6 @@ impl Display for MainHeader {
             "  Magic -> {:2x}{:2x}{:2x}{:2x}",
             self.magic[0], self.magic[1], self.magic[2], self.magic[3]
         )?;
-        writeln!(f, "  version -> {}", self.version)?;
         writeln!(f, "  first_section_offset -> {}", self.first_section_offset)?;
         writeln!(f, "  page_size -> {}", self.page_size)
     }
@@ -542,7 +532,6 @@ impl UnifiedLoggerWrite {
         // This is the first slab so add the main header.
         let main_header = MainHeader {
             magic: MAIN_MAGIC,
-            version: 2,
             first_section_offset: page_size as u32,
             page_size: page_size as u32,
         };
@@ -641,37 +630,16 @@ fn open_slab_index(
     let mut prolog = 0u32;
     let mut maybe_main_header: Option<MainHeader> = None;
     if slab_index == 0 {
-        // First check magic number
-        if mmap.len() < 4 || &mmap[0..4] != &MAIN_MAGIC {
+        let main_header: MainHeader;
+        let _read: usize;
+        (main_header, _read) =
+            decode_from_slice(&mmap[..], standard()).expect("Failed to decode main header");
+        if main_header.magic != MAIN_MAGIC {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Invalid magic number in main header",
             ));
         }
-
-        // Try to read as new format (version 2) first
-        let main_header = match decode_from_slice::<MainHeader>(&mmap[..], standard()) {
-            Ok((header, _)) => header,
-            Err(_) => {
-                // Failed to read as v2, try v1 format and convert
-                let (header_v1, _): (MainHeaderV1, usize) =
-                    decode_from_slice(&mmap[..], standard()).map_err(|e| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("Failed to decode header as v1 or v2: {}", e),
-                        )
-                    })?;
-
-                // Convert v1 to v2 format
-                MainHeader {
-                    magic: header_v1.magic,
-                    version: 1, // Mark as converted from v1
-                    first_section_offset: header_v1.first_section_offset as u32,
-                    page_size: header_v1.page_size as u32,
-                }
-            }
-        };
-
         prolog = main_header.first_section_offset;
         maybe_main_header = Some(main_header);
     }
