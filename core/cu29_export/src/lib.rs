@@ -461,12 +461,7 @@ mod tests {
                 panic!("Failed to create logger")
             };
             let data_logger = Arc::new(Mutex::new(logger));
-            let stream = stream_write(
-                data_logger.clone(),
-                UnifiedLogType::StructuredLogLine,
-                1024,
-                None,
-            );
+            let stream = stream_write(data_logger.clone(), UnifiedLogType::StructuredLogLine, 1024);
             let rt = LoggerRuntime::init(RobotClock::default(), stream, None::<NullLog>);
 
             let mut entry = CuLogEntry::new(4, CuLogLevel::Info); // this is a "Just a String {}" log line
@@ -505,9 +500,6 @@ mod tests {
 
     impl ErasedCuStampedDataSet for MyMsgs {
         fn cumsgs(&self) -> Vec<&dyn ErasedCuStampedData> {
-            Vec::new()
-        }
-        fn cumsgs_mut(&mut self) -> Vec<&mut dyn ErasedCuStampedData> {
             Vec::new()
         }
     }
