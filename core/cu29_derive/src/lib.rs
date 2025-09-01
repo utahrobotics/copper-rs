@@ -529,10 +529,10 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                                     let error: CuError = reason.into();
                                     #monitoring_action
                                     false
-                                }
-                                else {
+                               }
+                               else {
                                     ovr == cu29::simulation::SimOverride::ExecuteByRuntime
-                                };
+                               };
                             }
                         } else {
                             quote! {
@@ -802,7 +802,6 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                                                 kf_manager.freeze_task(clid, &#task_instance)?;
                                                 #call_sim_callback
                                                 let cumsg_output = &mut msgs.#output_culist_index;
-                                                cumsg_output.metadata.task_id = #tid as u16;
                                                 cumsg_output.metadata.process_time.start = clock.now().into();
                                                 let maybe_error = if doit {
                                                     #task_instance.process(clock, cumsg_output)
@@ -927,7 +926,6 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                                             let cumsg_input = &#inputs_type;
                                             // This is the virtual output for the sink
                                             let cumsg_output = &mut msgs.#output_culist_index;
-                                            cumsg_output.metadata.task_id = #tid as u16;
                                             cumsg_output.metadata.process_time.start = clock.now().into();
                                             let maybe_error = if doit {#task_instance.process(clock, cumsg_input)} else {Ok(())};
                                             cumsg_output.metadata.process_time.end = clock.now().into();
@@ -1022,7 +1020,6 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                                             #call_sim_callback
                                             let cumsg_input = &#inputs_type;
                                             let cumsg_output = &mut msgs.#output_culist_index;
-                                            cumsg_output.metadata.task_id = #tid as u16;
                                             cumsg_output.metadata.process_time.start = clock.now().into();
                                             let maybe_error = if doit {#task_instance.process(clock, cumsg_input, cumsg_output)} else {Ok(())};
                                             cumsg_output.metadata.process_time.end = clock.now().into();
@@ -1299,13 +1296,11 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                         // Convert MiB to bytes
                         default_section_size = section_size_mib as usize * 1024usize * 1024usize;
                     }
-
-                    let cl_log_target_hz = config.logging.as_ref().and_then(|l| l.target_hz);
                     let copperlist_stream = stream_write::<#mission_mod::CuList>(
                         unified_logger.clone(),
                         UnifiedLogType::CopperList,
                         default_section_size,
-                        cl_log_target_hz,                        // the 2 sizes are not directly related as we encode the CuList but we can
+                        // the 2 sizes are not directly related as we encode the CuList but we can
                         // assume the encoded size is close or lower than the non encoded one
                         // This is to be sure we have the size of at least a Culist and some.
                     );
@@ -1314,7 +1309,6 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                         unified_logger.clone(),
                         UnifiedLogType::FrozenTasks,
                         1024 * 1024 * 10, // 10 MiB
-                        None
                     );
 
 
@@ -1492,8 +1486,6 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                 use cu29::cutask::CuMsg;
                 use cu29::cutask::CuMsgMetadata;
                 use cu29::copperlist::CopperList;
-                use cu29::prelude::CuCompactString;
-                use cu29::prelude::CompactString;
                 use cu29::monitoring::CuMonitor; // Trait import.
                 use cu29::monitoring::CuTaskState;
                 use cu29::monitoring::Decision;
@@ -1818,24 +1810,11 @@ fn build_culist_erasedcumsgs(all_msgs_types_in_culist_order: &[Type]) -> ItemImp
             quote! { &self.0.#idx as &dyn ErasedCuStampedData }
         })
         .collect();
-    let casted_fields_mut: Vec<_> = indices
-        .iter()
-        .map(|i| {
-            let idx = syn::Index::from(*i);
-            quote! { &mut self.0.#idx as &mut dyn ErasedCuStampedData }
-        })
-        .collect();
     parse_quote! {
         impl ErasedCuStampedDataSet for CuStampedDataSet {
             fn cumsgs(&self) -> Vec<&dyn ErasedCuStampedData> {
                 vec![
                     #(#casted_fields),*
-                ]
-            }
-
-            fn cumsgs_mut(&mut self) -> Vec<&mut dyn ErasedCuStampedData> {
-                vec![
-                    #(#casted_fields_mut),*
                 ]
             }
         }
