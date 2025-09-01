@@ -86,17 +86,7 @@
 //! determines if the simulation should handle it (`SimOverride::ExecutedBySim`) or defer to the runtime's real
 //! implementation (`SimOverride::ExecuteByRuntime`).
 //!
-//! ## Task Simulation with `CuSimSrcTask` and `CuSimSinkTask`
-//!
-//! The module provides placeholder tasks for source and sink tasks, which do not interact with real hardware but
-//! instead simulate the presence of it.
-//!
-//! - **`CuSimSrcTask<T>`**: A placeholder for a source task that simulates a sensor or data acquisition hardware.
-//!   This task provides the ability to simulate incoming data without requiring actual hardware initialization.
-//!
-//! - **`CuSimSinkTask<T>`**: A placeholder for a sink task that simulates sending data to hardware. It serves as a
-//!   mock for hardware actuators or output devices during simulations.
-//!
+
 //! ## Controlling Simulation Flow: `SimOverride` Enum
 //!
 //! The `SimOverride` enum is used to control how the simulator should proceed at each step. This allows

@@ -418,11 +418,7 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                         if *background {
                             panic!("CuSrcTask {task_id} cannot be a background task, it should be a regular task.");
                         }
-                        let msg_type = graph
-                            .get_node_output_msg_type(task_id.as_str())
-                            .unwrap_or_else(|| panic!("CuSrcTask {task_id} should have an outgoing connection with a valid output msg type"));
-                        let sim_task_name = format!("cu29::simulation::CuSimSrcTask<{msg_type}>");
-                        parse_str(sim_task_name.as_str()).unwrap_or_else(|_| panic!("Could not build the placeholder for simulation: {sim_task_name}"))
+                        stype.clone()
                     }
                     CuTaskType::Regular => {
                         // TODO: wrap that correctly in a background task if background is true.
@@ -432,12 +428,7 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                         if *background {
                             panic!("CuSinkTask {task_id} cannot be a background task, it should be a regular task.");
                         }
-                        let msg_type = graph
-                            .get_node_input_msg_type(task_id.as_str())
-                            .unwrap_or_else(|| panic!("CuSinkTask {task_id} should have an incoming connection with a valid input msg type"));
-                        // println!("msg type: {}", msg_type);
-                        let sim_task_name = format!("cu29::simulation::CuSimSinkTask<{msg_type}>");
-                        parse_str(sim_task_name.as_str()).unwrap_or_else(|_| panic!("Could not build the placeholder for simulation: {sim_task_name}"))
+                        stype.clone()
                     }
                 }
     })
@@ -538,10 +529,10 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                                     let error: CuError = reason.into();
                                     #monitoring_action
                                     false
-                               }
-                               else {
+                                }
+                                else {
                                     ovr == cu29::simulation::SimOverride::ExecuteByRuntime
-                               };
+                                };
                             }
                         } else {
                             quote! {
