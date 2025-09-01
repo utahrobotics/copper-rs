@@ -626,10 +626,6 @@ pub struct LoggingConfig {
     #[serde(default = "default_as_true", skip_serializing_if = "Clone::clone")]
     pub enable_task_logging: bool,
 
-    /// Tasks to exclude from logging (task names)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub excluded_tasks: Option<Vec<String>>,
-
     /// Size of each slab in the log file. (it is the size of the memory mapped file at a time)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slab_size_mib: Option<u64>,
@@ -644,9 +640,6 @@ pub struct LoggingConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub keyframe_interval: Option<u32>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub target_hz: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]

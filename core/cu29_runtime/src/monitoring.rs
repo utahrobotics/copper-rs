@@ -12,8 +12,6 @@ use hdrhistogram::Histogram;
 use serde_derive::{Deserialize, Serialize};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
-#[cfg(feature = "jemalloc")]
-use jemallocator::Jemalloc;
 
 /// The state of a task.
 #[derive(Debug, Serialize, Deserialize)]
@@ -111,21 +109,9 @@ impl CountingAllocator {
     }
 }
 
-#[cfg(feature = "jemalloc")]
-static JEMALLOC: Jemalloc = Jemalloc;
-
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let ptr = {
-            #[cfg(feature = "jemalloc")]
-            {
-                JEMALLOC.alloc(layout)
-            }
-            #[cfg(not(feature = "jemalloc"))]
-            {
-                System.alloc(layout)
-            }
-        };
+        let ptr = System.alloc(layout);
         if !ptr.is_null() {
             self.allocated.fetch_add(layout.size(), Ordering::SeqCst);
         }
@@ -133,14 +119,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        #[cfg(feature = "jemalloc")]
-        {
-            JEMALLOC.dealloc(ptr, layout);
-        }
-        #[cfg(not(feature = "jemalloc"))]
-        {
-            System.dealloc(ptr, layout);
-        }
+        System.dealloc(ptr, layout);
         self.deallocated.fetch_add(layout.size(), Ordering::SeqCst);
     }
 }

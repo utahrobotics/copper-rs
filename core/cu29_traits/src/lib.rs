@@ -109,7 +109,6 @@ pub trait ErasedCuStampedData {
 /// This is used for generic serialization of the copperlists
 pub trait ErasedCuStampedDataSet {
     fn cumsgs(&self) -> Vec<&dyn ErasedCuStampedData>;
-    fn cumsgs_mut(&mut self) -> Vec<&mut dyn ErasedCuStampedData>;
 }
 
 /// Trait to trace back from the CopperList the origin of the messages

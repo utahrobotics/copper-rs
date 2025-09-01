@@ -7,6 +7,7 @@ pub(crate) use cu29_value::to_value;
 pub(crate) use cu29_log_runtime::log;
 
 #[allow(unused_imports)]
+#[cfg(debug_assertions)]
 pub(crate) use cu29_log_runtime::log_debug_mode;
 
 #[allow(unused_imports)]

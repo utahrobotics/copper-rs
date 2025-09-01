@@ -213,7 +213,7 @@ impl<
         // TODO: make that configurable
         let threadpool = Arc::new(
             rayon::ThreadPoolBuilder::new()
-                .num_threads(5) // default to 4 threads if not specified
+                .num_threads(2) // default to 4 threads if not specified
                 .build()
                 .expect("Could not create the threadpool"),
         );
@@ -671,9 +671,6 @@ mod tests {
 
     impl ErasedCuStampedDataSet for Msgs {
         fn cumsgs(&self) -> Vec<&dyn ErasedCuStampedData> {
-            Vec::new()
-        }
-        fn cumsgs_mut(&mut self) -> Vec<&mut dyn ErasedCuStampedData> {
             Vec::new()
         }
     }
