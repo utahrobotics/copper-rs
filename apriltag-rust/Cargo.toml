@@ -1,8 +1,5 @@
 [workspace]
 resolver = "2"
-members = [
-    "apriltag",
-    "apriltag-sys",
-    "apriltag-nalgebra",
-    "apriltag-image",
-]
+
+[target.'cfg(target_os = "linux")'.workspace]
+members = ["apriltag", "apriltag-sys", "apriltag-nalgebra", "apriltag-image"]
