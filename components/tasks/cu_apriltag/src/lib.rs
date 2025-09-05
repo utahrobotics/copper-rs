@@ -1,12 +1,12 @@
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::cell::RefCell;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use std::mem::ManuallyDrop;
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use apriltag::{Detector, DetectorBuilder, Family, Image, TagParams};
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use apriltag_sys::image_u8_t;
 
 use bincode::de::Decoder;
@@ -144,7 +144,7 @@ impl AprilTagDetections {
 }
 
 // Thread-local storage for detector configuration
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[derive(Clone)]
 struct DetectorConfig {
     family_str: String, // Store as string to avoid Clone/PartialEq issues
@@ -152,13 +152,13 @@ struct DetectorConfig {
     tag_params: TagParams,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 thread_local! {
     static DETECTOR: RefCell<Option<Detector>> = RefCell::new(None);
     static DETECTOR_CONFIG: RefCell<Option<DetectorConfig>> = RefCell::new(None);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub struct AprilTags {
     tag_params: TagParams,
     camera_id: Box<String>,
@@ -189,7 +189,7 @@ where
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl AprilTags {
     fn ensure_detector_initialized(&self) -> CuResult<()> {
         DETECTOR_CONFIG.with(|config_cell| {
