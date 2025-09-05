@@ -23,17 +23,17 @@ use serde::{Deserialize, Deserializer, Serialize};
 const MAX_DETECTIONS: usize = 16;
 
 // Defaults
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 const TAG_SIZE: f64 = 0.14;
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 const FX: f64 = 2600.0;
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 const FY: f64 = 2600.0;
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 const CX: f64 = 900.0;
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 const CY: f64 = 520.0;
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 const FAMILY: &str = "tag16h5";
 
 #[derive(Default, Debug, Clone, Encode)]
@@ -367,7 +367,7 @@ mod tests {
     use image::{imageops::crop, imageops::resize, imageops::FilterType, Luma};
     use image::{ImageBuffer, ImageReader};
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     use cu_sensor_payloads::CuImageBufferFormat;
 
     #[allow(dead_code)]
@@ -387,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     fn test_end2end_apriltag() -> Result<()> {
         let img = process_image("tests/data/simple.jpg")?;
         let format = CuImageBufferFormat {
