@@ -167,10 +167,10 @@ pub struct AprilTags {
     bits_corrected: usize,
 }
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 pub struct AprilTags {}
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn image_from_cuimage<A>(cu_image: &CuImage<A>) -> ManuallyDrop<Image>
 where
     A: ArrayLike<Element = u8>,
@@ -252,7 +252,7 @@ impl AprilTags {
 
 impl Freezable for AprilTags {}
 
-#[cfg(windows)]
+#[cfg(not(target_os = "linux"))]
 impl CuTask for AprilTags {
     type Input<'m> = input_msg!(CuImage<Vec<u8>>);
     type Output<'m> = output_msg!(AprilTagDetections);
@@ -274,7 +274,7 @@ impl CuTask for AprilTags {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 impl CuTask for AprilTags {
     type Input<'m> = input_msg!(CuImage<Vec<u8>>);
     type Output<'m> = output_msg!(AprilTagDetections);
