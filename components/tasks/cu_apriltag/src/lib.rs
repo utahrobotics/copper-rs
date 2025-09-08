@@ -1,12 +1,12 @@
-#[cfg(all(target_os = "linux", not(any(feature = "sim", feature = "resim"))))]
+#[cfg(feature = "hardware")]
 use std::cell::RefCell;
-#[cfg(all(target_os = "linux", not(any(feature = "sim", feature = "resim"))))]
+#[cfg(feature = "hardware")]
 use std::mem::ManuallyDrop;
 
-#[cfg(all(target_os = "linux", not(any(feature = "sim", feature = "resim"))))]
+#[cfg(feature = "hardware")]
 use apriltag::{Detector, DetectorBuilder, Family, Image, TagParams};
 
-#[cfg(all(target_os = "linux", not(any(feature = "sim", feature = "resim"))))]
+#[cfg(feature = "hardware")]
 use apriltag_sys::image_u8_t;
 
 use bincode::de::Decoder;
@@ -23,17 +23,17 @@ use serde::{Deserialize, Deserializer, Serialize};
 const MAX_DETECTIONS: usize = 16;
 
 // Defaults
-#[cfg(all(target_os = "linux", not(any(feature = "sim", feature = "resim"))))]
+#[cfg(feature = "hardware")]
 const TAG_SIZE: f64 = 0.14;
-#[cfg(all(target_os = "linux", not(any(feature = "sim", feature = "resim"))))]
+#[cfg(feature = "hardware")]
 const FX: f64 = 2600.0;
-#[cfg(all(target_os = "linux", not(any(feature = "sim", feature = "resim"))))]
+#[cfg(feature = "hardware")]
 const FY: f64 = 2600.0;
-#[cfg(all(target_os = "linux", not(any(feature = "sim", feature = "resim"))))]
+#[cfg(feature = "hardware")]
 const CX: f64 = 900.0;
-#[cfg(all(target_os = "linux", not(any(feature = "sim", feature = "resim"))))]
+#[cfg(feature = "hardware")]
 const CY: f64 = 520.0;
-#[cfg(all(target_os = "linux", not(any(feature = "sim", feature = "resim"))))]
+#[cfg(feature = "hardware")]
 const FAMILY: &str = "tag16h5";
 
 #[derive(Default, Debug, Clone, Encode)]
@@ -144,7 +144,7 @@ impl AprilTagDetections {
 }
 
 // Thread-local storage for detector configuration
-#[cfg(all(target_os = "linux", not(any(feature = "sim", feature = "resim"))))]
+#[cfg(feature = "hardware")]
 #[derive(Clone)]
 struct DetectorConfig {
     family_str: String, // Store as string to avoid Clone/PartialEq issues
@@ -152,13 +152,13 @@ struct DetectorConfig {
     tag_params: TagParams,
 }
 
-#[cfg(all(target_os = "linux", not(any(feature = "sim", feature = "resim"))))]
+#[cfg(feature = "hardware")]
 thread_local! {
     static DETECTOR: RefCell<Option<Detector>> = RefCell::new(None);
     static DETECTOR_CONFIG: RefCell<Option<DetectorConfig>> = RefCell::new(None);
 }
 
-#[cfg(all(target_os = "linux", not(any(feature = "sim", feature = "resim"))))]
+#[cfg(feature = "hardware")]
 pub struct AprilTags {
     tag_params: TagParams,
     camera_id: Box<String>,
@@ -170,7 +170,7 @@ pub struct AprilTags {
 #[cfg(any(not(target_os = "linux"), feature = "sim", feature = "resim"))]
 pub struct AprilTags {}
 
-#[cfg(all(target_os = "linux", not(any(feature = "sim", feature = "resim"))))]
+#[cfg(feature = "hardware")]
 fn image_from_cuimage<A>(cu_image: &CuImage<A>) -> ManuallyDrop<Image>
 where
     A: ArrayLike<Element = u8>,
@@ -189,7 +189,7 @@ where
     }
 }
 
-#[cfg(all(target_os = "linux", not(any(feature = "sim", feature = "resim"))))]
+#[cfg(feature = "hardware")]
 impl AprilTags {
     fn ensure_detector_initialized(&self) -> CuResult<()> {
         DETECTOR_CONFIG.with(|config_cell| {
@@ -250,6 +250,10 @@ impl AprilTags {
     }
 }
 
+#[cfg(feature = "hardware")]
+impl Freezable for AprilTags {}
+
+#[cfg(any(not(target_os = "linux"), feature = "sim", feature = "resim"))]
 impl Freezable for AprilTags {}
 
 #[cfg(any(not(target_os = "linux"), feature = "sim", feature = "resim"))]
@@ -274,7 +278,7 @@ impl CuTask for AprilTags {
     }
 }
 
-#[cfg(all(target_os = "linux", not(any(feature = "sim", feature = "resim"))))]
+#[cfg(feature = "hardware")]
 impl CuTask for AprilTags {
     type Input<'m> = input_msg!(CuImage<Vec<u8>>);
     type Output<'m> = output_msg!(AprilTagDetections);

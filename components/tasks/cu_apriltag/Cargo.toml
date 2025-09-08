@@ -11,8 +11,7 @@ repository.workspace = true
 description = "AprilTag detection and pose for Copper"
 
 [features]
-apriltag-deps = ["apriltag", "apriltag-nalgebra", "apriltag-sys"]
-default = ["apriltag-deps"]
+hardware = ["apriltag", "apriltag-nalgebra", "apriltag-sys"]
 sim = []
 resim = []
 
@@ -30,7 +29,7 @@ cu-spatial-payloads = { path = "../../payloads/cu_spatial_payloads", version = "
 ] }
 cu-sensor-payloads = { path = "../../payloads/cu_sensor_payloads", version = "0.9.0" }
 
-[target.'cfg(all(target_os = "linux", not(any(feature = "sim", feature = "resim"))))'.dependencies]
+[target.'cfg(target_os = "linux")'.dependencies]
 apriltag = { path = "../../../apriltag-rust/apriltag", optional = true }
 apriltag-nalgebra = { path = "../../../apriltag-rust/apriltag-nalgebra", optional = true }
 apriltag-sys = { path = "../../../apriltag-rust/apriltag-sys", optional = true }
