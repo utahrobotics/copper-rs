@@ -126,7 +126,7 @@ macro_rules! impl_from_value_for_int {
                             Number::U16(n) => n as $target,
                             Number::U32(n) => n as $target,
                             Number::U64(n) => n as $target,
-                            Number::F32(_) | Number::F64(_) => {
+                            Number::F32(_) | Number::F64(_) | Number::__NonExhaustive(_) => {
                                 panic!("Expected an integer Number variant but got {num:?}")
                             }
                         }
@@ -228,6 +228,14 @@ pub struct Node {
     #[serde(skip_serializing_if = "Option::is_none")]
     background: Option<bool>,
 
+    /// Option to include/exclude stubbing for simulation.
+    /// By default, sources and sinks are replaces (stubbed) by the runtime to avoid trying to compile hardware specific code for sensing or actuation.
+    /// In some cases, for example a sink or source used as a middleware bridge, you might want to run the real code even in simulation.
+    /// This option allows to control this behavior.
+    /// Note: Normal tasks will be run in sim and this parameter ignored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_in_sim: Option<bool>,
+
     /// Config passed to the task.
     #[serde(skip_serializing_if = "Option::is_none")]
     logging: Option<NodeLogging>,
@@ -242,6 +250,7 @@ impl Node {
             config: None,
             missions: None,
             background: None,
+            run_in_sim: None,
             logging: None,
         }
     }
@@ -270,6 +279,13 @@ impl Node {
     #[allow(dead_code)]
     pub fn get_instance_config(&self) -> Option<&ComponentConfig> {
         self.config.as_ref()
+    }
+
+    /// By default, assume a source or a sink is not run in sim.
+    /// Normal tasks will be run in sim and this parameter ignored.
+    #[allow(dead_code)]
+    pub fn is_run_in_sim(&self) -> bool {
+        self.run_in_sim.unwrap_or(false)
     }
 
     #[allow(dead_code)]
@@ -947,10 +963,7 @@ impl CuConfig {
             Ok(representation) => Self::deserialize_impl(representation).unwrap_or_else(|e| {
                 panic!("Error deserializing configuration: {e}");
             }),
-            Err(e) => panic!(
-                "Syntax Error in config: {} at position {}",
-                e.code, e.position
-            ),
+            Err(e) => panic!("Syntax Error in config: {} at position {}", e.code, e.span),
         }
     }
 
@@ -1148,7 +1161,7 @@ fn process_includes(
                 Err(e) => {
                     return Err(CuError::from(format!(
                         "Failed to parse include file: {} - Error: {} at position {}",
-                        include_path, e.code, e.position
+                        include_path, e.code, e.span
                     )));
                 }
             };
@@ -1242,7 +1255,7 @@ fn parse_config_string(content: &str) -> CuResult<CuConfigRepresentation> {
         .map_err(|e| {
             CuError::from(format!(
                 "Failed to parse configuration: Error: {} at position {}",
-                e.code, e.position
+                e.code, e.span
             ))
         })
 }
@@ -1321,7 +1334,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Syntax Error in config: Expected opening `[` at position 1:10")]
+    #[should_panic(expected = "Syntax Error in config: Expected opening `[` at position 1:9-1:10")]
     fn test_deserialization_error() {
         // Task needs to be an array, but provided tuple wrongfully
         let txt = r#"( tasks: (), cnx: [], monitor: (type: "ExampleMonitor", ) ) "#;
