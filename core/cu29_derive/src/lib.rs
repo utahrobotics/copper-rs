@@ -133,6 +133,21 @@ fn gen_culist_support(
         .map(|i| syn::Index::from(*i))
         .collect();
 
+    let metadata_indices_for_declaration_order: Vec<syn::Index> = (0..culist_size)
+        .map(|declaration_index| {
+            let execution_position = taskid_call_order
+                .iter()
+                .position(|&execution_task_id| execution_task_id == declaration_index)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Task with declaration index {} not found in execution order",
+                        declaration_index
+                    )
+                });
+            syn::Index::from(execution_position)
+        })
+        .collect();
+
     #[cfg(feature = "macro_debug")]
     eprintln!("[build the copperlist struct]");
     let msgs_types_tuple: TypeTuple = build_culist_tuple(&all_msgs_types_in_culist_order);
@@ -161,7 +176,7 @@ fn gen_culist_support(
 
     let collect_metadata_function = quote! {
         pub fn collect_metadata<'a>(culist: &'a CuList) -> [&'a CuMsgMetadata; #culist_size] {
-            [#( &culist.msgs.0.#task_indices.metadata, )*]
+            [#( &culist.msgs.0.#metadata_indices_for_declaration_order.metadata, )*]
         }
     };
 
