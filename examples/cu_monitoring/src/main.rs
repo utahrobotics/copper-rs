@@ -1,6 +1,8 @@
 use cu29::prelude::*;
 use cu29_helpers::basic_copper_setup;
 
+use crate::default::CuStampedDataSet;
+
 pub mod tasks {
     use cu29::prelude::*;
 
