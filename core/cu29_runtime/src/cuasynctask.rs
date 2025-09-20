@@ -4,6 +4,7 @@ use cu29_clock::RobotClock;
 use cu29_traits::CuResult;
 use rayon::ThreadPool;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct CuAsyncTask<T, O>
 where
@@ -12,7 +13,7 @@ where
 {
     task: Arc<Mutex<T>>,
     output: Arc<Mutex<CuMsg<O>>>,
-    processing: Arc<Mutex<bool>>, // TODO: an atomic should be enough.
+    processing: Arc<AtomicBool>,
     tp: Arc<ThreadPool>,
 }
 
@@ -28,7 +29,7 @@ where
         Ok(Self {
             task,
             output,
-            processing: Arc::new(Mutex::new(false)),
+            processing: Arc::new(AtomicBool::new(false)),
             tp,
         })
     }
@@ -63,13 +64,12 @@ where
         input: &Self::Input<'i>,
         real_output: &mut Self::Output<'o>,
     ) -> CuResult<()> {
-        let mut processing = self.processing.lock().unwrap();
-        if *processing {
+        if (*(self.processing)).load(Ordering::SeqCst) {
             // if the background task is still processing, returns an empty result.
             return Ok(());
         }
 
-        *processing = true; // Reset the done flag for the next processing
+        (*(self.processing)).store(true, Ordering::SeqCst); // Reset the done flag for the next processing
         let buffered_output = self.output.lock().unwrap(); // Clear the output if the task is done
         *real_output = buffered_output.clone();
 
@@ -92,7 +92,7 @@ where
                     .unwrap()
                     .process(&clock, input_ref, output_ref)
                     .unwrap();
-                *processing.lock().unwrap() = false; // Mark processing as done
+                (*processing).store(false, Ordering::SeqCst); // Mark processing as done
             }
         });
         Ok(())
