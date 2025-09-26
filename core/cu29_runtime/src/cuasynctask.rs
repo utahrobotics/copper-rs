@@ -96,6 +96,7 @@ where
                     .unwrap()
                     .process(&clock, input_ref, output_ref);
                 if let Err(err) = process_result {
+                    // Store the error in the "error" property of the struct
                     *(error.lock().unwrap()) = Some(err);
                 }
                 (*processing).store(false, Ordering::SeqCst); // Mark processing as done
