@@ -1,7 +1,7 @@
 use crate::config::ComponentConfig;
 use crate::cutask::{CuMsg, CuMsgPayload, CuTask, Freezable};
 use cu29_clock::RobotClock;
-use cu29_traits::CuResult;
+use cu29_traits::{CuResult, CuError};
 use rayon::ThreadPool;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,6 +15,7 @@ where
     output: Arc<Mutex<CuMsg<O>>>,
     processing: Arc<AtomicBool>,
     tp: Arc<ThreadPool>,
+    error: Arc<Mutex<Option<CuError>>>,
 }
 
 impl<T, O> CuAsyncTask<T, O>
@@ -26,11 +27,13 @@ where
     pub fn new(config: Option<&ComponentConfig>, tp: Arc<ThreadPool>) -> CuResult<Self> {
         let task = Arc::new(Mutex::new(T::new(config)?));
         let output = Arc::new(Mutex::new(CuMsg::default()));
+        let error = Arc::new(Mutex::new(Option::None));
         Ok(Self {
             task,
             output,
             processing: Arc::new(AtomicBool::new(false)),
             tp,
+            error,
         })
     }
 }
@@ -80,6 +83,7 @@ where
             let output = self.output.clone();
             let task = self.task.clone();
             let processing = self.processing.clone();
+            let error = self.error.clone();
             move || {
                 let input_ref: &CuMsg<I> = &input;
                 let mut output: MutexGuard<CuMsg<O>> = output.lock().unwrap();
@@ -88,10 +92,12 @@ where
                 let input_ref: &CuMsg<I> = unsafe { std::mem::transmute(input_ref) };
                 let output_ref: &mut MutexGuard<CuMsg<O>> =
                     unsafe { std::mem::transmute(&mut output) };
-                task.lock()
+                let process_result = task.lock()
                     .unwrap()
-                    .process(&clock, input_ref, output_ref)
-                    .unwrap();
+                    .process(&clock, input_ref, output_ref);
+                if let Err(err) = process_result {
+                    *(error.lock().unwrap()) = Some(err);
+                }
                 (*processing).store(false, Ordering::SeqCst); // Mark processing as done
             }
         });
