@@ -1,10 +1,10 @@
 use crate::config::ComponentConfig;
 use crate::cutask::{CuMsg, CuMsgPayload, CuTask, Freezable};
 use cu29_clock::RobotClock;
-use cu29_traits::{CuResult, CuError};
+use cu29_traits::{CuError, CuResult};
 use rayon::ThreadPool;
-use std::sync::{Arc, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 pub struct CuAsyncTask<T, O>
 where
@@ -15,7 +15,7 @@ where
     output: Arc<Mutex<CuMsg<O>>>,
     processing: Arc<AtomicBool>,
     tp: Arc<ThreadPool>,
-    error: Arc<Mutex<Option<CuError>>>,
+    error: Arc<RwLock<Option<CuError>>>,
 }
 
 impl<T, O> CuAsyncTask<T, O>
@@ -27,7 +27,7 @@ where
     pub fn new(config: Option<&ComponentConfig>, tp: Arc<ThreadPool>) -> CuResult<Self> {
         let task = Arc::new(Mutex::new(T::new(config)?));
         let output = Arc::new(Mutex::new(CuMsg::default()));
-        let error = Arc::new(Mutex::new(Option::None));
+        let error = Arc::new(RwLock::new(Option::None));
         Ok(Self {
             task,
             output,
@@ -35,6 +35,25 @@ where
             tp,
             error,
         })
+    }
+    fn get_inner_result(&self) -> CuResult<()> {
+        // if the background task is still processing, returns an empty result.
+        match self.error.read() {
+            Ok(guard) => {
+                if let Some(ref e) = *guard {
+                    return Err(e.clone());
+                } else {
+                    return Ok(());
+                }
+            }
+
+            Err(e) => {
+                return Err(CuError::new_with_cause(
+                    "Error mutex for async task poisoned",
+                    e,
+                ))
+            }
+        }
     }
 }
 
@@ -68,8 +87,7 @@ where
         real_output: &mut Self::Output<'o>,
     ) -> CuResult<()> {
         if (*(self.processing)).load(Ordering::SeqCst) {
-            // if the background task is still processing, returns an empty result.
-            return Ok(());
+            return self.get_inner_result();
         }
 
         (*(self.processing)).store(true, Ordering::SeqCst); // Reset the done flag for the next processing
@@ -92,23 +110,12 @@ where
                 let input_ref: &CuMsg<I> = unsafe { std::mem::transmute(input_ref) };
                 let output_ref: &mut MutexGuard<CuMsg<O>> =
                     unsafe { std::mem::transmute(&mut output) };
-                let process_result = task.lock()
-                    .unwrap()
-                    .process(&clock, input_ref, output_ref);
-                if let Err(err) = process_result {
-                    // Store the error in the "error" property of the struct
-                    *(error.lock().unwrap()) = Some(err);
-                }
+                let process_result = task.lock().unwrap().process(&clock, input_ref, output_ref);
+                *(error.write().unwrap()) = process_result.err();
                 (*processing).store(false, Ordering::SeqCst); // Mark processing as done
             }
         });
-        let mut last_err_guard = self.error.lock().unwrap();
-        if let Option::Some(ref err) = *last_err_guard {
-            let err_clone = err.clone();
-            *last_err_guard = Option::None;
-            return Err(err_clone);
-        }
-        Ok(())
+        return self.get_inner_result();
     }
 }
 
