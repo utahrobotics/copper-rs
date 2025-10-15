@@ -102,6 +102,12 @@ where
                 (*processing).store(false, Ordering::SeqCst); // Mark processing as done
             }
         });
+        let mut last_err_guard = self.error.lock().unwrap();
+        if let Option::Some(ref err) = *last_err_guard {
+            let err_clone = err.clone();
+            *last_err_guard = Option::None;
+            return Err(err_clone);
+        }
         Ok(())
     }
 }
