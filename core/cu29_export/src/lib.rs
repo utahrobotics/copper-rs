@@ -143,12 +143,14 @@ pub fn copperlists_reader<P: CopperListTuple>(
                     if inner.kind() == std::io::ErrorKind::UnexpectedEof {
                         None
                     } else {
-                        println!("Error {inner:?} additional:{additional}");
+                        println!("Copperlist Decode Error {inner:?} additional:{additional}");
+                        println!("Are the saved copper lists compatable with your copper config?");
                         None
                     }
                 }
                 _ => {
-                    println!("Error {e:?}");
+                    println!("Copperlist Decode Error {e:?}");
+                    println!("Are the saved copper lists compatable with your copper config?");
                     None
                 }
             },
