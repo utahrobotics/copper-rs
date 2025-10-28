@@ -809,7 +809,8 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                                                 debug!("Process: IGNORE decision from monitoring. Task '{}' errored out \
                                             during process. The runtime will continue with a forced empty message.", #mission_mod::TASKS_IDS[#tid]);
                                                 let cumsg_output = &mut msgs.#output_culist_index;
-                                                cumsg_output.clear_payload();
+                                                // I don't want to clear the output if the task is ignored.
+                                                // cumsg_output.clear_payload();
                                             }
                                             Decision::Shutdown => {
                                                 debug!("Process: SHUTDOWN decision from monitoring. Task '{}' errored out \
