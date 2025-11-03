@@ -213,6 +213,7 @@ impl<
         // TODO: make that configurable
         let threadpool = Arc::new(
             rayon::ThreadPoolBuilder::new()
+                .stack_size(5e6 as usize)
                 .num_threads(2) // default to 4 threads if not specified
                 .build()
                 .expect("Could not create the threadpool"),
