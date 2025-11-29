@@ -80,6 +80,22 @@ where
         Err("AsyncTask cannot be instantiated directly, use Async_task::new()".into())
     }
 
+    fn start(&mut self, clock: &RobotClock) -> CuResult<()> {
+        self.task.lock().unwrap().start(clock)
+    }
+
+    fn stop(&mut self, clock: &RobotClock) -> CuResult<()> {
+        self.task.lock().unwrap().stop(clock)
+    }
+
+    fn preprocess(&mut self, clock: &RobotClock) -> CuResult<()> {
+        self.task.lock().unwrap().preprocess(clock)
+    }
+
+    fn postprocess(&mut self, clock: &RobotClock) -> CuResult<()> {
+        self.task.lock().unwrap().postprocess(clock)
+    }
+
     fn process<'i, 'o>(
         &mut self,
         clock: &RobotClock,
