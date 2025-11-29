@@ -88,12 +88,14 @@ where
         self.task.lock().unwrap().stop(clock)
     }
 
-    fn preprocess(&mut self, clock: &RobotClock) -> CuResult<()> {
-        self.task.lock().unwrap().preprocess(clock)
+    // No-op: preprocess is called inside the background thread's process
+    fn preprocess(&mut self, _clock: &RobotClock) -> CuResult<()> {
+        Ok(())
     }
 
-    fn postprocess(&mut self, clock: &RobotClock) -> CuResult<()> {
-        self.task.lock().unwrap().postprocess(clock)
+    // No-op: postprocess is called inside the background thread's process
+    fn postprocess(&mut self, _clock: &RobotClock) -> CuResult<()> {
+        Ok(())
     }
 
     fn process<'i, 'o>(
@@ -126,8 +128,15 @@ where
                 let input_ref: &CuMsg<I> = unsafe { std::mem::transmute(input_ref) };
                 let output_ref: &mut MutexGuard<CuMsg<O>> =
                     unsafe { std::mem::transmute(&mut output) };
-                let process_result = task.lock().unwrap().process(&clock, input_ref, output_ref);
-                *(error.write().unwrap()) = process_result.err();
+
+                let mut task_guard = task.lock().unwrap();
+                // Call preprocess, process, postprocess all in the background thread
+                let result = task_guard
+                    .preprocess(&clock)
+                    .and_then(|_| task_guard.process(&clock, input_ref, output_ref))
+                    .and_then(|_| task_guard.postprocess(&clock));
+
+                *(error.write().unwrap()) = result.err();
                 (*processing).store(false, Ordering::SeqCst); // Mark processing as done
             }
         });
