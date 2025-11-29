@@ -249,7 +249,10 @@ fn gen_culist_support(
 
         impl CuListZeroedInit for CuStampedDataSet {
             fn init_zeroed(&mut self) {
-                #(self.0.#task_indices.metadata.status_txt = CuCompactString::default();)*
+                #(
+                    self.0.#task_indices.metadata.status_txt = CuCompactString::default();
+                    self.0.#task_indices.clear_payload();
+                )*
             }
         }
     }
