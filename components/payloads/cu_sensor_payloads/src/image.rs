@@ -1,15 +1,21 @@
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use bincode::de::Decoder;
 use bincode::error::DecodeError;
 use bincode::{Decode, Encode};
+use core::fmt::Debug;
 use cu29::prelude::{ArrayLike, CuHandle};
 #[allow(unused_imports)]
 use cu29::{CuError, CuResult};
-use std::fmt::Debug;
+#[cfg(feature = "std")]
+use std::vec::Vec;
 
 #[cfg(feature = "image")]
 use image::{ImageBuffer, Pixel};
 #[cfg(feature = "kornia")]
-use kornia::image::Image;
+use kornia_image::allocator::ImageAllocator;
+#[cfg(feature = "kornia")]
+use kornia_image::Image;
 use serde::{Serialize, Serializer};
 
 #[derive(Default, Debug, Encode, Decode, Clone, Copy, Serialize)]
@@ -110,7 +116,10 @@ where
     }
 
     #[cfg(feature = "kornia")]
-    pub fn as_kornia_image<T: Clone, const C: usize>(&self) -> CuResult<Image<T, C>> {
+    pub fn as_kornia_image<T: Clone, const C: usize, K: ImageAllocator>(
+        &self,
+        k: K,
+    ) -> CuResult<Image<T, C, K>> {
         let width = self.format.width as usize;
         let height = self.format.height as usize;
 
@@ -124,11 +133,11 @@ where
             let data: &[u8] = inner;
             core::slice::from_raw_parts(
                 data.as_ptr() as *const T,
-                data.len() / std::mem::size_of::<T>(),
+                data.len() / core::mem::size_of::<T>(),
             )
         });
 
-        unsafe { Image::from_raw_parts([height, width].into(), raw_pixels.as_ptr(), size) }
+        unsafe { Image::from_raw_parts([height, width].into(), raw_pixels.as_ptr(), size, k) }
             .map_err(|e| CuError::new_with_cause("Could not create a Kornia Image", e))
     }
 }

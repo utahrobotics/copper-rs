@@ -21,13 +21,8 @@ bincode = { workspace = true }
 cu29 = { workspace = true }
 serde = { workspace = true }
 arrayvec = "0.7.6"
-jpeg-decoder = "0.3.0"
-crossbeam = "0.8.4"
-
-cu-spatial-payloads = { path = "../../payloads/cu_spatial_payloads", version = "0.9.0", features = [
-    "nalgebra",
-] }
-cu-sensor-payloads = { path = "../../payloads/cu_sensor_payloads", version = "0.9.0" }
+cu-spatial-payloads = { path = "../../payloads/cu_spatial_payloads", version = "0.11.0" }
+cu-sensor-payloads = { path = "../../payloads/cu_sensor_payloads", version = "0.11.0" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 apriltag = { path = "../../../apriltag-rust/apriltag", optional = true }

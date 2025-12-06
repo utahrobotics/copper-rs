@@ -1,15 +1,19 @@
 #[cfg(feature = "debug_pane")]
 mod debug_pane;
 pub mod sysinfo;
+mod tui_nodes;
 
+use crate::tui_nodes::{Connection, NodeGraph, NodeLayout};
 use ansi_to_tui::IntoText;
 use color_eyre::config::HookBuilder;
 use compact_str::{CompactString, ToCompactString};
 use cu29::clock::{CuDuration, RobotClock};
-use cu29::config::{CuConfig, Node};
+use cu29::config::CuConfig;
 use cu29::cutask::CuMsgMetadata;
-use cu29::monitoring::{CuDurationStatistics, CuMonitor, CuTaskState, Decision};
-use cu29::prelude::{pool, CuCompactString};
+use cu29::monitoring::{
+    ComponentKind, CuDurationStatistics, CuMonitor, CuTaskState, Decision, MonitorTopology,
+};
+use cu29::prelude::{pool, CuCompactString, CuTime};
 use cu29::{CuError, CuResult};
 #[cfg(feature = "debug_pane")]
 use debug_pane::UIExt;
@@ -24,17 +28,17 @@ use ratatui::layout::{Alignment, Constraint, Direction, Layout, Size};
 use ratatui::prelude::{Backend, Rect};
 use ratatui::prelude::{Stylize, Widget};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Text};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, StatefulWidget, Table};
 use ratatui::{Frame, Terminal};
 use std::fmt::{Display, Formatter};
 use std::io::stdout;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use std::{io, thread};
-use tui_nodes::{Connection, NodeGraph, NodeLayout};
+use std::{collections::HashMap, io, panic, thread};
 use tui_widgets::scrollview::{ScrollView, ScrollViewState};
 
 #[cfg(feature = "debug_pane")]
@@ -133,9 +137,19 @@ impl PoolStats {
         self.total_size = total_size;
     }
 }
+
 fn compute_end_to_end_latency(msgs: &[&CuMsgMetadata]) -> CuDuration {
-    msgs.last().unwrap().process_time.end.unwrap()
-        - msgs.first().unwrap().process_time.start.unwrap()
+    let start = msgs.first().map(|m| m.process_time.start);
+    let end = msgs.last().map(|m| m.process_time.end);
+
+    match (start, end) {
+        (Some(s), Some(e)) => match (Option::<CuTime>::from(s), Option::<CuTime>::from(e)) {
+            (Some(s), Some(e)) if e >= s => e - s,
+            (Some(_), Some(_)) => CuDuration::MIN,
+            _ => CuDuration::MIN,
+        },
+        _ => CuDuration::MIN,
+    }
 }
 
 // This is kind of terrible.
@@ -145,15 +159,17 @@ enum NodeType {
     Source,
     Sink,
     Task,
+    Bridge,
 }
 
 impl Display for NodeType {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unknown => write!(f, "?"),
-            Self::Source => write!(f, "⏩"),
-            Self::Task => write!(f, "⚡"),
-            Self::Sink => write!(f, "🏁"),
+            Self::Source => write!(f, "◈"),
+            Self::Task => write!(f, "⚙"),
+            Self::Sink => write!(f, "⭳"),
+            Self::Bridge => write!(f, "⇆"),
         }
     }
 }
@@ -165,6 +181,7 @@ impl NodeType {
             Self::Source => Self::Task,
             Self::Sink => Self::Sink,
             Self::Task => Self::Task,
+            Self::Bridge => Self::Bridge,
         }
     }
 
@@ -174,6 +191,17 @@ impl NodeType {
             Self::Source => Self::Source,
             Self::Sink => Self::Task,
             Self::Task => Self::Task,
+            Self::Bridge => Self::Bridge,
+        }
+    }
+
+    fn color(self) -> Color {
+        match self {
+            Self::Unknown => Color::Gray,
+            Self::Source => Color::Rgb(255, 191, 0),
+            Self::Sink => Color::Rgb(255, 102, 204),
+            Self::Task => Color::White,
+            Self::Bridge => Color::Rgb(204, 153, 255),
         }
     }
 }
@@ -185,57 +213,129 @@ struct TaskStatus {
     error: CompactString,
 }
 
+#[derive(Clone)]
+struct DisplayNode {
+    id: String,
+    type_label: String,
+    node_type: NodeType,
+    inputs: Vec<String>,
+    outputs: Vec<String>,
+}
+
 struct NodesScrollableWidgetState {
-    config_nodes: Vec<Node>,
-    node_types: Vec<NodeType>,
+    display_nodes: Vec<DisplayNode>,
     connections: Vec<Connection>,
     statuses: Arc<Mutex<Vec<TaskStatus>>>,
+    status_index_map: Vec<Option<usize>>,
+    task_count: usize,
     nodes_scrollable_state: ScrollViewState,
 }
 
 impl NodesScrollableWidgetState {
-    fn new(config: &CuConfig, errors: Arc<Mutex<Vec<TaskStatus>>>, mission: Option<&str>) -> Self {
-        let mut config_nodes: Vec<Node> = Vec::new();
-        let mut node_types: Vec<NodeType> = Vec::new();
+    fn new(
+        config: &CuConfig,
+        errors: Arc<Mutex<Vec<TaskStatus>>>,
+        mission: Option<&str>,
+        task_ids: &'static [&'static str],
+        topology: Option<MonitorTopology>,
+    ) -> Self {
+        let topology = topology
+            .or_else(|| cu29::monitoring::build_monitor_topology(config, mission).ok())
+            .unwrap_or_default();
 
-        let graph = config
-            .get_graph(mission)
-            .expect("Only supported for simple config");
+        let mut display_nodes: Vec<DisplayNode> = Vec::new();
+        let mut status_index_map = Vec::new();
+        let mut node_lookup = HashMap::new();
+        let task_index_lookup: HashMap<&str, usize> = task_ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, i))
+            .collect();
 
-        for (_, node) in graph.get_all_nodes() {
-            // FIXME(gbin): Multimission
-            config_nodes.push(node.clone());
-            node_types.push(NodeType::Unknown);
-        }
-        let mut connections: Vec<Connection> = Vec::with_capacity(graph.0.edge_count());
-
-        // Keep track if we already used a port.
-        for (dst_index, dst_node) in config_nodes.iter().enumerate() {
-            let node_incoming_edges = graph
-                .get_dst_edges(dst_index as u32)
-                .expect("Error getting edges");
-            for (dst_port, edge_id) in node_incoming_edges.iter().enumerate() {
-                if let Some((src_index, dst_index)) =
-                    graph.0.edge_endpoints((*edge_id as u32).into())
-                {
-                    let (src_index, dst_index) = (src_index.index(), dst_index.index());
-                    connections.push(Connection::new(
-                        src_index, 0, // There is only one output per task today
-                        dst_index, dst_port,
-                    ));
-                    node_types[dst_index] = node_types[dst_index].add_incoming(); // 🤮
-                    node_types[src_index] = node_types[src_index].add_outgoing();
-                } else {
-                    panic!("Can't find back srcs for {}", dst_node.get_id());
+        for node in topology.nodes.iter() {
+            let node_type = match node.kind {
+                ComponentKind::Bridge => NodeType::Bridge,
+                ComponentKind::Task => {
+                    let mut role = NodeType::Unknown;
+                    if !node.inputs.is_empty() {
+                        role = role.add_incoming();
+                    }
+                    if !node.outputs.is_empty() {
+                        role = role.add_outgoing();
+                    }
+                    role
                 }
+            };
+
+            display_nodes.push(DisplayNode {
+                id: node.id.clone(),
+                type_label: node
+                    .type_name
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                node_type,
+                inputs: node.inputs.clone(),
+                outputs: node.outputs.clone(),
+            });
+            let idx = display_nodes.len() - 1;
+            node_lookup.insert(node.id.clone(), idx);
+
+            let status_idx = match node.kind {
+                ComponentKind::Task => task_index_lookup.get(node.id.as_str()).cloned(),
+                ComponentKind::Bridge => None,
+            };
+            status_index_map.push(status_idx);
+        }
+
+        let mut connections: Vec<Connection> = Vec::with_capacity(topology.connections.len());
+        for cnx in topology.connections.iter() {
+            let Some(&src_idx) = node_lookup.get(&cnx.src) else {
+                continue;
+            };
+            let Some(&dst_idx) = node_lookup.get(&cnx.dst) else {
+                continue;
+            };
+            let src_node = &display_nodes[src_idx];
+            let dst_node = &display_nodes[dst_idx];
+            let src_port = cnx
+                .src_port
+                .as_ref()
+                .and_then(|p| src_node.outputs.iter().position(|name| name == p))
+                .unwrap_or(0);
+            let dst_port = cnx
+                .dst_port
+                .as_ref()
+                .and_then(|p| dst_node.inputs.iter().position(|name| name == p))
+                .unwrap_or(0);
+
+            connections.push(Connection::new(
+                src_idx,
+                src_port + NODE_PORT_ROW_OFFSET,
+                dst_idx,
+                dst_port + NODE_PORT_ROW_OFFSET,
+            ));
+        }
+
+        // tui-nodes drops all nodes when every node has an outgoing edge (no roots).
+        // If that happens, drop the outgoing edges for the first node so at least one root exists.
+        if !display_nodes.is_empty() {
+            let mut from_set = std::collections::HashSet::new();
+            for conn in &connections {
+                from_set.insert(conn.from_node);
+            }
+            if from_set.len() == display_nodes.len() {
+                let root_idx = 0;
+                connections.retain(|c| c.from_node != root_idx);
             }
         }
+
         NodesScrollableWidgetState {
-            config_nodes,
-            node_types,
+            display_nodes,
             connections,
             nodes_scrollable_state: ScrollViewState::default(),
             statuses: errors,
+            status_index_map,
+            task_count: task_ids.len(),
         }
     }
 }
@@ -261,62 +361,177 @@ const NODE_WIDTH: u16 = 29;
 const NODE_WIDTH_CONTENT: u16 = NODE_WIDTH - 2;
 
 const NODE_HEIGHT: u16 = 5;
+const NODE_META_LINES: usize = 2;
+const NODE_PORT_ROW_OFFSET: usize = NODE_META_LINES;
+
+fn clip_tail(value: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let char_count = value.chars().count();
+    if char_count <= max_chars {
+        return value.to_string();
+    }
+    let skip = char_count.saturating_sub(max_chars);
+    let start = value
+        .char_indices()
+        .nth(skip)
+        .map(|(idx, _)| idx)
+        .unwrap_or(value.len());
+    value[start..].to_string()
+}
 
 #[allow(dead_code)]
 const NODE_HEIGHT_CONTENT: u16 = NODE_HEIGHT - 2;
+const GRAPH_WIDTH_PADDING: u16 = NODE_WIDTH;
+const GRAPH_HEIGHT_PADDING: u16 = NODE_HEIGHT;
 
 impl StatefulWidget for NodesScrollableWidget<'_> {
     type State = NodesScrollableWidgetState;
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        let node_ids: Vec<String> = state
-            .config_nodes
-            .iter()
-            .map(|node| format!(" {} ", node.get_id()))
-            .collect();
-        let node_layouts = state
-            .config_nodes
-            .iter()
-            .zip(node_ids.iter())
-            .map(|(_, node_id)| {
-                NodeLayout::new((NODE_WIDTH, NODE_HEIGHT)).with_title(node_id.as_str())
-            })
-            .collect();
+        let build_node_layouts = || {
+            state
+                .display_nodes
+                .iter()
+                .map(|node| {
+                    let ports = node.inputs.len().max(node.outputs.len());
+                    let content_rows = ports + NODE_PORT_ROW_OFFSET;
+                    let height = (content_rows as u16).saturating_add(2).max(NODE_HEIGHT);
+                    let mut title_line = Line::default();
+                    title_line.spans.push(Span::styled(
+                        format!(" {}", node.node_type),
+                        Style::default().fg(node.node_type.color()),
+                    ));
+                    title_line.spans.push(Span::styled(
+                        format!(" {} ", node.id),
+                        Style::default().fg(Color::White),
+                    ));
+                    NodeLayout::new((NODE_WIDTH, height)).with_title_line(title_line)
+                })
+                .collect::<Vec<_>>()
+        };
 
-        let content_size = Size::new(200, 100);
-        let mut scroll_view = ScrollView::new(content_size);
-        let mut graph = NodeGraph::new(
-            node_layouts,
-            state.connections.clone(),
-            content_size.width as usize,
-            content_size.height as usize,
-        );
+        let node_count = state.display_nodes.len().max(1);
+        let content_width = (node_count as u16)
+            .saturating_mul(NODE_WIDTH + 12)
+            .max(NODE_WIDTH);
+        let max_ports = state
+            .display_nodes
+            .iter()
+            .map(|node| node.inputs.len().max(node.outputs.len()))
+            .max()
+            .unwrap_or_default();
+        let content_height = (((max_ports + NODE_PORT_ROW_OFFSET) as u16) * 4).max(NODE_HEIGHT);
+        let connections = state.connections.clone();
+        let build_graph = |width: u16, height: u16| {
+            NodeGraph::new(
+                build_node_layouts(),
+                connections.clone(),
+                width as usize,
+                height as usize,
+            )
+        };
+        let mut graph = build_graph(content_width, content_height);
         graph.calculate();
+        let mut content_size = Size::new(content_width, content_height);
+        if state.display_nodes.is_empty() {
+            content_size = Size::new(area.width.max(NODE_WIDTH), area.height.max(NODE_HEIGHT));
+            graph = build_graph(content_size.width, content_size.height);
+            graph.calculate();
+        } else {
+            let bounds = graph.content_bounds();
+            let desired_width = bounds
+                .width
+                .saturating_add(GRAPH_WIDTH_PADDING)
+                .max(NODE_WIDTH);
+            let desired_height = bounds
+                .height
+                .saturating_add(GRAPH_HEIGHT_PADDING)
+                .max(NODE_HEIGHT);
+            if desired_width != content_size.width || desired_height != content_size.height {
+                content_size = Size::new(desired_width, desired_height);
+                graph = build_graph(content_size.width, content_size.height);
+                graph.calculate();
+            }
+        }
+        let mut scroll_view = ScrollView::new(content_size);
         let zones = graph.split(scroll_view.area());
 
         {
             let mut statuses = state.statuses.lock().unwrap();
+            if statuses.len() <= state.task_count {
+                statuses.resize(state.task_count + 1, TaskStatus::default());
+            }
             for (idx, ea_zone) in zones.into_iter().enumerate() {
-                let s = state.config_nodes[idx].get_type();
-                let status = &mut statuses[idx];
+                let fallback_idx = state.task_count;
+                let status_idx = state
+                    .status_index_map
+                    .get(idx)
+                    .and_then(|opt| *opt)
+                    .unwrap_or(fallback_idx);
+                let safe_index = if status_idx < statuses.len() {
+                    status_idx
+                } else {
+                    statuses.len() - 1
+                };
+                let status = &mut statuses[safe_index];
+                let s = &state.display_nodes[idx].type_label;
                 let status_line = if status.is_error {
                     format!("❌ {}", status.error)
                 } else {
                     format!("✓ {}", status.status_txt)
                 };
 
-                let txt = format!(
-                    " {}\n {}\n {}",
-                    state.node_types[idx],
-                    &s[s.len().saturating_sub(NODE_WIDTH_CONTENT as usize - 2)..],
-                    status_line,
-                );
-                let paragraph = Paragraph::new(txt);
-                let paragraph = if status.is_error {
-                    paragraph.red()
+                let label_width = (NODE_WIDTH_CONTENT as usize).saturating_sub(2);
+                let type_label = clip_tail(s, label_width);
+                let status_text = clip_tail(&status_line, label_width);
+                let base_style = if status.is_error {
+                    Style::default().fg(Color::Red)
                 } else {
-                    paragraph.green()
+                    Style::default().fg(Color::Green)
                 };
+                let mut lines: Vec<Line> = Vec::new();
+                lines.push(Line::styled(format!(" {}", type_label), base_style));
+                lines.push(Line::styled(format!(" {}", status_text), base_style));
+
+                let max_ports = state.display_nodes[idx]
+                    .inputs
+                    .len()
+                    .max(state.display_nodes[idx].outputs.len());
+                if max_ports > 0 {
+                    let left_width = (NODE_WIDTH_CONTENT as usize - 2) / 2;
+                    let right_width = NODE_WIDTH_CONTENT as usize - 2 - left_width;
+                    let input_style = Style::default().fg(Color::Yellow);
+                    let output_style = Style::default().fg(Color::Cyan);
+                    let dotted_style = Style::default().fg(Color::DarkGray);
+                    for port_idx in 0..max_ports {
+                        let input = state.display_nodes[idx]
+                            .inputs
+                            .get(port_idx)
+                            .map(|label| clip_tail(label, left_width))
+                            .unwrap_or_default();
+                        let output = state.display_nodes[idx]
+                            .outputs
+                            .get(port_idx)
+                            .map(|label| clip_tail(label, right_width))
+                            .unwrap_or_default();
+                        let mut port_line = Line::default();
+                        port_line.spans.push(Span::styled(
+                            format!(" {:<left_width$}", input, left_width = left_width),
+                            input_style,
+                        ));
+                        port_line.spans.push(Span::styled("┆", dotted_style));
+                        port_line.spans.push(Span::styled(
+                            format!("{:>right_width$}", output, right_width = right_width),
+                            output_style,
+                        ));
+                        lines.push(port_line);
+                    }
+                }
+
+                let txt = Text::from(lines);
+                let paragraph = Paragraph::new(txt);
                 status.is_error = false; // reset if it was displayed
                 scroll_view.render_widget(paragraph, ea_zone);
             }
@@ -341,8 +556,20 @@ pub struct CuConsoleMon {
     taskids: &'static [&'static str],
     task_stats: Arc<Mutex<TaskStats>>,
     task_statuses: Arc<Mutex<Vec<TaskStatus>>>,
+    ui_handle: Option<JoinHandle<()>>,
     pool_stats: Arc<Mutex<Vec<PoolStats>>>,
     quitting: Arc<AtomicBool>,
+    topology: Option<MonitorTopology>,
+}
+
+impl Drop for CuConsoleMon {
+    fn drop(&mut self) {
+        self.quitting.store(true, Ordering::SeqCst);
+        let _ = restore_terminal();
+        if let Some(handle) = self.ui_handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 struct UI {
@@ -350,6 +577,7 @@ struct UI {
     active_screen: Screen,
     sysinfo: String,
     task_stats: Arc<Mutex<TaskStats>>,
+    quitting: Arc<AtomicBool>,
     nodes_scrollable_widget_state: NodesScrollableWidgetState,
     #[cfg(feature = "debug_pane")]
     error_redirect: gag::BufferRedirect,
@@ -367,19 +595,27 @@ impl UI {
         task_ids: &'static [&'static str],
         task_stats: Arc<Mutex<TaskStats>>,
         task_statuses: Arc<Mutex<Vec<TaskStatus>>>,
+        quitting: Arc<AtomicBool>,
         error_redirect: gag::BufferRedirect,
         debug_output: Option<debug_pane::DebugLog>,
         pool_stats: Arc<Mutex<Vec<PoolStats>>>,
+        topology: Option<MonitorTopology>,
     ) -> UI {
         init_error_hooks();
-        let nodes_scrollable_widget_state =
-            NodesScrollableWidgetState::new(&config, task_statuses.clone(), mission);
+        let nodes_scrollable_widget_state = NodesScrollableWidgetState::new(
+            &config,
+            task_statuses.clone(),
+            mission,
+            task_ids,
+            topology.clone(),
+        );
 
         Self {
             task_ids,
             active_screen: Screen::Neofetch,
             sysinfo: sysinfo::pfetch_info(),
             task_stats,
+            quitting,
             nodes_scrollable_widget_state,
             error_redirect,
             debug_output,
@@ -393,17 +629,25 @@ impl UI {
         task_ids: &'static [&'static str],
         task_stats: Arc<Mutex<TaskStats>>,
         task_statuses: Arc<Mutex<Vec<TaskStatus>>>,
+        quitting: Arc<AtomicBool>,
         pool_stats: Arc<Mutex<Vec<PoolStats>>>,
+        topology: Option<MonitorTopology>,
     ) -> UI {
         init_error_hooks();
-        let nodes_scrollable_widget_state =
-            NodesScrollableWidgetState::new(&config, task_statuses.clone());
+        let nodes_scrollable_widget_state = NodesScrollableWidgetState::new(
+            &config,
+            task_statuses.clone(),
+            None,
+            task_ids,
+            topology.clone(),
+        );
 
         Self {
             task_ids,
             active_screen: Screen::Neofetch,
             sysinfo: sysinfo::pfetch_info(),
             task_stats,
+            quitting,
             nodes_scrollable_widget_state,
             pool_stats,
         }
@@ -665,6 +909,9 @@ impl UI {
 
     fn run_app<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<()> {
         loop {
+            if self.quitting.load(Ordering::SeqCst) {
+                break;
+            }
             #[cfg(feature = "debug_pane")]
             self.update_debug_output();
 
@@ -759,9 +1006,14 @@ impl CuMonitor for CuConsoleMon {
             taskids,
             task_stats,
             task_statuses: Arc::new(Mutex::new(vec![TaskStatus::default(); taskids.len()])),
+            ui_handle: None,
             quitting: Arc::new(AtomicBool::new(false)),
             pool_stats: Arc::new(Mutex::new(Vec::new())),
+            topology: None,
         })
+    }
+    fn set_topology(&mut self, topology: MonitorTopology) {
+        self.topology = Some(topology);
     }
 
     fn start(&mut self, _clock: &RobotClock) -> CuResult<()> {
@@ -772,15 +1024,34 @@ impl CuMonitor for CuConsoleMon {
         let error_states = self.task_statuses.clone();
         let pool_stats_ui = self.pool_stats.clone();
         let quitting = self.quitting.clone();
+        let topology = self.topology.clone();
 
         // Start the main UI loop
-        thread::spawn(move || {
+        let handle = thread::spawn(move || {
             let backend = CrosstermBackend::new(stdout());
+            let _terminal_guard = TerminalRestoreGuard;
 
-            setup_terminal();
+            // Ensure the terminal is restored if a panic occurs while the TUI is active.
+            let prev_hook = panic::take_hook();
+            panic::set_hook(Box::new(move |info| {
+                let _ = restore_terminal();
+                prev_hook(info);
+            }));
 
-            let mut terminal =
-                Terminal::new(backend).expect("Failed to initialize terminal backend");
+            install_signal_handlers(quitting.clone());
+
+            if let Err(err) = setup_terminal() {
+                eprintln!("Failed to prepare terminal UI: {err}");
+                return;
+            }
+
+            let mut terminal = match Terminal::new(backend) {
+                Ok(terminal) => terminal,
+                Err(err) => {
+                    eprintln!("Failed to initialize terminal backend: {err}");
+                    return;
+                }
+            };
 
             #[cfg(feature = "debug_pane")]
             {
@@ -793,9 +1064,11 @@ impl CuMonitor for CuConsoleMon {
                     taskids,
                     task_stats_ui,
                     error_states,
+                    quitting.clone(),
                     error_redirect,
                     None,
                     pool_stats_ui,
+                    topology.clone(),
                 );
 
                 // Override the cu29-log-runtime Log Subscriber
@@ -814,7 +1087,9 @@ impl CuMonitor for CuConsoleMon {
                         Some(Box::new(log_subscriber) as Box<dyn log::Log>);
 
                     // Set up the terminal again, as there might be some logs which in the console before updating `EXTRA_TEXT_LOGGER`
-                    setup_terminal();
+                    if let Err(err) = setup_terminal() {
+                        eprintln!("Failed to reinitialize terminal after log redirect: {err}");
+                    }
 
                     ui.debug_output = Some(debug_log);
                 } else {
@@ -832,7 +1107,9 @@ impl CuMonitor for CuConsoleMon {
                     taskids,
                     task_stats_ui,
                     error_states,
+                    quitting,
                     pool_stats_ui,
+                    topology,
                 );
                 ui.run_app(&mut terminal).expect("Failed to run app");
 
@@ -841,9 +1118,10 @@ impl CuMonitor for CuConsoleMon {
 
             quitting.store(true, Ordering::SeqCst);
             // restoring the terminal
-            restore_terminal();
+            let _ = restore_terminal();
         });
 
+        self.ui_handle = Some(handle);
         Ok(())
     }
 
@@ -898,7 +1176,12 @@ impl CuMonitor for CuConsoleMon {
     }
 
     fn stop(&mut self, _clock: &RobotClock) -> CuResult<()> {
-        restore_terminal();
+        self.quitting.store(true, Ordering::SeqCst);
+        let _ = restore_terminal();
+
+        if let Some(handle) = self.ui_handle.take() {
+            let _ = handle.join();
+        }
 
         self.task_stats
             .lock()
@@ -910,29 +1193,52 @@ impl CuMonitor for CuConsoleMon {
     }
 }
 
+struct TerminalRestoreGuard;
+
+impl Drop for TerminalRestoreGuard {
+    fn drop(&mut self) {
+        let _ = restore_terminal();
+    }
+}
+
+fn install_signal_handlers(quitting: Arc<AtomicBool>) {
+    static SIGNAL_HANDLER: OnceLock<()> = OnceLock::new();
+
+    let _ = SIGNAL_HANDLER.get_or_init(|| {
+        let quitting = quitting.clone();
+        if let Err(err) = ctrlc::set_handler(move || {
+            quitting.store(true, Ordering::SeqCst);
+            let _ = restore_terminal();
+            // Match the conventional 130 exit code for Ctrl-C.
+            std::process::exit(130);
+        }) {
+            eprintln!("Failed to install Ctrl-C handler: {err}");
+        }
+    });
+}
+
 fn init_error_hooks() {
     let (panic, error) = HookBuilder::default().into_hooks();
     let panic = panic.into_panic_hook();
     let error = error.into_eyre_hook();
     color_eyre::eyre::set_hook(Box::new(move |e| {
-        restore_terminal();
+        let _ = restore_terminal();
         error(e)
     }))
     .unwrap();
     std::panic::set_hook(Box::new(move |info| {
-        restore_terminal();
+        let _ = restore_terminal();
         panic(info)
     }));
 }
 
-fn setup_terminal() {
-    enable_raw_mode().expect("Could not enter raw mode: check terminal compatibility.");
-    execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)
-        .expect("Could not enter alternateScreen: check terminal compatibility.");
+fn setup_terminal() -> io::Result<()> {
+    enable_raw_mode()?;
+    execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    Ok(())
 }
 
-fn restore_terminal() {
-    execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture)
-        .expect("Could not leave alternate screen");
-    disable_raw_mode().expect("Could not restore the terminal.");
+fn restore_terminal() -> io::Result<()> {
+    execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+    disable_raw_mode()
 }

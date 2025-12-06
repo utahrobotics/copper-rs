@@ -2,22 +2,41 @@
 //! The configuration is a directed graph where nodes are tasks and edges are connections between tasks.
 //! The configuration is serialized in the RON format.
 //! The configuration is used to generate the runtime code at compile time.
+#[cfg(not(feature = "std"))]
+extern crate alloc;
 
+use core::fmt;
+use core::fmt::Display;
 use cu29_traits::{CuError, CuResult};
-use html_escape::encode_text;
+use hashbrown::HashMap;
 use petgraph::stable_graph::{EdgeIndex, NodeIndex, StableDiGraph};
 use petgraph::visit::EdgeRef;
+#[cfg(feature = "std")]
+use petgraph::visit::IntoEdgeReferences;
 pub use petgraph::Direction::Incoming;
 pub use petgraph::Direction::Outgoing;
 use ron::extensions::Extensions;
 use ron::value::Value as RonValue;
 use ron::{Number, Options};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::HashMap;
-use std::fmt;
-use std::fmt::Display;
-use std::fs::read_to_string;
 use ConfigGraphs::{Missions, Simple};
+
+#[cfg(not(feature = "std"))]
+mod imp {
+    pub use alloc::borrow::ToOwned;
+    pub use alloc::format;
+    pub use alloc::string::String;
+    pub use alloc::string::ToString;
+    pub use alloc::vec::Vec;
+}
+
+#[cfg(feature = "std")]
+mod imp {
+    pub use html_escape::encode_text;
+    pub use std::fs::read_to_string;
+}
+
+use imp::*;
 
 /// NodeId is the unique identifier of a node in the configuration graph for petgraph
 /// and the code generation.
@@ -205,6 +224,15 @@ pub struct NodeLogging {
     enabled: bool,
 }
 
+/// Distinguishes regular tasks from bridge nodes so downstream stages can apply
+/// bridge-specific instantiation rules.
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Flavor {
+    #[default]
+    Task,
+    Bridge,
+}
+
 /// A node in the configuration graph.
 /// A node represents a Task in the system Graph.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -239,6 +267,10 @@ pub struct Node {
     /// Config passed to the task.
     #[serde(skip_serializing_if = "Option::is_none")]
     logging: Option<NodeLogging>,
+
+    /// Node role in the runtime graph (normal task or bridge endpoint).
+    #[serde(skip, default)]
+    flavor: Flavor,
 }
 
 impl Node {
@@ -252,7 +284,15 @@ impl Node {
             background: None,
             run_in_sim: None,
             logging: None,
+            flavor: Flavor::Task,
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn new_with_flavor(id: &str, ptype: &str, flavor: Flavor) -> Self {
+        let mut node = Self::new(id, ptype);
+        node.flavor = flavor;
+        node
     }
 
     #[allow(dead_code)]
@@ -313,22 +353,238 @@ impl Node {
         let ComponentConfig(config) = self.config.as_mut().unwrap();
         config.insert(key.to_string(), value.into());
     }
+
+    /// Returns whether this node is treated as a normal task or as a bridge.
+    #[allow(dead_code)]
+    pub fn get_flavor(&self) -> Flavor {
+        self.flavor
+    }
+
+    /// Overrides the node flavor; primarily used when injecting bridge nodes.
+    #[allow(dead_code)]
+    pub fn set_flavor(&mut self, flavor: Flavor) {
+        self.flavor = flavor;
+    }
+}
+
+/// Directional mapping for bridge channels.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum BridgeChannelConfigRepresentation {
+    /// Channel that receives data from the bridge into the graph.
+    Rx {
+        id: String,
+        /// Optional transport/topic identifier specific to the bridge backend.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        route: Option<String>,
+        /// Optional per-channel configuration forwarded to the bridge implementation.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        config: Option<ComponentConfig>,
+    },
+    /// Channel that transmits data from the graph into the bridge.
+    Tx {
+        id: String,
+        /// Optional transport/topic identifier specific to the bridge backend.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        route: Option<String>,
+        /// Optional per-channel configuration forwarded to the bridge implementation.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        config: Option<ComponentConfig>,
+    },
+}
+
+impl BridgeChannelConfigRepresentation {
+    /// Stable logical identifier to reference this channel in connections.
+    #[allow(dead_code)]
+    pub fn id(&self) -> &str {
+        match self {
+            BridgeChannelConfigRepresentation::Rx { id, .. }
+            | BridgeChannelConfigRepresentation::Tx { id, .. } => id,
+        }
+    }
+
+    /// Bridge-specific transport path (topic, route, path...) describing this channel.
+    #[allow(dead_code)]
+    pub fn route(&self) -> Option<&str> {
+        match self {
+            BridgeChannelConfigRepresentation::Rx { route, .. }
+            | BridgeChannelConfigRepresentation::Tx { route, .. } => route.as_deref(),
+        }
+    }
+}
+
+enum EndpointRole {
+    Source,
+    Destination,
+}
+
+fn validate_bridge_channel(
+    bridge: &BridgeConfig,
+    channel_id: &str,
+    role: EndpointRole,
+) -> Result<(), String> {
+    let channel = bridge
+        .channels
+        .iter()
+        .find(|ch| ch.id() == channel_id)
+        .ok_or_else(|| {
+            format!(
+                "Bridge '{}' does not declare a channel named '{}'",
+                bridge.id, channel_id
+            )
+        })?;
+
+    match (role, channel) {
+        (EndpointRole::Source, BridgeChannelConfigRepresentation::Rx { .. }) => Ok(()),
+        (EndpointRole::Destination, BridgeChannelConfigRepresentation::Tx { .. }) => Ok(()),
+        (EndpointRole::Source, BridgeChannelConfigRepresentation::Tx { .. }) => Err(format!(
+            "Bridge '{}' channel '{}' is Tx and cannot act as a source",
+            bridge.id, channel_id
+        )),
+        (EndpointRole::Destination, BridgeChannelConfigRepresentation::Rx { .. }) => Err(format!(
+            "Bridge '{}' channel '{}' is Rx and cannot act as a destination",
+            bridge.id, channel_id
+        )),
+    }
+}
+
+/// Declarative definition of a bridge component with a list of channels.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BridgeConfig {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub type_: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<ComponentConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missions: Option<Vec<String>>,
+    /// List of logical endpoints exposed by this bridge.
+    pub channels: Vec<BridgeChannelConfigRepresentation>,
+}
+
+impl BridgeConfig {
+    fn to_node(&self) -> Node {
+        let mut node = Node::new_with_flavor(&self.id, &self.type_, Flavor::Bridge);
+        node.config = self.config.clone();
+        node.missions = self.missions.clone();
+        node
+    }
+}
+
+fn insert_bridge_node(graph: &mut CuGraph, bridge: &BridgeConfig) -> Result<(), String> {
+    if graph.get_node_id_by_name(bridge.id.as_str()).is_some() {
+        return Err(format!(
+            "Bridge '{}' reuses an existing node id. Bridge ids must be unique.",
+            bridge.id
+        ));
+    }
+    graph
+        .add_node(bridge.to_node())
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Serialized representation of a connection used for the RON config.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct SerializedCnx {
+    src: String,
+    dst: String,
+    msg: String,
+    missions: Option<Vec<String>>,
 }
 
 /// This represents a connection between 2 tasks (nodes) in the configuration graph.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct Cnx {
     /// Source node id.
-    src: String,
-
-    // Destination node id.
-    dst: String,
-
+    pub src: String,
+    /// Destination node id.
+    pub dst: String,
     /// Message type exchanged between src and dst.
     pub msg: String,
-
     /// Restrict this connection for this list of missions.
     pub missions: Option<Vec<String>>,
+    /// Optional channel id when the source endpoint is a bridge.
+    pub src_channel: Option<String>,
+    /// Optional channel id when the destination endpoint is a bridge.
+    pub dst_channel: Option<String>,
+}
+
+impl From<&Cnx> for SerializedCnx {
+    fn from(cnx: &Cnx) -> Self {
+        SerializedCnx {
+            src: format_endpoint(&cnx.src, cnx.src_channel.as_deref()),
+            dst: format_endpoint(&cnx.dst, cnx.dst_channel.as_deref()),
+            msg: cnx.msg.clone(),
+            missions: cnx.missions.clone(),
+        }
+    }
+}
+
+fn format_endpoint(node: &str, channel: Option<&str>) -> String {
+    match channel {
+        Some(ch) => format!("{node}/{ch}"),
+        None => node.to_string(),
+    }
+}
+
+fn parse_endpoint(
+    endpoint: &str,
+    role: EndpointRole,
+    bridges: &HashMap<&str, &BridgeConfig>,
+) -> Result<(String, Option<String>), String> {
+    if let Some((node, channel)) = endpoint.split_once('/') {
+        if let Some(bridge) = bridges.get(node) {
+            validate_bridge_channel(bridge, channel, role)?;
+            return Ok((node.to_string(), Some(channel.to_string())));
+        } else {
+            return Err(format!(
+                "Endpoint '{endpoint}' references an unknown bridge '{node}'"
+            ));
+        }
+    }
+
+    if let Some(bridge) = bridges.get(endpoint) {
+        return Err(format!(
+            "Bridge '{}' connections must reference a channel using '{}/<channel>'",
+            bridge.id, bridge.id
+        ));
+    }
+
+    Ok((endpoint.to_string(), None))
+}
+
+fn build_bridge_lookup(bridges: Option<&Vec<BridgeConfig>>) -> HashMap<&str, &BridgeConfig> {
+    let mut map = HashMap::new();
+    if let Some(bridges) = bridges {
+        for bridge in bridges {
+            map.insert(bridge.id.as_str(), bridge);
+        }
+    }
+    map
+}
+
+fn mission_applies(missions: &Option<Vec<String>>, mission_id: &str) -> bool {
+    missions
+        .as_ref()
+        .map(|mission_list| mission_list.iter().any(|m| m == mission_id))
+        .unwrap_or(true)
+}
+
+/// A simple wrapper enum for `petgraph::Direction`,
+/// designed to be converted *into* it via the `From` trait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CuDirection {
+    Outgoing,
+    Incoming,
+}
+
+impl From<CuDirection> for petgraph::Direction {
+    fn from(dir: CuDirection) -> Self {
+        match dir {
+            CuDirection::Outgoing => petgraph::Direction::Outgoing,
+            CuDirection::Incoming => petgraph::Direction::Incoming,
+        }
+    }
 }
 
 #[derive(Default, Debug, Clone)]
@@ -343,6 +599,24 @@ impl CuGraph {
             .collect()
     }
 
+    #[allow(dead_code)]
+    pub fn get_neighbor_ids(&self, node_id: NodeId, dir: CuDirection) -> Vec<NodeId> {
+        self.0
+            .neighbors_directed(node_id.into(), dir.into())
+            .map(|petgraph_index| petgraph_index.index() as NodeId)
+            .collect()
+    }
+
+    #[allow(dead_code)]
+    pub fn incoming_neighbor_count(&self, node_id: NodeId) -> usize {
+        self.0.neighbors_directed(node_id.into(), Incoming).count()
+    }
+
+    #[allow(dead_code)]
+    pub fn outgoing_neighbor_count(&self, node_id: NodeId) -> usize {
+        self.0.neighbors_directed(node_id.into(), Outgoing).count()
+    }
+
     pub fn node_indices(&self) -> Vec<petgraph::stable_graph::NodeIndex> {
         self.0.node_indices().collect()
     }
@@ -351,12 +625,19 @@ impl CuGraph {
         Ok(self.0.add_node(node).index() as NodeId)
     }
 
+    #[allow(dead_code)]
+    pub fn connection_exists(&self, source: NodeId, target: NodeId) -> bool {
+        self.0.find_edge(source.into(), target.into()).is_some()
+    }
+
     pub fn connect_ext(
         &mut self,
         source: NodeId,
         target: NodeId,
         msg_type: &str,
         missions: Option<Vec<String>>,
+        src_channel: Option<String>,
+        dst_channel: Option<String>,
     ) -> CuResult<()> {
         let (src_id, dst_id) = (
             self.0
@@ -379,6 +660,8 @@ impl CuGraph {
                 dst: dst_id,
                 msg: msg_type.to_string(),
                 missions,
+                src_channel,
+                dst_channel,
             },
         );
         Ok(())
@@ -386,6 +669,7 @@ impl CuGraph {
     /// Get the node with the given id.
     /// If mission_id is provided, get the node from that mission's graph.
     /// Otherwise get the node from the simple graph.
+    #[allow(dead_code)]
     pub fn get_node(&self, node_id: NodeId) -> Option<&Node> {
         self.0.node_weight(node_id.into())
     }
@@ -398,6 +682,14 @@ impl CuGraph {
     #[allow(dead_code)]
     pub fn get_node_mut(&mut self, node_id: NodeId) -> Option<&mut Node> {
         self.0.node_weight_mut(node_id.into())
+    }
+
+    pub fn get_node_id_by_name(&self, name: &str) -> Option<NodeId> {
+        self.0
+            .node_indices()
+            .into_iter()
+            .find(|idx| self.0[*idx].get_id() == name)
+            .map(|i| i.index() as NodeId)
     }
 
     #[allow(dead_code)]
@@ -432,6 +724,11 @@ impl CuGraph {
 
     #[allow(dead_code)]
     pub fn get_node_input_msg_type(&self, node_id: &str) -> Option<String> {
+        self.get_node_input_msg_types(node_id)
+            .and_then(|mut v| v.pop())
+    }
+
+    pub fn get_node_input_msg_types(&self, node_id: &str) -> Option<Vec<String>> {
         self.0.node_indices().find_map(|node_index| {
             if let Some(node) = self.0.node_weight(node_index) {
                 if node.id != node_id {
@@ -445,14 +742,27 @@ impl CuGraph {
                 if edges.is_empty() {
                     return None;
                 }
-                let cnx = self
-                    .0
-                    .edge_weight(EdgeIndex::new(edges[0]))
-                    .expect("Found an cnx id but could not retrieve it back");
-                return Some(cnx.msg.clone());
+                let msgs = edges
+                    .into_iter()
+                    .map(|edge_id| {
+                        let cnx = self
+                            .0
+                            .edge_weight(EdgeIndex::new(edge_id))
+                            .expect("Found an cnx id but could not retrieve it back");
+                        cnx.msg.clone()
+                    })
+                    .collect();
+                return Some(msgs);
             }
             None
         })
+    }
+
+    #[allow(dead_code)]
+    pub fn get_connection_msg_type(&self, source: NodeId, target: NodeId) -> Option<&str> {
+        self.0
+            .find_edge(source.into(), target.into())
+            .map(|edge_index| self.0[edge_index].msg.as_str())
     }
 
     /// Get the list of edges that are connected to the given node as a source.
@@ -477,15 +787,25 @@ impl CuGraph {
         self.get_edges_by_direction(node_id, Incoming)
     }
 
+    #[allow(dead_code)]
+    pub fn node_count(&self) -> usize {
+        self.0.node_count()
+    }
+
+    #[allow(dead_code)]
+    pub fn edge_count(&self) -> usize {
+        self.0.edge_count()
+    }
+
     /// Adds an edge between two nodes/tasks in the configuration graph.
     /// msg_type is the type of message exchanged between the two nodes/tasks.
     #[allow(dead_code)]
     pub fn connect(&mut self, source: NodeId, target: NodeId, msg_type: &str) -> CuResult<()> {
-        self.connect_ext(source, target, msg_type, None)
+        self.connect_ext(source, target, msg_type, None, None, None)
     }
 }
 
-impl std::ops::Index<NodeIndex> for CuGraph {
+impl core::ops::Index<NodeIndex> for CuGraph {
     type Output = Node;
 
     fn index(&self, index: NodeIndex) -> &Self::Output {
@@ -602,6 +922,8 @@ pub struct CuConfig {
     pub logging: Option<LoggingConfig>,
     /// Optional runtime configuration
     pub runtime: Option<RuntimeConfig>,
+    /// Declarative bridge definitions that are yet to be expanded into the graph
+    pub bridges: Vec<BridgeConfig>,
     /// Graph structure - either a single graph or multiple mission-specific graphs
     pub graphs: ConfigGraphs,
 }
@@ -687,7 +1009,8 @@ pub struct IncludesConfig {
 #[derive(Serialize, Deserialize, Default)]
 struct CuConfigRepresentation {
     tasks: Option<Vec<Node>>,
-    cnx: Option<Vec<Cnx>>,
+    bridges: Option<Vec<BridgeConfig>>,
+    cnx: Option<Vec<SerializedCnx>>,
     monitor: Option<MonitorConfig>,
     logging: Option<LoggingConfig>,
     runtime: Option<RuntimeConfig>,
@@ -703,6 +1026,7 @@ where
     E: From<String>,
 {
     let mut cuconfig = CuConfig::default();
+    let bridge_lookup = build_bridge_lookup(representation.bridges.as_ref());
 
     if let Some(mission_configs) = &representation.missions {
         // This is the multi-mission case
@@ -732,50 +1056,67 @@ where
                 }
             }
 
+            if let Some(bridges) = &representation.bridges {
+                for bridge in bridges {
+                    if mission_applies(&bridge.missions, mission_id) {
+                        insert_bridge_node(graph, bridge).map_err(E::from)?;
+                    }
+                }
+            }
+
             if let Some(cnx) = &representation.cnx {
                 for c in cnx {
                     if let Some(cnx_missions) = &c.missions {
                         // if there is a filter by mission on the connection, only add the connection to the mission if it matches the filter.
                         if cnx_missions.contains(&mission_id.to_owned()) {
-                            let src = graph
-                                .node_indices()
-                                .into_iter()
-                                .find(|i| graph.get_node(i.index() as NodeId).unwrap().id == c.src)
-                                .ok_or_else(|| {
-                                    E::from(format!("Source node not found: {}", c.src))
-                                })?;
-                            let dst = graph
-                                .node_indices()
-                                .into_iter()
-                                .find(|i| graph.get_node(i.index() as NodeId).unwrap().id == c.dst)
-                                .ok_or_else(|| {
-                                    E::from(format!("Destination node not found: {}", c.dst))
-                                })?;
+                            let (src_name, src_channel) =
+                                parse_endpoint(&c.src, EndpointRole::Source, &bridge_lookup)
+                                    .map_err(E::from)?;
+                            let (dst_name, dst_channel) =
+                                parse_endpoint(&c.dst, EndpointRole::Destination, &bridge_lookup)
+                                    .map_err(E::from)?;
+                            let src =
+                                graph
+                                    .get_node_id_by_name(src_name.as_str())
+                                    .ok_or_else(|| {
+                                        E::from(format!("Source node not found: {}", c.src))
+                                    })?;
+                            let dst =
+                                graph
+                                    .get_node_id_by_name(dst_name.as_str())
+                                    .ok_or_else(|| {
+                                        E::from(format!("Destination node not found: {}", c.dst))
+                                    })?;
                             graph
                                 .connect_ext(
-                                    src.index() as NodeId,
-                                    dst.index() as NodeId,
+                                    src,
+                                    dst,
                                     &c.msg,
                                     Some(cnx_missions.clone()),
+                                    src_channel,
+                                    dst_channel,
                                 )
                                 .map_err(|e| E::from(e.to_string()))?;
                         }
                     } else {
                         // if there is no filter by mission on the connection, add the connection to the mission.
+                        let (src_name, src_channel) =
+                            parse_endpoint(&c.src, EndpointRole::Source, &bridge_lookup)
+                                .map_err(E::from)?;
+                        let (dst_name, dst_channel) =
+                            parse_endpoint(&c.dst, EndpointRole::Destination, &bridge_lookup)
+                                .map_err(E::from)?;
                         let src = graph
-                            .node_indices()
-                            .into_iter()
-                            .find(|i| graph.get_node(i.index() as NodeId).unwrap().id == c.src)
+                            .get_node_id_by_name(src_name.as_str())
                             .ok_or_else(|| E::from(format!("Source node not found: {}", c.src)))?;
-                        let dst = graph
-                            .node_indices()
-                            .into_iter()
-                            .find(|i| graph.get_node(i.index() as NodeId).unwrap().id == c.dst)
-                            .ok_or_else(|| {
-                                E::from(format!("Destination node not found: {}", c.dst))
-                            })?;
+                        let dst =
+                            graph
+                                .get_node_id_by_name(dst_name.as_str())
+                                .ok_or_else(|| {
+                                    E::from(format!("Destination node not found: {}", c.dst))
+                                })?;
                         graph
-                            .connect_ext(src.index() as NodeId, dst.index() as NodeId, &c.msg, None)
+                            .connect_ext(src, dst, &c.msg, None, src_channel, dst_channel)
                             .map_err(|e| E::from(e.to_string()))?;
                     }
                 }
@@ -794,20 +1135,28 @@ where
             }
         }
 
+        if let Some(bridges) = &representation.bridges {
+            for bridge in bridges {
+                insert_bridge_node(&mut graph, bridge).map_err(E::from)?;
+            }
+        }
+
         if let Some(cnx) = &representation.cnx {
             for c in cnx {
+                let (src_name, src_channel) =
+                    parse_endpoint(&c.src, EndpointRole::Source, &bridge_lookup)
+                        .map_err(E::from)?;
+                let (dst_name, dst_channel) =
+                    parse_endpoint(&c.dst, EndpointRole::Destination, &bridge_lookup)
+                        .map_err(E::from)?;
                 let src = graph
-                    .node_indices()
-                    .into_iter()
-                    .find(|i| graph.get_node(i.index() as NodeId).unwrap().id == c.src)
+                    .get_node_id_by_name(src_name.as_str())
                     .ok_or_else(|| E::from(format!("Source node not found: {}", c.src)))?;
                 let dst = graph
-                    .node_indices()
-                    .into_iter()
-                    .find(|i| graph.get_node(i.index() as NodeId).unwrap().id == c.dst)
+                    .get_node_id_by_name(dst_name.as_str())
                     .ok_or_else(|| E::from(format!("Destination node not found: {}", c.dst)))?;
                 graph
-                    .connect_ext(src.index() as NodeId, dst.index() as NodeId, &c.msg, None)
+                    .connect_ext(src, dst, &c.msg, None, src_channel, dst_channel)
                     .map_err(|e| E::from(e.to_string()))?;
             }
         }
@@ -817,6 +1166,7 @@ where
     cuconfig.monitor = representation.monitor.clone();
     cuconfig.logging = representation.logging.clone();
     cuconfig.runtime = representation.runtime.clone();
+    cuconfig.bridges = representation.bridges.clone().unwrap_or_default();
 
     Ok(cuconfig)
 }
@@ -844,22 +1194,29 @@ impl Serialize for CuConfig {
     where
         S: Serializer,
     {
+        let bridges = if self.bridges.is_empty() {
+            None
+        } else {
+            Some(self.bridges.clone())
+        };
         match &self.graphs {
             Simple(graph) => {
                 let tasks: Vec<Node> = graph
                     .0
                     .node_indices()
                     .map(|idx| graph.0[idx].clone())
+                    .filter(|node| node.get_flavor() == Flavor::Task)
                     .collect();
 
-                let cnx: Vec<Cnx> = graph
+                let cnx: Vec<SerializedCnx> = graph
                     .0
                     .edge_indices()
-                    .map(|edge| graph.0[edge].clone())
+                    .map(|edge| SerializedCnx::from(&graph.0[edge]))
                     .collect();
 
                 CuConfigRepresentation {
                     tasks: Some(tasks),
+                    bridges: bridges.clone(),
                     cnx: Some(cnx),
                     monitor: self.monitor.clone(),
                     logging: self.logging.clone(),
@@ -883,7 +1240,9 @@ impl Serialize for CuConfig {
                     // Add all nodes from this mission
                     for node_idx in graph.node_indices() {
                         let node = &graph[node_idx];
-                        if !tasks.iter().any(|n: &Node| n.id == node.id) {
+                        if node.get_flavor() == Flavor::Task
+                            && !tasks.iter().any(|n: &Node| n.id == node.id)
+                        {
                             tasks.push(node.clone());
                         }
                     }
@@ -891,16 +1250,20 @@ impl Serialize for CuConfig {
                     // Add all edges from this mission
                     for edge_idx in graph.0.edge_indices() {
                         let edge = &graph.0[edge_idx];
-                        if !cnx.iter().any(|c: &Cnx| {
-                            c.src == edge.src && c.dst == edge.dst && c.msg == edge.msg
+                        let serialized = SerializedCnx::from(edge);
+                        if !cnx.iter().any(|c: &SerializedCnx| {
+                            c.src == serialized.src
+                                && c.dst == serialized.dst
+                                && c.msg == serialized.msg
                         }) {
-                            cnx.push(edge.clone());
+                            cnx.push(serialized);
                         }
                     }
                 }
 
                 CuConfigRepresentation {
                     tasks: Some(tasks),
+                    bridges,
                     cnx: Some(cnx),
                     monitor: self.monitor.clone(),
                     logging: self.logging.clone(),
@@ -921,6 +1284,7 @@ impl Default for CuConfig {
             monitor: None,
             logging: None,
             runtime: None,
+            bridges: Vec::new(),
         }
     }
 }
@@ -940,6 +1304,7 @@ impl CuConfig {
             monitor: None,
             logging: None,
             runtime: None,
+            bridges: Vec::new(),
         }
     }
 
@@ -972,77 +1337,45 @@ impl CuConfig {
     }
 
     /// Render the configuration graph in the dot format.
+    #[cfg(feature = "std")]
     pub fn render(
         &self,
         output: &mut dyn std::io::Write,
         mission_id: Option<&str>,
     ) -> CuResult<()> {
         writeln!(output, "digraph G {{").unwrap();
+        writeln!(output, "    graph [rankdir=LR, nodesep=0.8, ranksep=1.2];").unwrap();
+        writeln!(output, "    node [shape=plain, fontname=\"Noto Sans\"];").unwrap();
+        writeln!(output, "    edge [fontname=\"Noto Sans\"];").unwrap();
 
-        let graph = self.get_graph(mission_id)?;
-
-        for index in graph.node_indices() {
-            let node = &graph[index];
-            let config_str = match &node.config {
-                Some(config) => {
-                    let config_str = config
-                        .0
-                        .iter()
-                        .map(|(k, v)| format!("<B>{k}</B> = {v}<BR ALIGN=\"LEFT\"/>"))
-                        .collect::<Vec<String>>()
-                        .join("\n");
-                    format!("____________<BR/><BR ALIGN=\"LEFT\"/>{config_str}")
-                }
-                None => String::new(),
-            };
-            writeln!(output, "{} [", index.index()).unwrap();
-            writeln!(output, "shape=box,").unwrap();
-            writeln!(output, "style=\"rounded, filled\",").unwrap();
-            writeln!(output, "fontname=\"Noto Sans\"").unwrap();
-
-            let is_src = graph
-                .get_dst_edges(index.index() as NodeId)
-                .unwrap_or_default()
-                .is_empty();
-            let is_sink = graph
-                .get_src_edges(index.index() as NodeId)
-                .unwrap_or_default()
-                .is_empty();
-            if is_src {
-                writeln!(output, "fillcolor=lightgreen,").unwrap();
-            } else if is_sink {
-                writeln!(output, "fillcolor=lightblue,").unwrap();
-            } else {
-                writeln!(output, "fillcolor=lightgrey,").unwrap();
+        let sections = match (&self.graphs, mission_id) {
+            (Simple(graph), _) => vec![RenderSection { label: None, graph }],
+            (Missions(graphs), Some(id)) => {
+                let graph = graphs
+                    .get(id)
+                    .ok_or_else(|| CuError::from(format!("Mission {id} not found")))?;
+                vec![RenderSection {
+                    label: Some(id.to_string()),
+                    graph,
+                }]
             }
-            writeln!(output, "color=grey,").unwrap();
+            (Missions(graphs), None) => {
+                let mut missions: Vec<_> = graphs.iter().collect();
+                missions.sort_by(|a, b| a.0.cmp(b.0));
+                missions
+                    .into_iter()
+                    .map(|(label, graph)| RenderSection {
+                        label: Some(label.clone()),
+                        graph,
+                    })
+                    .collect()
+            }
+        };
 
-            writeln!(output, "labeljust=l,").unwrap();
-            writeln!(
-                output,
-                "label=< <FONT COLOR=\"red\"><B>{}</B></FONT> <FONT COLOR=\"dimgray\">[{}]</FONT><BR ALIGN=\"LEFT\"/>{} >",
-                node.id,
-                node.get_type(),
-                config_str
-            )
-                .unwrap();
-
-            writeln!(output, "];").unwrap();
+        for section in sections {
+            self.render_section(output, section.graph, section.label.as_deref())?;
         }
-        for edge in graph.0.edge_indices() {
-            let (src, dst) = graph.0.edge_endpoints(edge).unwrap();
 
-            let cnx = &graph.0[edge];
-            let msg = encode_text(&cnx.msg);
-            writeln!(
-                output,
-                "{} -> {} [label=< <B><FONT COLOR=\"gray\">{}</FONT></B> >];",
-                src.index(),
-                dst.index(),
-                msg
-            )
-            .unwrap();
-        }
         writeln!(output, "}}").unwrap();
         Ok(())
     }
@@ -1090,6 +1423,384 @@ impl CuConfig {
     }
 }
 
+#[cfg(feature = "std")]
+struct PortLookup {
+    inputs: HashMap<String, String>,
+    outputs: HashMap<String, String>,
+    default_input: Option<String>,
+    default_output: Option<String>,
+}
+
+#[cfg(feature = "std")]
+#[derive(Clone)]
+struct RenderNode {
+    id: String,
+    type_name: String,
+    flavor: Flavor,
+    inputs: Vec<String>,
+    outputs: Vec<String>,
+}
+
+#[cfg(feature = "std")]
+#[derive(Clone)]
+struct RenderConnection {
+    src: String,
+    src_port: Option<String>,
+    dst: String,
+    dst_port: Option<String>,
+    msg: String,
+}
+
+#[cfg(feature = "std")]
+struct RenderTopology {
+    nodes: Vec<RenderNode>,
+    connections: Vec<RenderConnection>,
+}
+
+#[cfg(feature = "std")]
+struct RenderSection<'a> {
+    label: Option<String>,
+    graph: &'a CuGraph,
+}
+
+#[cfg(feature = "std")]
+impl CuConfig {
+    fn render_section(
+        &self,
+        output: &mut dyn std::io::Write,
+        graph: &CuGraph,
+        label: Option<&str>,
+    ) -> CuResult<()> {
+        use std::fmt::Write as FmtWrite;
+
+        let mut topology = build_render_topology(graph, &self.bridges);
+        topology.nodes.sort_by(|a, b| a.id.cmp(&b.id));
+        topology.connections.sort_by(|a, b| {
+            a.src
+                .cmp(&b.src)
+                .then(a.dst.cmp(&b.dst))
+                .then(a.msg.cmp(&b.msg))
+        });
+
+        let cluster_id = label.map(|lbl| format!("cluster_{}", sanitize_identifier(lbl)));
+        if let Some(ref cluster_id) = cluster_id {
+            writeln!(output, "    subgraph \"{cluster_id}\" {{").unwrap();
+            writeln!(
+                output,
+                "        label=<<B>Mission: {}</B>>;",
+                encode_text(label.unwrap())
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "        labelloc=t; labeljust=l; color=\"#bbbbbb\"; style=\"rounded\"; margin=20;"
+            )
+            .unwrap();
+        }
+        let indent = if cluster_id.is_some() {
+            "        "
+        } else {
+            "    "
+        };
+        let node_prefix = label
+            .map(|lbl| format!("{}__", sanitize_identifier(lbl)))
+            .unwrap_or_default();
+
+        let mut port_lookup: HashMap<String, PortLookup> = HashMap::new();
+        let mut id_lookup: HashMap<String, String> = HashMap::new();
+
+        for node in &topology.nodes {
+            let node_idx = graph
+                .get_node_id_by_name(node.id.as_str())
+                .ok_or_else(|| CuError::from(format!("Node '{}' missing from graph", node.id)))?;
+            let node_weight = graph
+                .get_node(node_idx)
+                .ok_or_else(|| CuError::from(format!("Node '{}' missing weight", node.id)))?;
+
+            let is_src = graph.get_dst_edges(node_idx).unwrap_or_default().is_empty();
+            let is_sink = graph.get_src_edges(node_idx).unwrap_or_default().is_empty();
+
+            let fillcolor = match node.flavor {
+                Flavor::Bridge => "#faedcd",
+                Flavor::Task if is_src => "#ddefc7",
+                Flavor::Task if is_sink => "#cce0ff",
+                _ => "#f2f2f2",
+            };
+
+            let port_base = format!("{}{}", node_prefix, sanitize_identifier(&node.id));
+            let (inputs_table, input_map, default_input) =
+                build_port_table("Inputs", &node.inputs, &port_base, "in");
+            let (outputs_table, output_map, default_output) =
+                build_port_table("Outputs", &node.outputs, &port_base, "out");
+            let config_html = node_weight.config.as_ref().and_then(build_config_table);
+
+            let mut label_html = String::new();
+            write!(
+                label_html,
+                "<TABLE BORDER=\"0\" CELLBORDER=\"1\" CELLSPACING=\"0\" CELLPADDING=\"6\" COLOR=\"gray\" BGCOLOR=\"white\">"
+            )
+            .unwrap();
+            write!(
+                label_html,
+                "<TR><TD COLSPAN=\"2\" ALIGN=\"LEFT\" BGCOLOR=\"{fillcolor}\"><FONT POINT-SIZE=\"12\"><B>{}</B></FONT><BR/><FONT COLOR=\"dimgray\">[{}]</FONT></TD></TR>",
+                encode_text(&node.id),
+                encode_text(&node.type_name)
+            )
+            .unwrap();
+            write!(
+                label_html,
+                "<TR><TD ALIGN=\"LEFT\" VALIGN=\"TOP\">{inputs_table}</TD><TD ALIGN=\"LEFT\" VALIGN=\"TOP\">{outputs_table}</TD></TR>"
+            )
+            .unwrap();
+
+            if let Some(config_html) = config_html {
+                write!(
+                    label_html,
+                    "<TR><TD COLSPAN=\"2\" ALIGN=\"LEFT\">{config_html}</TD></TR>"
+                )
+                .unwrap();
+            }
+
+            label_html.push_str("</TABLE>");
+
+            let identifier_raw = if node_prefix.is_empty() {
+                node.id.clone()
+            } else {
+                format!("{node_prefix}{}", node.id)
+            };
+            let identifier = escape_dot_id(&identifier_raw);
+            writeln!(output, "{indent}\"{identifier}\" [label=<{label_html}>];").unwrap();
+
+            id_lookup.insert(node.id.clone(), identifier);
+            port_lookup.insert(
+                node.id.clone(),
+                PortLookup {
+                    inputs: input_map,
+                    outputs: output_map,
+                    default_input,
+                    default_output,
+                },
+            );
+        }
+
+        for cnx in &topology.connections {
+            let src_id = id_lookup
+                .get(&cnx.src)
+                .ok_or_else(|| CuError::from(format!("Unknown node '{}'", cnx.src)))?;
+            let dst_id = id_lookup
+                .get(&cnx.dst)
+                .ok_or_else(|| CuError::from(format!("Unknown node '{}'", cnx.dst)))?;
+            let src_suffix = port_lookup
+                .get(&cnx.src)
+                .and_then(|lookup| lookup.resolve_output(cnx.src_port.as_deref()))
+                .map(|port| format!(":\"{port}\":e"))
+                .unwrap_or_default();
+            let dst_suffix = port_lookup
+                .get(&cnx.dst)
+                .and_then(|lookup| lookup.resolve_input(cnx.dst_port.as_deref()))
+                .map(|port| format!(":\"{port}\":w"))
+                .unwrap_or_default();
+            let msg = encode_text(&cnx.msg);
+            writeln!(
+                output,
+                "{indent}\"{src_id}\"{src_suffix} -> \"{dst_id}\"{dst_suffix} [label=< <B><FONT COLOR=\"gray\">{msg}</FONT></B> >];"
+            )
+            .unwrap();
+        }
+
+        if cluster_id.is_some() {
+            writeln!(output, "    }}").unwrap();
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(feature = "std")]
+fn build_render_topology(graph: &CuGraph, bridges: &[BridgeConfig]) -> RenderTopology {
+    let mut bridge_lookup = HashMap::new();
+    for bridge in bridges {
+        bridge_lookup.insert(bridge.id.as_str(), bridge);
+    }
+
+    let mut nodes: HashMap<String, RenderNode> = HashMap::new();
+    for (_, node) in graph.get_all_nodes() {
+        let node_id = node.get_id();
+        let mut inputs = Vec::new();
+        let mut outputs = Vec::new();
+        if node.get_flavor() == Flavor::Bridge {
+            if let Some(bridge) = bridge_lookup.get(node_id.as_str()) {
+                for channel in &bridge.channels {
+                    match channel {
+                        // Rx brings data from the bridge into the graph, so treat it as an output.
+                        BridgeChannelConfigRepresentation::Rx { id, .. } => {
+                            outputs.push(id.clone())
+                        }
+                        // Tx consumes data from the graph heading into the bridge, so show it on the input side.
+                        BridgeChannelConfigRepresentation::Tx { id, .. } => inputs.push(id.clone()),
+                    }
+                }
+            }
+        }
+
+        nodes.insert(
+            node_id.clone(),
+            RenderNode {
+                id: node_id,
+                type_name: node.get_type().to_string(),
+                flavor: node.get_flavor(),
+                inputs,
+                outputs,
+            },
+        );
+    }
+
+    let mut connections = Vec::new();
+    for edge in graph.0.edge_references() {
+        let cnx = edge.weight();
+        if let Some(node) = nodes.get_mut(&cnx.src) {
+            if node.flavor == Flavor::Task && cnx.src_channel.is_none() && node.outputs.is_empty() {
+                node.outputs.push("out0".to_string());
+            }
+        }
+        if let Some(node) = nodes.get_mut(&cnx.dst) {
+            if node.flavor == Flavor::Task && cnx.dst_channel.is_none() {
+                let next = format!("in{}", node.inputs.len());
+                node.inputs.push(next);
+            }
+        }
+
+        connections.push(RenderConnection {
+            src: cnx.src.clone(),
+            src_port: cnx.src_channel.clone(),
+            dst: cnx.dst.clone(),
+            dst_port: cnx.dst_channel.clone(),
+            msg: cnx.msg.clone(),
+        });
+    }
+
+    RenderTopology {
+        nodes: nodes.into_values().collect(),
+        connections,
+    }
+}
+
+#[cfg(feature = "std")]
+impl PortLookup {
+    fn resolve_input(&self, name: Option<&str>) -> Option<&str> {
+        if let Some(name) = name {
+            if let Some(port) = self.inputs.get(name) {
+                return Some(port.as_str());
+            }
+        }
+        self.default_input.as_deref()
+    }
+
+    fn resolve_output(&self, name: Option<&str>) -> Option<&str> {
+        if let Some(name) = name {
+            if let Some(port) = self.outputs.get(name) {
+                return Some(port.as_str());
+            }
+        }
+        self.default_output.as_deref()
+    }
+}
+
+#[cfg(feature = "std")]
+fn build_port_table(
+    title: &str,
+    names: &[String],
+    base_id: &str,
+    prefix: &str,
+) -> (String, HashMap<String, String>, Option<String>) {
+    use std::fmt::Write as FmtWrite;
+
+    let mut html = String::new();
+    write!(
+        html,
+        "<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"1\">"
+    )
+    .unwrap();
+    write!(
+        html,
+        "<TR><TD ALIGN=\"LEFT\"><FONT COLOR=\"dimgray\">{}</FONT></TD></TR>",
+        encode_text(title)
+    )
+    .unwrap();
+
+    let mut lookup = HashMap::new();
+    let mut default_port = None;
+
+    if names.is_empty() {
+        html.push_str("<TR><TD ALIGN=\"LEFT\"><FONT COLOR=\"lightgray\">&mdash;</FONT></TD></TR>");
+    } else {
+        for (idx, name) in names.iter().enumerate() {
+            let port_id = format!("{base_id}_{prefix}_{idx}");
+            write!(
+                html,
+                "<TR><TD PORT=\"{port_id}\" ALIGN=\"LEFT\">{}</TD></TR>",
+                encode_text(name)
+            )
+            .unwrap();
+            lookup.insert(name.clone(), port_id.clone());
+            if idx == 0 {
+                default_port = Some(port_id);
+            }
+        }
+    }
+
+    html.push_str("</TABLE>");
+    (html, lookup, default_port)
+}
+
+#[cfg(feature = "std")]
+fn build_config_table(config: &ComponentConfig) -> Option<String> {
+    use std::fmt::Write as FmtWrite;
+
+    if config.0.is_empty() {
+        return None;
+    }
+
+    let mut entries: Vec<_> = config.0.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+
+    let mut html = String::new();
+    html.push_str("<TABLE BORDER=\"0\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"1\">");
+    for (key, value) in entries {
+        let value_txt = format!("{value}");
+        write!(
+            html,
+            "<TR><TD ALIGN=\"LEFT\"><FONT COLOR=\"dimgray\">{}</FONT> = {}</TD></TR>",
+            encode_text(key),
+            encode_text(&value_txt)
+        )
+        .unwrap();
+    }
+    html.push_str("</TABLE>");
+    Some(html)
+}
+
+#[cfg(feature = "std")]
+fn sanitize_identifier(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
+
+#[cfg(feature = "std")]
+fn escape_dot_id(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 impl LoggingConfig {
     /// Validate the logging configuration to ensure section pre-allocation sizes do not exceed slab sizes.
     pub fn validate(&self) -> CuResult<()> {
@@ -1105,6 +1816,7 @@ impl LoggingConfig {
     }
 }
 
+#[allow(dead_code)] // dead in no-std
 fn substitute_parameters(content: &str, params: &HashMap<String, Value>) -> String {
     let mut result = content.to_string();
 
@@ -1117,6 +1829,7 @@ fn substitute_parameters(content: &str, params: &HashMap<String, Value>) -> Stri
 }
 
 /// Returns a merged CuConfigRepresentation.
+#[cfg(feature = "std")]
 fn process_includes(
     file_path: &str,
     base_representation: CuConfigRepresentation,
@@ -1183,6 +1896,20 @@ fn process_includes(
                 }
             }
 
+            if let Some(included_bridges) = included_representation.bridges {
+                if result.bridges.is_none() {
+                    result.bridges = Some(included_bridges);
+                } else {
+                    let mut bridges = result.bridges.take().unwrap();
+                    for included_bridge in included_bridges {
+                        if !bridges.iter().any(|b| b.id == included_bridge.id) {
+                            bridges.push(included_bridge);
+                        }
+                    }
+                    result.bridges = Some(bridges);
+                }
+            }
+
             if let Some(included_cnx) = included_representation.cnx {
                 if result.cnx.is_none() {
                     result.cnx = Some(included_cnx);
@@ -1232,6 +1959,7 @@ fn process_includes(
 }
 
 /// Read a copper configuration from a file.
+#[cfg(feature = "std")]
 pub fn read_configuration(config_filename: &str) -> CuResult<CuConfig> {
     let config_content = read_to_string(config_filename).map_err(|e| {
         CuError::from(format!(
@@ -1271,6 +1999,7 @@ fn config_representation_to_config(representation: CuConfigRepresentation) -> Cu
     Ok(cuconfig)
 }
 
+#[allow(unused_variables)]
 pub fn read_configuration_str(
     config_content: String,
     file_path: Option<&str>,
@@ -1279,20 +2008,24 @@ pub fn read_configuration_str(
     let representation = parse_config_string(&config_content)?;
 
     // Process includes and generate a merged configuration if a file path is provided
-    let processed_representation = if let Some(path) = file_path {
+    // includes are only available with std.
+    #[cfg(feature = "std")]
+    let representation = if let Some(path) = file_path {
         process_includes(path, representation, &mut Vec::new())?
     } else {
         representation
     };
 
     // Convert the representation to a CuConfig and validate
-    config_representation_to_config(processed_representation)
+    config_representation_to_config(representation)
 }
 
 // tests
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(feature = "std"))]
+    use alloc::vec;
 
     #[test]
     fn test_plain_serialize() {
@@ -1309,8 +2042,8 @@ mod tests {
         let deserialized = CuConfig::deserialize_ron(&serialized);
         let graph = config.graphs.get_graph(None).unwrap();
         let deserialized_graph = deserialized.graphs.get_graph(None).unwrap();
-        assert_eq!(graph.0.node_count(), deserialized_graph.0.node_count());
-        assert_eq!(graph.0.edge_count(), deserialized_graph.0.edge_count());
+        assert_eq!(graph.node_count(), deserialized_graph.node_count());
+        assert_eq!(graph.edge_count(), deserialized_graph.edge_count());
     }
 
     #[test]
@@ -1345,9 +2078,9 @@ mod tests {
         let txt = r#"( missions: [ (id: "data_collection"), (id: "autonomous")])"#;
         let config = CuConfig::deserialize_ron(txt);
         let graph = config.graphs.get_graph(Some("data_collection")).unwrap();
-        assert!(graph.0.node_count() == 0);
+        assert!(graph.node_count() == 0);
         let graph = config.graphs.get_graph(Some("autonomous")).unwrap();
-        assert!(graph.0.node_count() == 0);
+        assert!(graph.node_count() == 0);
     }
 
     #[test]
@@ -1386,6 +2119,213 @@ mod tests {
         assert_eq!(logging_config.slab_size_mib.unwrap(), 1024);
         assert_eq!(logging_config.section_size_mib.unwrap(), 100);
         assert!(logging_config.enable_task_logging);
+    }
+
+    #[test]
+    fn test_bridge_parsing() {
+        let txt = r#"
+        (
+            tasks: [
+                (id: "dst", type: "tasks::Destination"),
+                (id: "src", type: "tasks::Source"),
+            ],
+            bridges: [
+                (
+                    id: "radio",
+                    type: "tasks::SerialBridge",
+                    config: { "path": "/dev/ttyACM0", "baud": 921600 },
+                    channels: [
+                        Rx ( id: "status", route: "sys/status" ),
+                        Tx ( id: "motor", route: "motor/cmd" ),
+                    ],
+                ),
+            ],
+            cnx: [
+                (src: "radio/status", dst: "dst", msg: "mymsgs::Status"),
+                (src: "src", dst: "radio/motor", msg: "mymsgs::MotorCmd"),
+            ],
+        )
+        "#;
+
+        let config = CuConfig::deserialize_ron(txt);
+        assert_eq!(config.bridges.len(), 1);
+        let bridge = &config.bridges[0];
+        assert_eq!(bridge.id, "radio");
+        assert_eq!(bridge.channels.len(), 2);
+        match &bridge.channels[0] {
+            BridgeChannelConfigRepresentation::Rx { id, route, .. } => {
+                assert_eq!(id, "status");
+                assert_eq!(route.as_deref(), Some("sys/status"));
+            }
+            _ => panic!("expected Rx channel"),
+        }
+        match &bridge.channels[1] {
+            BridgeChannelConfigRepresentation::Tx { id, route, .. } => {
+                assert_eq!(id, "motor");
+                assert_eq!(route.as_deref(), Some("motor/cmd"));
+            }
+            _ => panic!("expected Tx channel"),
+        }
+        let graph = config.graphs.get_graph(None).unwrap();
+        let bridge_id = graph
+            .get_node_id_by_name("radio")
+            .expect("bridge node missing");
+        let bridge_node = graph.get_node(bridge_id).unwrap();
+        assert_eq!(bridge_node.get_flavor(), Flavor::Bridge);
+
+        // Edges should retain channel metadata.
+        let mut edges = Vec::new();
+        for edge_idx in graph.0.edge_indices() {
+            edges.push(graph.0[edge_idx].clone());
+        }
+        assert_eq!(edges.len(), 2);
+        let status_edge = edges
+            .iter()
+            .find(|e| e.dst == "dst")
+            .expect("status edge missing");
+        assert_eq!(status_edge.src_channel.as_deref(), Some("status"));
+        assert!(status_edge.dst_channel.is_none());
+        let motor_edge = edges
+            .iter()
+            .find(|e| e.dst_channel.is_some())
+            .expect("motor edge missing");
+        assert_eq!(motor_edge.dst_channel.as_deref(), Some("motor"));
+    }
+
+    #[test]
+    fn test_bridge_roundtrip() {
+        let mut config = CuConfig::default();
+        let mut bridge_config = ComponentConfig::default();
+        bridge_config.set("port", "/dev/ttyACM0".to_string());
+        config.bridges.push(BridgeConfig {
+            id: "radio".to_string(),
+            type_: "tasks::SerialBridge".to_string(),
+            config: Some(bridge_config),
+            missions: None,
+            channels: vec![
+                BridgeChannelConfigRepresentation::Rx {
+                    id: "status".to_string(),
+                    route: Some("sys/status".to_string()),
+                    config: None,
+                },
+                BridgeChannelConfigRepresentation::Tx {
+                    id: "motor".to_string(),
+                    route: Some("motor/cmd".to_string()),
+                    config: None,
+                },
+            ],
+        });
+
+        let serialized = config.serialize_ron();
+        assert!(
+            serialized.contains("bridges"),
+            "bridges section missing from serialized config"
+        );
+        let deserialized = CuConfig::deserialize_ron(&serialized);
+        assert_eq!(deserialized.bridges.len(), 1);
+        let bridge = &deserialized.bridges[0];
+        assert_eq!(bridge.channels.len(), 2);
+        assert!(matches!(
+            bridge.channels[0],
+            BridgeChannelConfigRepresentation::Rx { .. }
+        ));
+        assert!(matches!(
+            bridge.channels[1],
+            BridgeChannelConfigRepresentation::Tx { .. }
+        ));
+    }
+
+    #[test]
+    fn test_bridge_channel_config() {
+        let txt = r#"
+        (
+            tasks: [],
+            bridges: [
+                (
+                    id: "radio",
+                    type: "tasks::SerialBridge",
+                    channels: [
+                        Rx ( id: "status", route: "sys/status", config: { "filter": "fast" } ),
+                        Tx ( id: "imu", route: "telemetry/imu", config: { "rate": 100 } ),
+                    ],
+                ),
+            ],
+            cnx: [],
+        )
+        "#;
+
+        let config = CuConfig::deserialize_ron(txt);
+        let bridge = &config.bridges[0];
+        match &bridge.channels[0] {
+            BridgeChannelConfigRepresentation::Rx {
+                config: Some(cfg), ..
+            } => {
+                let val: String = cfg.get("filter").expect("filter missing");
+                assert_eq!(val, "fast");
+            }
+            _ => panic!("expected Rx channel with config"),
+        }
+        match &bridge.channels[1] {
+            BridgeChannelConfigRepresentation::Tx {
+                config: Some(cfg), ..
+            } => {
+                let rate: i32 = cfg.get("rate").expect("rate missing");
+                assert_eq!(rate, 100);
+            }
+            _ => panic!("expected Tx channel with config"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "channel 'motor' is Tx and cannot act as a source")]
+    fn test_bridge_tx_cannot_be_source() {
+        let txt = r#"
+        (
+            tasks: [
+                (id: "dst", type: "tasks::Destination"),
+            ],
+            bridges: [
+                (
+                    id: "radio",
+                    type: "tasks::SerialBridge",
+                    channels: [
+                        Tx ( id: "motor", route: "motor/cmd" ),
+                    ],
+                ),
+            ],
+            cnx: [
+                (src: "radio/motor", dst: "dst", msg: "mymsgs::MotorCmd"),
+            ],
+        )
+        "#;
+
+        CuConfig::deserialize_ron(txt);
+    }
+
+    #[test]
+    #[should_panic(expected = "channel 'status' is Rx and cannot act as a destination")]
+    fn test_bridge_rx_cannot_be_destination() {
+        let txt = r#"
+        (
+            tasks: [
+                (id: "src", type: "tasks::Source"),
+            ],
+            bridges: [
+                (
+                    id: "radio",
+                    type: "tasks::SerialBridge",
+                    channels: [
+                        Rx ( id: "status", route: "sys/status" ),
+                    ],
+                ),
+            ],
+            cnx: [
+                (src: "src", dst: "radio/status", msg: "mymsgs::Status"),
+            ],
+        )
+        "#;
+
+        CuConfig::deserialize_ron(txt);
     }
 
     #[test]
@@ -1450,10 +2390,10 @@ mod tests {
 
         let config = CuConfig::deserialize_ron(txt);
         let m1_graph = config.graphs.get_graph(Some("m1")).unwrap();
-        assert_eq!(m1_graph.0.edge_count(), 1);
-        assert_eq!(m1_graph.0.node_count(), 2);
-        let index = EdgeIndex::new(0);
-        let cnx = m1_graph.0.edge_weight(index).unwrap();
+        assert_eq!(m1_graph.edge_count(), 1);
+        assert_eq!(m1_graph.node_count(), 2);
+        let index = 0;
+        let cnx = m1_graph.get_edge_weight(index).unwrap();
 
         assert_eq!(cnx.src, "src1");
         assert_eq!(cnx.dst, "sink");
@@ -1461,10 +2401,10 @@ mod tests {
         assert_eq!(cnx.missions, Some(vec!["m1".to_string()]));
 
         let m2_graph = config.graphs.get_graph(Some("m2")).unwrap();
-        assert_eq!(m2_graph.0.edge_count(), 1);
-        assert_eq!(m2_graph.0.node_count(), 2);
-        let index = EdgeIndex::new(0);
-        let cnx = m2_graph.0.edge_weight(index).unwrap();
+        assert_eq!(m2_graph.edge_count(), 1);
+        assert_eq!(m2_graph.node_count(), 2);
+        let index = 0;
+        let cnx = m2_graph.get_edge_weight(index).unwrap();
         assert_eq!(cnx.src, "src2");
         assert_eq!(cnx.dst, "sink");
         assert_eq!(cnx.msg, "u32");
@@ -1492,10 +2432,10 @@ mod tests {
         let serialized = config.serialize_ron();
         let deserialized = CuConfig::deserialize_ron(&serialized);
         let m1_graph = deserialized.graphs.get_graph(Some("m1")).unwrap();
-        assert_eq!(m1_graph.0.edge_count(), 1);
-        assert_eq!(m1_graph.0.node_count(), 2);
-        let index = EdgeIndex::new(0);
-        let cnx = m1_graph.0.edge_weight(index).unwrap();
+        assert_eq!(m1_graph.edge_count(), 1);
+        assert_eq!(m1_graph.node_count(), 2);
+        let index = 0;
+        let cnx = m1_graph.get_edge_weight(index).unwrap();
         assert_eq!(cnx.src, "src1");
         assert_eq!(cnx.dst, "sink");
         assert_eq!(cnx.msg, "u32");

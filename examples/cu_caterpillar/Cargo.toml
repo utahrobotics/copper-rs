@@ -12,6 +12,7 @@ categories.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
+publish = false
 [package.metadata.cargo-machete]
 ignored = [
     "cu29-log",
@@ -35,14 +36,14 @@ path = "src/resim.rs"
 
 
 [dependencies]
-#cu29 = { workspace = true, features = ["macro_debug"] }
+# cu29 = { workspace = true, features = ["macro_debug"] } # NEEDED FOR CUBUILD
 cu29 = { workspace = true }
 cu29-helpers = { workspace = true }
 cu29-export = { workspace = true, features = ["python"] }
 serde = { workspace = true }
 
-cu-consolemon = { path = "../../components/monitors/cu_consolemon", version = "0.9.0" } # needed
-cu-rp-gpio = { path = "../../components/sinks/cu_rp_gpio", version = "0.9.0" }
+cu-consolemon = { path = "../../components/monitors/cu_consolemon", version = "0.11.0" } # needed
+cu-rp-gpio = { path = "../../components/sinks/cu_rp_gpio", version = "0.11.0" }
 
 
 [features]

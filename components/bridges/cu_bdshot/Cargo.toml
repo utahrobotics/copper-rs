@@ -1,0 +1,29 @@
+[package]
+name = "cu-bdshot"
+description = "Copper Bridge to Bidirectional DSHOT ESCs."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[package.metadata.copper]
+embedded_only = true
+embedded_target = "thumbv8m.main-none-eabihf"
+
+[dependencies]
+cu29 = { path = "../../../core/cu29", version="0.11.0", default-features = false }
+rp235x-hal = { version = "0.3", features = ["critical-section-impl"] }
+pio = "=0.2.1"  # Needed
+pio-proc = "=0.2.1"
+cortex-m = "0.7.7"
+serde = { workspace = true, features = ["derive"] }
+bincode = { workspace = true, features = ["alloc"] }
+spin = { workspace = true }
+defmt = "1.0.1"
+
+[features]
+default = []
