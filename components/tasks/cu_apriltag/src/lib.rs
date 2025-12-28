@@ -357,7 +357,11 @@ impl CuTask for AprilTags {
         }
 
         output.tov = input.tov;
-        output.set_payload(result);
+        if !result.ids.0.is_empty() {
+            output.set_payload(result);
+        } else {
+            output.clear_payload();
+        }
         Ok(())
     }
 }
