@@ -1,7 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(feature = "std"), no_std)]
 
-#[cfg(not(feature = "std"))]
 extern crate alloc;
 
 #[doc(hidden)]
@@ -20,5 +19,6 @@ pub mod monitoring;
 pub mod payload;
 #[cfg(feature = "std")]
 pub mod pool;
+pub mod resource;
 #[cfg(feature = "std")]
 pub mod simulation;

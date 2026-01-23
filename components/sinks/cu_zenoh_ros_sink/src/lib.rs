@@ -7,15 +7,15 @@ mod topic;
 
 use attachment::encode_attachment;
 use cdr::{CdrBe, Infinite};
+use cu_ros_payloads::RosMsgAdapter;
 use cu29::clock::RobotClock;
 use cu29::prelude::*;
-use cu_ros_payloads::RosMsgAdapter;
 use error::cu_error_map;
 use liveliness::{node_liveliness, publisher_liveliness};
 use node::Node;
 use topic::Topic;
-use zenoh::bytes::Encoding;
 use zenoh::Config;
+use zenoh::bytes::Encoding;
 
 use std::marker::PhantomData;
 
@@ -62,32 +62,30 @@ impl<P> CuSinkTask for ZenohRosSink<P>
 where
     P: CuMsgPayload + RosMsgAdapter<'static>,
 {
+    type Resources<'r> = ();
     type Input<'m> = input_msg!(P);
 
-    fn new(config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {
         let config = config.ok_or(CuError::from("ZenohRosSink: Missing configuration"))?;
 
         // Get json zenoh config
-        let session_config = config.get::<String>("zenoh_config_json").map_or(
-            // Or default zenoh config otherwise
-            Ok(Config::default()),
-            |s| -> CuResult<Config> {
-                Config::from_json5(&s)
-                    .map_err(cu_error_map("ZenohRosSink: Failed to create zenoh config"))
-            },
-        )?;
+        let session_config = match config.get::<String>("zenoh_config_json")? {
+            Some(json) => Config::from_json5(&json)
+                .map_err(cu_error_map("ZenohRosSink: Failed to create zenoh config"))?,
+            None => Config::default(),
+        };
 
         Ok(Self {
             _marker: Default::default(),
             config: ZenohRosConfig {
                 session: session_config,
-                domain_id: config.get::<u32>("domain_id").unwrap_or(0),
-                namespace: config.get::<String>("namespace").unwrap_or("node".into()),
-                node: config.get::<String>("node").unwrap_or("node".into()),
-                topic: config.get::<String>("topic").unwrap_or("copper".into()),
+                domain_id: config.get::<u32>("domain_id")?.unwrap_or(0),
+                namespace: config.get::<String>("namespace")?.unwrap_or("node".into()),
+                node: config.get::<String>("node")?.unwrap_or("node".into()),
+                topic: config.get::<String>("topic")?.unwrap_or("copper".into()),
             },
             ctx: None,
         })

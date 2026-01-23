@@ -1,9 +1,9 @@
+use cu_rp_gpio::RPGpioPayload;
 use cu29::bincode::de::Decoder;
 use cu29::bincode::enc::Encoder;
 use cu29::bincode::error::{DecodeError, EncodeError};
 use cu29::bincode::{Decode, Encode};
 use cu29::prelude::*;
-use cu_rp_gpio::RPGpioPayload;
 
 #[derive(Default)]
 pub struct CaterpillarSource {
@@ -22,9 +22,10 @@ impl Freezable for CaterpillarSource {
 }
 
 impl CuSrcTask for CaterpillarSource {
+    type Resources<'r> = ();
     type Output<'m> = output_msg!(RPGpioPayload);
 
-    fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {
@@ -46,10 +47,11 @@ pub struct CaterpillarTask {}
 impl Freezable for CaterpillarTask {}
 
 impl CuTask for CaterpillarTask {
+    type Resources<'r> = ();
     type Input<'m> = input_msg!(RPGpioPayload);
     type Output<'m> = output_msg!(RPGpioPayload);
 
-    fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {

@@ -112,9 +112,9 @@ use crate::cutask::CuMsgPack;
 
 use crate::cutask::{CuMsg, CuMsgPayload, CuSinkTask, CuSrcTask, Freezable};
 use crate::{input_msg, output_msg};
+use core::marker::PhantomData;
 use cu29_clock::RobotClock;
 use cu29_traits::CuResult;
-use std::marker::PhantomData;
 
 /// This is the state that will be passed to the simulation support to hook
 /// into the lifecycle of the tasks.
@@ -158,9 +158,10 @@ pub struct CuSimSrcTask<T> {
 impl<T> Freezable for CuSimSrcTask<T> {}
 
 impl<T: CuMsgPayload> CuSrcTask for CuSimSrcTask<T> {
+    type Resources<'r> = ();
     type Output<'m> = output_msg!(T);
 
-    fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {
@@ -168,7 +169,9 @@ impl<T: CuMsgPayload> CuSrcTask for CuSimSrcTask<T> {
     }
 
     fn process(&mut self, _clock: &RobotClock, _new_msg: &mut Self::Output<'_>) -> CuResult<()> {
-        unimplemented!("A placeholder for sim was called for a source, you need answer SimOverride to ExecutedBySim for the Process step.")
+        unimplemented!(
+            "A placeholder for sim was called for a source, you need answer SimOverride to ExecutedBySim for the Process step."
+        )
     }
 }
 
@@ -202,9 +205,10 @@ pub struct CuSimSinkTask<I> {
 impl<I> Freezable for CuSimSinkTask<I> {}
 
 impl<I: CuSimSinkInput + 'static> CuSinkTask for CuSimSinkTask<I> {
+    type Resources<'r> = ();
     type Input<'m> = <I as CuSimSinkInput>::With<'m>;
 
-    fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {
@@ -212,6 +216,8 @@ impl<I: CuSimSinkInput + 'static> CuSinkTask for CuSimSinkTask<I> {
     }
 
     fn process(&mut self, _clock: &RobotClock, _input: &Self::Input<'_>) -> CuResult<()> {
-        unimplemented!("A placeholder for sim was called for a sink, you need answer SimOverride to ExecutedBySim for the Process step.")
+        unimplemented!(
+            "A placeholder for sim was called for a sink, you need answer SimOverride to ExecutedBySim for the Process step."
+        )
     }
 }

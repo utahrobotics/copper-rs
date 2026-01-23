@@ -1,6 +1,5 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
-#[cfg(not(feature = "std"))]
 extern crate alloc;
 extern crate core;
 
@@ -20,29 +19,14 @@ mod compat {
 #[cfg(feature = "std")]
 pub use compat::*;
 
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::fmt::{Debug, Display, Formatter, Result as FmtResult};
 #[cfg(not(feature = "std"))]
-mod imp {
-    pub use alloc::string::ToString;
-    pub use alloc::sync::Arc;
-    pub use alloc::vec::Vec;
-    pub use core::fmt::Debug;
-    pub use core::fmt::Display;
-    pub use core::fmt::Formatter;
-    pub use core::fmt::Result as FmtResult;
-    pub use spin::Mutex;
-}
-
+use spin::Mutex;
 #[cfg(feature = "std")]
-mod imp {
-    pub use std::fmt::Debug;
-    pub use std::fmt::Display;
-    pub use std::fmt::Formatter;
-    pub use std::fmt::Result as FmtResult;
-    pub use std::sync::Arc;
-    pub use std::sync::Mutex;
-}
-
-use imp::*;
+use std::sync::Mutex;
 
 use bincode::error::EncodeError;
 use bincode::{Decode, Encode};
@@ -224,12 +208,13 @@ pub fn stream_write<E: Encode, S: SectionStorage>(
 }
 
 /// A wrapper around the unifiedlogger that implements the Write trait.
-struct LogStream<S: SectionStorage, L: UnifiedLogWrite<S>> {
+pub struct LogStream<S: SectionStorage, L: UnifiedLogWrite<S>> {
     entry_type: UnifiedLogType,
     parent_logger: Arc<Mutex<L>>,
     current_section: SectionHandle<S>,
     current_position: usize,
     minimum_allocation_amount: usize,
+    last_log_bytes: usize,
 }
 
 impl<S: SectionStorage, L: UnifiedLogWrite<S>> LogStream<S, L> {
@@ -241,7 +226,10 @@ impl<S: SectionStorage, L: UnifiedLogWrite<S>> LogStream<S, L> {
         #[cfg(feature = "std")]
         let section = parent_logger
             .lock()
-            .expect("Could not lock a section at MmapStream creation")
+            .map_err(|e| {
+                CuError::from("Could not lock a section at LogStream creation")
+                    .add_cause(e.to_string().as_str())
+            })?
             .add_section(entry_type, minimum_allocation_amount)?;
 
         #[cfg(not(feature = "std"))]
@@ -255,13 +243,18 @@ impl<S: SectionStorage, L: UnifiedLogWrite<S>> LogStream<S, L> {
             current_section: section,
             current_position: 0,
             minimum_allocation_amount,
+            last_log_bytes: 0,
         })
     }
 }
 
 impl<S: SectionStorage, L: UnifiedLogWrite<S>> Debug for LogStream<S, L> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "MmapStream {{ entry_type: {:?}, current_position: {}, minimum_allocation_amount: {} }}", self.entry_type, self.current_position, self.minimum_allocation_amount)
+        write!(
+            f,
+            "MmapStream {{ entry_type: {:?}, current_position: {}, minimum_allocation_amount: {} }}",
+            self.entry_type, self.current_position, self.minimum_allocation_amount
+        )
     }
 }
 
@@ -274,6 +267,8 @@ impl<E: Encode, S: SectionStorage, L: UnifiedLogWrite<S>> WriteStream<E> for Log
             Ok(nb_bytes) => {
                 self.current_position += nb_bytes;
                 self.current_section.header.used += nb_bytes as u32;
+                self.last_log_bytes = nb_bytes;
+                // Track encoded bytes so monitoring can compute actual bytes written.
                 Ok(())
             }
             Err(e) => match e {
@@ -298,12 +293,19 @@ impl<E: Encode, S: SectionStorage, L: UnifiedLogWrite<S>> WriteStream<E> for Log
                     self.current_section = logger_guard
                         .add_section(self.entry_type, self.minimum_allocation_amount)?;
 
-                    let result = self.current_section.append(obj).expect(
-                        "Failed to encode object in a newly minted section. Unrecoverable failure.",
-                    ); // If we fail just after creating a section, there is not much we can do, we need to bail.
+                    let result = self
+                        .current_section
+                        .append(obj)
+                        .map_err(|e| {
+                            CuError::from(
+                                "Failed to encode object in a newly minted section. Unrecoverable failure.",
+                            )
+                            .add_cause(e.to_string().as_str())
+                        })?; // If we fail just after creating a section, there is not much we can do.
 
                     self.current_position += result;
                     self.current_section.header.used += result as u32;
+                    self.last_log_bytes = result;
                     Ok(())
                 }
                 _ => {
@@ -314,6 +316,10 @@ impl<E: Encode, S: SectionStorage, L: UnifiedLogWrite<S>> WriteStream<E> for Log
                 }
             },
         }
+    }
+
+    fn last_log_bytes(&self) -> Option<usize> {
+        Some(self.last_log_bytes)
     }
 }
 
@@ -326,9 +332,8 @@ impl<S: SectionStorage, L: UnifiedLogWrite<S>> Drop for LogStream<S, L> {
         let mut logger_guard = self.parent_logger.lock();
 
         #[cfg(feature = "std")]
-        let mut logger_guard = match logger_guard {
-            Ok(g) => g,
-            Err(_) => return,
+        let Ok(mut logger_guard) = logger_guard else {
+            return;
         };
         logger_guard.flush_section(&mut self.current_section);
         #[cfg(feature = "std")]

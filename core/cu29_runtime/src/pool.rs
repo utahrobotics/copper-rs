@@ -7,10 +7,11 @@ use cu29_traits::CuResult;
 use hashbrown::HashMap;
 use object_pool::{Pool, ReusableOwned};
 use smallvec::SmallVec;
-use std::alloc::{alloc, dealloc, Layout};
+use std::alloc::{Layout, alloc, dealloc};
 use std::fmt::Debug;
+use std::mem::{align_of, size_of};
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 type PoolID = ArrayString<64>;
 
@@ -32,12 +33,19 @@ pub trait PoolMonitor: Send + Sync {
 static POOL_REGISTRY: OnceLock<Mutex<HashMap<String, Arc<dyn PoolMonitor>>>> = OnceLock::new();
 const MAX_POOLS: usize = 16;
 
+fn lock_unpoison<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poison) => poison.into_inner(),
+    }
+}
+
 // Register a pool to the global registry.
 fn register_pool(pool: Arc<dyn PoolMonitor>) {
     POOL_REGISTRY
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poison| poison.into_inner())
         .insert(pool.id().to_string(), pool);
 }
 
@@ -48,7 +56,7 @@ type PoolStats = (PoolID, usize, usize, usize);
 pub fn pools_statistics() -> SmallVec<[PoolStats; MAX_POOLS]> {
     // Safely get the registry, returning empty stats if not initialized.
     let registry_lock = match POOL_REGISTRY.get() {
-        Some(lock) => lock.lock().unwrap(),
+        Some(lock) => lock_unpoison(lock),
         None => return SmallVec::new(), // Return empty if registry is not initialized
     };
     let mut result = SmallVec::with_capacity(MAX_POOLS);
@@ -88,6 +96,8 @@ where
 pub trait ArrayLike: Deref<Target = [Self::Element]> + DerefMut + Debug + Sync + Send {
     type Element: ElementType;
 }
+
+use crate::monitoring::CuPayloadSize;
 
 /// A Handle to a Buffer.
 /// For onboard usages, the buffer should be Pooled (ie, coming from a preallocated pool).
@@ -151,14 +161,27 @@ impl<T: ArrayLike> CuHandle<T> {
 
     /// Safely access the inner value, applying a closure to it.
     pub fn with_inner<R>(&self, f: impl FnOnce(&CuHandleInner<T>) -> R) -> R {
-        let lock = self.lock().unwrap();
+        let lock = lock_unpoison(&self.0);
         f(&*lock)
     }
 
     /// Mutably access the inner value, applying a closure to it.
     pub fn with_inner_mut<R>(&self, f: impl FnOnce(&mut CuHandleInner<T>) -> R) -> R {
-        let mut lock = self.lock().unwrap();
+        let mut lock = lock_unpoison(&self.0);
         f(&mut *lock)
+    }
+}
+
+impl<T> CuPayloadSize for CuHandle<T>
+where
+    T: ArrayLike,
+{
+    fn raw_bytes(&self) -> usize {
+        lock_unpoison(&self.0).deref().len() * size_of::<T::Element>()
+    }
+
+    fn handle_bytes(&self) -> usize {
+        self.raw_bytes()
     }
 }
 
@@ -167,7 +190,7 @@ where
     <T as ArrayLike>::Element: 'static,
 {
     fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
-        let inner = self.lock().unwrap();
+        let inner = lock_unpoison(&self.0);
         match inner.deref() {
             CuHandleInner::Pooled(pooled) => pooled.deref().encode(encoder),
             CuHandleInner::Detached(detached) => detached.encode(encoder),
@@ -271,8 +294,8 @@ impl<T: ArrayLike> CuPool<T> for CuHostMemoryPool<T> {
     fn copy_from<O: ArrayLike<Element = T::Element>>(&self, from: &mut CuHandle<O>) -> CuHandle<T> {
         let to_handle = self.acquire().expect("No available buffers in the pool");
 
-        match from.lock().unwrap().deref() {
-            CuHandleInner::Detached(source) => match to_handle.lock().unwrap().deref_mut() {
+        match lock_unpoison(&from.0).deref() {
+            CuHandleInner::Detached(source) => match lock_unpoison(&to_handle.0).deref_mut() {
                 CuHandleInner::Detached(destination) => {
                     destination.copy_from_slice(source);
                 }
@@ -280,7 +303,7 @@ impl<T: ArrayLike> CuPool<T> for CuHostMemoryPool<T> {
                     destination.copy_from_slice(source);
                 }
             },
-            CuHandleInner::Pooled(source) => match to_handle.lock().unwrap().deref_mut() {
+            CuHandleInner::Pooled(source) => match lock_unpoison(&to_handle.0).deref_mut() {
                 CuHandleInner::Detached(destination) => {
                     destination.copy_from_slice(source);
                 }
@@ -354,6 +377,7 @@ mod cuda {
             self.inner.len()
         }
 
+        // SAFETY: HostSlice requires the returned slice to remain valid for 'b.
         unsafe fn stream_synced_slice<'b>(
             &'b self,
             stream: &'b CudaStream,
@@ -361,6 +385,7 @@ mod cuda {
             (self.inner.deref(), SyncOnDrop::sync_stream(stream))
         }
 
+        // SAFETY: This wrapper cannot provide mutable access; callers must not rely on this.
         unsafe fn stream_synced_mut_slice<'b>(
             &'b mut self,
             _stream: &'b CudaStream,
@@ -379,6 +404,7 @@ mod cuda {
             self.inner.len()
         }
 
+        // SAFETY: HostSlice requires the returned slice to remain valid for 'b.
         unsafe fn stream_synced_slice<'b>(
             &'b self,
             stream: &'b CudaStream,
@@ -386,6 +412,7 @@ mod cuda {
             (self.inner.deref(), SyncOnDrop::sync_stream(stream))
         }
 
+        // SAFETY: HostSlice requires the returned slice to remain valid for 'b.
         unsafe fn stream_synced_mut_slice<'b>(
             &'b mut self,
             stream: &'b CudaStream,
@@ -494,8 +521,8 @@ mod cuda {
             let to_handle = self.acquire().expect("No available buffers in the pool");
 
             {
-                let from_lock = from_handle.lock().unwrap();
-                let mut to_lock = to_handle.lock().unwrap();
+                let from_lock = lock_unpoison(&from_handle.0);
+                let mut to_lock = lock_unpoison(&to_handle.0);
 
                 match &mut *to_lock {
                     CuHandleInner::Detached(CudaSliceWrapper(to)) => {
@@ -529,16 +556,20 @@ mod cuda {
         where
             O: ArrayLike<Element = E>,
         {
-            let device_lock = device_handle.lock().unwrap();
-            let mut host_lock = host_handle.lock().unwrap();
+            let device_lock = device_handle.lock().map_err(|e| {
+                CuError::from("Device handle mutex poisoned").add_cause(&e.to_string())
+            })?;
+            let mut host_lock = host_handle.lock().map_err(|e| {
+                CuError::from("Host handle mutex poisoned").add_cause(&e.to_string())
+            })?;
             let src = match &*device_lock {
                 CuHandleInner::Pooled(source) => source.as_cuda_slice(),
                 CuHandleInner::Detached(source) => source.as_cuda_slice(),
             };
             let mut wrapper = Self::get_host_slice_mut_wrapper(&mut *host_lock);
-            self.stream
-                .memcpy_dtoh(src, &mut wrapper)
-                .expect("Failed to copy data from device to host");
+            self.stream.memcpy_dtoh(src, &mut wrapper).map_err(|e| {
+                CuError::from("Failed to copy data from device to host").add_cause(&e.to_string())
+            })?;
             Ok(())
         }
     }
@@ -554,10 +585,25 @@ pub struct AlignedBuffer<E: ElementType> {
 
 impl<E: ElementType> AlignedBuffer<E> {
     pub fn new(num_elements: usize, alignment: usize) -> Self {
-        let layout = Layout::from_size_align(num_elements * size_of::<E>(), alignment).unwrap();
+        assert!(
+            num_elements > 0 && size_of::<E>() > 0,
+            "AlignedBuffer requires a non-zero element count and non-zero-sized element type"
+        );
+        let alignment = alignment.max(align_of::<E>());
+        let alloc_size = num_elements
+            .checked_mul(size_of::<E>())
+            .expect("AlignedBuffer allocation size overflow");
+        let layout = Layout::from_size_align(alloc_size, alignment).unwrap();
+        // SAFETY: layout describes a valid, non-zero allocation request.
         let ptr = unsafe { alloc(layout) as *mut E };
         if ptr.is_null() {
             panic!("Failed to allocate memory");
+        }
+        // SAFETY: ptr is valid for writes of `num_elements` elements.
+        unsafe {
+            for i in 0..num_elements {
+                std::ptr::write(ptr.add(i), E::default());
+            }
         }
         Self {
             ptr,
@@ -571,23 +617,22 @@ impl<E: ElementType> Deref for AlignedBuffer<E> {
     type Target = [E];
 
     fn deref(&self) -> &Self::Target {
+        // SAFETY: `new` initializes all elements and keeps the pointer aligned.
         unsafe { std::slice::from_raw_parts(self.ptr, self.size) }
     }
 }
 
 impl<E: ElementType> DerefMut for AlignedBuffer<E> {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: `new` initializes all elements and keeps the pointer aligned.
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.size) }
     }
 }
 
 impl<E: ElementType> Drop for AlignedBuffer<E> {
     fn drop(&mut self) {
-        if !self.ptr.is_null() {
-            unsafe {
-                dealloc(self.ptr as *mut u8, self.layout);
-            }
-        }
+        // SAFETY: `ptr` was allocated with `layout` in `new`.
+        unsafe { dealloc(self.ptr as *mut u8, self.layout) }
     }
 }
 

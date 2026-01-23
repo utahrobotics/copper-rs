@@ -1,6 +1,6 @@
-use cu29::prelude::*;
 use cu_gstreamer::CuGstBuffer;
 use cu_sensor_payloads::{CuImage, CuImageBufferFormat};
+use cu29::prelude::*;
 use std::cmp::{max, min};
 use std::ops::DerefMut;
 use std::sync::Arc;
@@ -16,6 +16,7 @@ pub trait PixelWriteAccess<U> {
 impl<U: Copy, T: AsRef<[U]>> PixelReadAccess<U> for T {
     #[inline]
     fn get_pixel(&self, x: usize, y: usize, width: usize) -> U {
+        // SAFETY: Callers ensure x,y are in bounds for the underlying slice.
         unsafe {
             let slice = self.as_ref();
             *slice.get_unchecked(x + y * width)
@@ -26,6 +27,7 @@ impl<U: Copy, T: AsRef<[U]>> PixelReadAccess<U> for T {
 impl<U: Copy, T: AsMut<[U]>> PixelWriteAccess<U> for T {
     #[inline]
     fn put_pixel(&mut self, x: usize, y: usize, width: usize, value: U) {
+        // SAFETY: Callers ensure x,y are in bounds for the underlying slice.
         unsafe {
             *self.as_mut().get_unchecked_mut(x + y * width) = value;
         }
@@ -93,12 +95,8 @@ fn adaptive_threshold(
             // Number of pixels in the block, adjusted for edge cases.
             let w = ((y_high - y_low + 1) * (x_high - x_low + 1)) as u32;
             let sum = sum_image_pixels(integral, x_low, y_low, x_high, y_high, width + 1);
-
-            if current_pixel * w > sum {
-                dst.put_pixel(x, y, width, 255);
-            } else {
-                dst.put_pixel(x, y, width, 0);
-            }
+            let value = if current_pixel * w > sum { 255 } else { 0 };
+            dst.put_pixel(x, y, width, value);
         }
     }
 }
@@ -116,19 +114,24 @@ pub struct DynThreshold {
 impl Freezable for DynThreshold {}
 
 impl CuTask for DynThreshold {
+    type Resources<'r> = ();
     type Input<'m> = input_msg!(CuGstBuffer);
     type Output<'m> = output_msg!(CuImage<Vec<u8>>);
 
-    fn new(config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {
-        let config = config.expect("No config provided");
-        let width = config.get::<u32>("width").expect("No width provided");
-        let height = config.get::<u32>("height").expect("No height provided");
+        let config = config.ok_or_else(|| CuError::from("No config provided"))?;
+        let width = config
+            .get::<u32>("width")?
+            .ok_or_else(|| CuError::from("No width provided"))?;
+        let height = config
+            .get::<u32>("height")?
+            .ok_or_else(|| CuError::from("No height provided"))?;
         let block_radius = config
-            .get::<u32>("block_radius")
-            .expect("No block_radius provided");
+            .get::<u32>("block_radius")?
+            .ok_or_else(|| CuError::from("No block_radius provided"))?;
 
         let pool =
             CuHostMemoryPool::new("dynthreshold", 3, || vec![0u8; (width * height) as usize])?;
@@ -148,21 +151,21 @@ impl CuTask for DynThreshold {
         input: &Self::Input<'_>,
         output: &mut Self::Output<'_>,
     ) -> CuResult<()> {
-        if input.payload().is_none() {
+        let Some(buffer_hold) = input.payload() else {
             debug!("DynThreshold: No payload in input message, skipping.");
             return Ok(());
-        }
-        let buffer_hold = input.payload().ok_or(CuError::from("No payload"))?;
+        };
         let buffer_hold = buffer_hold
             .as_ref()
             .map_readable()
             .map_err(|e| CuError::new_with_cause("Could not map the gstreamer buffer", e))?;
         let src = buffer_hold.as_slice();
 
-        if src.len() != (self.width * self.height) as usize {
+        let expected_len = (self.width * self.height) as usize;
+        if src.len() != expected_len {
             return Err(CuError::from(format!(
                 "Input buffer size does not match the expected size {}, slice {}",
-                self.width * self.height,
+                expected_len,
                 src.len(),
             )));
         }
@@ -174,7 +177,7 @@ impl CuTask for DynThreshold {
         {
             let mut dst = handle
                 .lock()
-                .map_err(|e| CuError::new_with_cause("Failed to lock buffer", e))?;
+                .map_err(|e| CuError::from("Failed to lock buffer").add_cause(&e.to_string()))?;
             let dst = dst.deref_mut().deref_mut();
 
             integral_image(src, &mut self.integral_img, self.width, self.height);
@@ -209,9 +212,9 @@ impl CuTask for DynThreshold {
 #[cfg(feature = "gst")]
 mod tests {
     use crate::DynThreshold;
-    use cu29::prelude::*;
     use cu_gstreamer::CuGstBuffer;
     use cu_sensor_payloads::CuImage;
+    use cu29::prelude::*;
     use gstreamer::Buffer;
     use std::ops::Deref;
 
@@ -227,7 +230,7 @@ mod tests {
         config.set("height", height as u32);
         config.set("block_radius", block_radius as u32);
 
-        let mut dynthresh = DynThreshold::new(Some(&config))?;
+        let mut dynthresh = DynThreshold::new(Some(&config), ())?;
 
         let input_data = vec![
             128, 128, 130, 130, // L1

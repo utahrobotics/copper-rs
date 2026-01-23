@@ -1,9 +1,9 @@
-use cu29::prelude::*;
-use cu29_helpers::basic_copper_setup;
-use cu_hesai::parser::Packet;
 use cu_hesai::LidarCuMsgPayload;
+use cu_hesai::parser::Packet;
 use cu_sensor_payloads::Distance;
 use cu_udp_inject::PcapStreamer;
+use cu29::prelude::*;
+use cu29_helpers::basic_copper_setup;
 use rerun::Position3D;
 
 const SLAB_SIZE: Option<usize> = Some(100 * 1024 * 1024);
@@ -18,9 +18,13 @@ struct RerunPlyViz {
 impl Freezable for RerunPlyViz {}
 
 impl CuSinkTask for RerunPlyViz {
+    type Resources<'r> = ();
     type Input<'m> = input_msg!(LidarCuMsgPayload);
 
-    fn new(_config: Option<&ComponentConfig>) -> Result<Self, CuError>
+    fn new(
+        _config: Option<&ComponentConfig>,
+        _resources: Self::Resources<'_>,
+    ) -> Result<Self, CuError>
     where
         Self: Sized,
     {
@@ -32,12 +36,10 @@ impl CuSinkTask for RerunPlyViz {
     }
 
     fn process(&mut self, _clock: &RobotClock, input: &Self::Input<'_>) -> CuResult<()> {
-        let payload = input.payload();
-        if payload.is_none() {
+        let Some(payload) = input.payload() else {
             // Depending on the race condition, we might get an empty payload.
             return Ok(());
-        }
-        let payload = payload.unwrap();
+        };
         let points: Vec<Position3D> = payload
             .iter()
             .map(|p| {

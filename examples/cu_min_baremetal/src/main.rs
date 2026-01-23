@@ -12,8 +12,8 @@ use cu29::prelude::*;
 mod imp {
     pub use alloc::sync::Arc;
     pub use alloc::vec;
-    pub use bincode::error::EncodeError;
     pub use bincode::Encode;
+    pub use bincode::error::EncodeError;
     pub use core::ptr::addr_of_mut;
     pub use spin::Mutex;
 }
@@ -110,13 +110,16 @@ impl UnifiedLogWrite<MySectionStorage> for MyEmbeddedLogger {
 const HEAP_SIZE: usize = 128usize * 1024usize;
 
 #[cfg(not(feature = "std"))]
-#[no_mangle]
+// SAFETY: Entry point is defined by the target runtime and must not be mangled.
+#[unsafe(no_mangle)]
 pub extern "C" fn main() {
     // the no std version
 
-    #[link_section = ".bss.heap"]
+    // SAFETY: Reserve a dedicated heap region in .bss for the allocator.
+    #[unsafe(link_section = ".bss.heap")]
     static mut HEAP: [u8; HEAP_SIZE] = [0; HEAP_SIZE];
 
+    // SAFETY: HEAP is a unique static buffer used only to initialize the allocator.
     unsafe {
         ALLOC.init(addr_of_mut!(HEAP) as usize, HEAP_SIZE);
     }
@@ -146,29 +149,25 @@ fn main() {
     // the standard version
     use cu29_helpers::basic_copper_setup;
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     const SLAB_SIZE: Option<usize> = Some(4096 * 1024 * 1024);
 
-    let logger_path = "logs/nostd.copper";
-    if let Some(parent) = Path::new(logger_path).parent() {
+    let logger_path = PathBuf::from("logs/nostd.copper");
+    if let Some(parent) = logger_path.parent() {
         if !parent.exists() {
             fs::create_dir_all(parent).expect("Failed to create logs directory");
         }
     }
 
-    let copper_ctx = basic_copper_setup(&PathBuf::from(logger_path), SLAB_SIZE, true, None)
-        .expect("Failed to setup logger.");
+    let copper_ctx =
+        basic_copper_setup(&logger_path, SLAB_SIZE, true, None).expect("Failed to setup logger.");
     let mut application = MinimalNoStdAppBuilder::new()
         .with_context(&copper_ctx)
         .build()
         .expect("Failed to create application.");
 
-    let outcome = application.run();
-    match outcome {
-        Ok(_result) => {}
-        Err(error) => {
-            debug!("Application Ended: {}", error)
-        }
+    if let Err(error) = application.run() {
+        debug!("Application Ended: {}", error)
     }
 }

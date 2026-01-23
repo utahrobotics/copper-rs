@@ -1,19 +1,19 @@
-use cu29::prelude::*;
-use cu29_helpers::basic_copper_setup;
 use cu_msp_bridge::{MspRequestBatch, MspResponseBatch};
 use cu_msp_lib::commands::MspCommandCode;
 use cu_msp_lib::structs::{MspRc, MspResponse};
 use cu_msp_lib::{MspPacket, MspParser};
+use cu29::prelude::*;
+use cu29_helpers::basic_copper_setup;
 use nix::errno::Errno;
-use nix::fcntl::{fcntl, FcntlArg, OFlag};
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::pty::openpty;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::os::unix::fs::symlink;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -22,7 +22,7 @@ struct CuMspBridgeLoopbackApp {}
 
 fn main() {
     if let Err(err) = drive() {
-        error!("cu-msp-bridge-loopback failed: {}", err.to_string());
+        error!("cu-msp-bridge-loopback failed: {}", err);
         std::process::exit(1);
     }
 }
@@ -142,21 +142,13 @@ impl FlightControllerEmulator {
 
     fn configure_bridge(&self, config: &mut CuConfig) -> CuResult<()> {
         let device_path = self.symlink_path.to_string_lossy().into_owned();
-        let graph = config.get_graph_mut(None)?;
-        let node_id = graph
-            .get_node_id_by_name("msp_bridge")
-            .ok_or_else(|| CuError::from("config missing `msp_bridge` node"))?;
-        let node = graph
-            .get_node_mut(node_id)
-            .ok_or_else(|| CuError::from("unable to mutate msp_bridge node"))?;
-        node.set_param("device", device_path.clone());
-
-        if let Some(bridge_cfg) = config.bridges.iter_mut().find(|b| b.id == "msp_bridge") {
-            let component = bridge_cfg.config.get_or_insert_with(ComponentConfig::new);
-            component.set("device", device_path);
-        } else {
-            return Err(CuError::from("config missing `msp_bridge` bridge entry"));
-        }
+        let bundle_cfg = config
+            .resources
+            .iter_mut()
+            .find(|b| b.id == "fc")
+            .ok_or_else(|| CuError::from("config missing `fc` resource bundle"))?;
+        let component = bundle_cfg.config.get_or_insert_with(ComponentConfig::new);
+        component.set("device", device_path);
         Ok(())
     }
 }
@@ -193,11 +185,11 @@ fn flight_controller_worker(running: Arc<AtomicBool>, master_fd: std::os::unix::
                 for &byte in &buffer[..n] {
                     if let Ok(Some(packet)) = parser.parse(byte) {
                         let command: MspCommandCode = packet.cmd.into();
-                        if command == MspCommandCode::MSP_RC {
-                            if let Err(err) = write_rc_response(&mut file) {
-                                eprintln!("MSP emulator failed to echo RC packet: {err}");
-                                return;
-                            }
+                        if command == MspCommandCode::MSP_RC
+                            && let Err(err) = write_rc_response(&mut file)
+                        {
+                            eprintln!("MSP emulator failed to echo RC packet: {err}");
+                            return;
                         }
                     }
                 }
@@ -280,9 +272,13 @@ mod tasks {
     impl Freezable for LoopbackSource {}
 
     impl CuSrcTask for LoopbackSource {
+        type Resources<'r> = ();
         type Output<'m> = CuMsg<MspRequestBatch>;
 
-        fn new(_config: Option<&ComponentConfig>) -> CuResult<Self> {
+        fn new(
+            _config: Option<&ComponentConfig>,
+            _resources: Self::Resources<'_>,
+        ) -> CuResult<Self> {
             Ok(Self { sent: false })
         }
 
@@ -293,7 +289,7 @@ mod tasks {
             } else {
                 let mut batch = MspRequestBatch::new();
                 debug!("Pushing MSP_RC request");
-                batch.push(cu_msp_lib::structs::MspRequest::MspRc);
+                batch.push(cu_msp_lib::structs::MspRequest::MspRc)?;
                 output.set_payload(batch);
                 self.sent = true;
             }
@@ -307,9 +303,13 @@ mod tasks {
     impl Freezable for LoopbackSink {}
 
     impl CuSinkTask for LoopbackSink {
+        type Resources<'r> = ();
         type Input<'m> = CuMsg<MspResponseBatch>;
 
-        fn new(_config: Option<&ComponentConfig>) -> CuResult<Self> {
+        fn new(
+            _config: Option<&ComponentConfig>,
+            _resources: Self::Resources<'_>,
+        ) -> CuResult<Self> {
             Ok(Self)
         }
 

@@ -6,18 +6,19 @@ use std::path::{Path, PathBuf};
 pub mod tasks {
     use cu29::prelude::*;
 
-    pub struct ExampleSrc {}
+    pub struct ExampleSrc;
 
     impl Freezable for ExampleSrc {}
 
     impl CuSrcTask for ExampleSrc {
+        type Resources<'r> = ();
         type Output<'m> = output_msg!(i32);
 
-        fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+        fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
         where
             Self: Sized,
         {
-            Ok(Self {})
+            Ok(Self)
         }
 
         fn process(&mut self, _clock: &RobotClock, new_msg: &mut Self::Output<'_>) -> CuResult<()> {
@@ -26,19 +27,20 @@ pub mod tasks {
         }
     }
 
-    pub struct ExampleTask {}
+    pub struct ExampleTask;
 
     impl Freezable for ExampleTask {}
 
     impl CuTask for ExampleTask {
+        type Resources<'r> = ();
         type Input<'m> = input_msg!(i32);
         type Output<'m> = output_msg!(i32);
 
-        fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+        fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
         where
             Self: Sized,
         {
-            Ok(Self {})
+            Ok(Self)
         }
 
         fn process(
@@ -53,18 +55,19 @@ pub mod tasks {
         }
     }
 
-    pub struct ExampleSink {}
+    pub struct ExampleSink;
 
     impl Freezable for ExampleSink {}
 
     impl CuSinkTask for ExampleSink {
+        type Resources<'r> = ();
         type Input<'m> = input_msg!(i32);
 
-        fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+        fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
         where
             Self: Sized,
         {
-            Ok(Self {})
+            Ok(Self)
         }
 
         fn process(&mut self, _clock: &RobotClock, _input: &Self::Input<'_>) -> CuResult<()> {
@@ -79,10 +82,10 @@ struct App {}
 const SLAB_SIZE: Option<usize> = Some(150 * 1024 * 1024);
 fn main() {
     let logger_path = "logs/rate_target.copper";
-    if let Some(parent) = Path::new(logger_path).parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent).expect("Failed to create logs directory");
-        }
+    if let Some(parent) = Path::new(logger_path).parent()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent).expect("Failed to create logs directory");
     }
     let copper_ctx = basic_copper_setup(&PathBuf::from(logger_path), SLAB_SIZE, true, None)
         .expect("Failed to setup logger.");

@@ -1,0 +1,224 @@
+[package]
+name = "cu-flight-controller"
+description = "This is a basic quadcopter Flight Controller implemented end to end using Copper components"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+homepage.workspace = true
+repository.workspace = true
+# default-run = "quad-sim"
+
+publish = false
+
+[package.metadata.copper]
+embedded_only = true
+embedded_config = "examples/cu_flight_controller/.cargo/config-firmware.toml"
+embedded_target = "thumbv7em-none-eabihf"
+embedded_no_default_features = true
+embedded_features = "firmware"
+
+[dependencies]
+## Flight controller components
+
+### Hardware
+cu-bdshot = { path = "../../components/bridges/cu_bdshot", default-features = false, optional = true }
+cu-crsf = { path = "../../components/bridges/cu_crsf", default-features = false, features = [
+  "defmt",
+  "alloc",
+], optional = true }
+cu-msp-bridge = { path = "../../components/bridges/cu_msp_bridge", default-features = false, features = [
+  "defmt",
+  "alloc",
+], optional = true }
+cu-msp-lib = { path = "../../components/libs/cu_msp_lib", default-features = false, features = [
+  "bincode",
+] }
+cu-sdlogger = { path = "../../components/libs/cu_sdlogger", optional = true }
+cu-micoairh743 = { path = "../../components/res/cu_micoairh743", optional = true }
+cu-embedded-registry = { path = "../../components/libs/cu_embedded_registry", default-features = false, features = [
+  "defmt",
+], optional = true }
+cu-logmon = { path = "../../components/monitors/cu_logmon", default-features = false, features = [
+  "defmt",
+  "color_log",
+], optional = true }
+cu-ahrs = { path = "../../components/tasks/cu_ahrs", default-features = false, features = [
+  "defmt",
+], optional = true }
+cu-bmi088 = { path = "../../components/sources/cu_bmi088", default-features = false, features = [
+  "defmt",
+], optional = true }
+
+### Algos
+cu-pid = { path = "../../components/tasks/cu_pid", default-features = false, version = "0.12.0" }
+cu-sensor-payloads = { path = "../../components/payloads/cu_sensor_payloads", default-features = false, version = "0.12.0" }
+bincode = { workspace = true }
+serde = { workspace = true }
+cu29-unifiedlog = { path = "../../core/cu29_unifiedlog", default-features = false, features = [
+  "compact",
+] }
+spin = { workspace = true }
+uom = { version = "0.37", default-features = false, features = [
+  "serde",
+  "f32",
+  "si",
+  "autoconvert",
+] }
+
+# --> host dependencies <--
+
+## Log reader depencies
+cu29-export = { workspace = true, optional = true }
+
+## Sim dependencies
+bevy = { version = "0.18.0", default-features = false, features = [
+  "x11",
+  "wayland",
+  "default_font",
+  "bevy_render",
+  "bevy_window",
+  "bevy_core_pipeline",
+  "bevy_pbr",
+  "bevy_scene",
+  "bevy_sprite",
+  "bevy_gltf",
+  "gltf_animation",
+  "bevy_picking",
+  "mesh_picking",
+  "tonemapping_luts",
+  "bevy_ui",
+  "ktx2",
+  "jpeg",
+  "png",
+  "zstd_rust",
+], optional = true }
+avian3d = { version = "0.5.0", default-features = false, features = [
+  "bevy_scene",
+  "collider-from-mesh",
+  "debug-plugin",
+  "parallel",
+  "f32",
+  "3d",
+  "parry-f32",
+], optional = true }
+cached-path = { version = "0.10.0", optional = true }
+evdev = { version = "0.13.2", optional = true }
+
+cu29 = { path = "../../core/cu29", default-features = false, features = [
+  "log-level-debug",
+], optional = true }
+cortex-m-rt = { version = "0.7", optional = true }
+defmt-rtt = { version = "1.1.0", optional = true }
+defmt = { version = "1.0", optional = true }
+panic-probe = { version = "1.0.0", optional = true, features = ["print-defmt"] }
+buddy_system_allocator = { version = "0.12", default-features = false, features = [
+  "use_spin",
+], optional = true }
+stm32h7xx-hal = { version = "0.16.0", default-features = false, features = [
+  "stm32h743v",
+  "rt",
+  "defmt",
+  "sdmmc",
+  "sdmmc-fatfs",
+], optional = true }
+embedded-io = { version = "0.6", optional = true }
+embedded-hal = { version = "0.2.7", optional = true }
+embedded-alloc = { version = "0.7", optional = true }
+# Keep aligned with stm32h7xx-hal SDMMC support (pulls embedded-sdmmc 0.5).
+embedded-sdmmc = { version = "0.5", default-features = false, optional = true }
+cortex-m = { version = "0.7", features = [
+  "critical-section-single-core",
+], optional = true }
+
+[features]
+default = ["sim"]
+textlogs = [
+  "cu29/textlogs",
+  "cu-msp-bridge/textlogs",
+  "cu-msp-bridge/log-level-info",
+  "cu-logmon/textlogs",
+  "cu-logmon/log-level-info",
+]
+
+
+firmware = [
+  "dep:cu29",
+  "cu29/defmt",
+  "dep:defmt",
+  "dep:cortex-m-rt",
+  "dep:defmt-rtt",
+  "dep:panic-probe",
+  "dep:buddy_system_allocator",
+  "dep:stm32h7xx-hal",
+  "dep:embedded-io",
+  "dep:embedded-hal",
+  "dep:embedded-alloc",
+  "dep:embedded-sdmmc",
+  "dep:cortex-m",
+  "dep:cu-bdshot",
+  "dep:cu-micoairh743",
+  "cu-bdshot/stm32h7",
+  "cu-bdshot/defmt",
+  "cu-micoairh743/defmt",
+  "dep:cu-ahrs",
+  "dep:cu-bmi088",
+  "cu-bmi088/defmt",
+  "dep:cu-crsf",
+  "dep:cu-msp-bridge",
+  "cu-crsf/defmt",
+  "dep:cu-embedded-registry",
+  "dep:cu-sdlogger",
+  "dep:cu-logmon",
+  "cu-logmon/defmt",
+]
+logreader = [
+  "dep:cu29",
+  "cu29/std",
+  "bincode/std",
+  "serde/std",
+  "dep:cu29-export",
+  "dep:cu-crsf",
+  "dep:cu-bdshot",
+  "dep:cu-ahrs",
+  "cu-bdshot/messages-only",
+]
+sim = [
+  "dep:cu29",
+  "cu29/std",
+  "dep:bevy",
+  "dep:avian3d",
+  "dep:cached-path",
+  "dep:cu29-export",
+  "dep:evdev",
+]
+
+[[bin]]
+name = "quad"
+path = "src/main.rs"
+test = false
+doctest = false
+bench = false
+required-features = ["firmware"]
+
+[[bin]]
+name = "rc-tester"
+path = "src/sim/rc_tester.rs"
+required-features = ["sim"]
+
+[[bin]]
+name = "quad-logreader"
+path = "src/logreader.rs"
+required-features = ["logreader"]
+
+# [[bin]]
+# name = "quad-sim"
+# path = "src/sim.rs"
+# required-features = ["sim"]
+# 
+# [[bin]]
+# name = "quad-resim"
+# path = "src/resim.rs"
+# required-features = ["sim"]

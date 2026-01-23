@@ -32,13 +32,17 @@ impl<T> CuTask for CuRateLimit<T>
 where
     T: CuMsgPayload,
 {
+    type Resources<'r> = ();
     type Input<'m> = input_msg!(T);
     type Output<'m> = output_msg!(T);
 
-    fn new(config: Option<&ComponentConfig>) -> CuResult<Self> {
-        let hz = config
-            .and_then(|cfg| cfg.get::<f64>("rate"))
-            .ok_or("Missing required 'rate' config for CuRateLimiter")?;
+    fn new(config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self> {
+        let hz = match config {
+            Some(cfg) => cfg
+                .get::<f64>("rate")?
+                .ok_or("Missing required 'rate' config for CuRateLimiter")?,
+            None => return Err("Missing required 'rate' config for CuRateLimiter".into()),
+        };
         let interval_ns = (1e9 / hz) as u64;
         Ok(Self {
             _marker: PhantomData,
@@ -85,7 +89,7 @@ mod tests {
     fn create_test_ratelimiter(rate: f64) -> CuRateLimit<i32> {
         let mut cfg = ComponentConfig::new();
         cfg.set("rate", rate);
-        CuRateLimit::new(Some(&cfg)).unwrap()
+        CuRateLimit::new(Some(&cfg), ()).unwrap()
     }
 
     #[test]

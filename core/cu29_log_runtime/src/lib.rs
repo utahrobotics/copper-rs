@@ -2,6 +2,7 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+use core::sync::atomic::{AtomicUsize, Ordering};
 use cu29_clock::RobotClock;
 use cu29_log::CuLogEntry;
 #[allow(unused_imports)]
@@ -12,17 +13,17 @@ use log::Log;
 #[cfg(not(feature = "std"))]
 mod imp {
     pub use alloc::boxed::Box;
-    pub use spin::once::Once as OnceLock;
     pub use spin::Mutex;
+    pub use spin::once::Once as OnceLock;
 }
 
 #[cfg(feature = "std")]
 mod imp {
     pub use bincode::config::Configuration;
-    pub use bincode::enc::write::Writer;
     pub use bincode::enc::Encode;
     pub use bincode::enc::Encoder;
     pub use bincode::enc::EncoderImpl;
+    pub use bincode::enc::write::Writer;
     pub use bincode::error::EncodeError;
     pub use std::fmt::{Debug, Formatter};
     pub use std::fs::File;
@@ -52,6 +53,7 @@ type LogWriter = Box<dyn WriteStream<CuLogEntry> + Send + 'static>;
 type WriterPair = (Mutex<LogWriter>, RobotClock);
 
 static WRITER: OnceLock<WriterPair> = OnceLock::new();
+static STRUCTURED_LOG_BYTES: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(debug_assertions)]
 #[cfg(feature = "std")]
@@ -79,6 +81,7 @@ impl LoggerRuntime {
         #[allow(unused_variables)] extra_text_logger: Option<impl Log + 'static>,
     ) -> Self {
         let runtime = LoggerRuntime {};
+        STRUCTURED_LOG_BYTES.store(0, Ordering::Relaxed);
 
         // If WRITER is already initialized, update the inner value.
         // This should only be useful for unit testing.
@@ -86,7 +89,7 @@ impl LoggerRuntime {
             #[cfg(not(feature = "std"))]
             let mut writer_guard = writer.lock();
             #[cfg(feature = "std")]
-            let mut writer_guard = writer.lock().unwrap();
+            let mut writer_guard = writer.lock().unwrap_or_else(|e| e.into_inner());
             *writer_guard = Box::new(destination);
         } else {
             #[cfg(not(feature = "std"))]
@@ -128,11 +131,11 @@ impl Drop for LoggerRuntime {
         self.flush();
         // Assume on no-std that there is no buffering. TODO(gbin): check if this hold true.
         #[cfg(feature = "std")]
-        if let Some((mutex, _clock)) = WRITER.get() {
-            if let Ok(mut writer_guard) = mutex.lock() {
-                // Replace the current WriteStream with a DummyWriteStream
-                *writer_guard = Box::new(DummyWriteStream);
-            }
+        if let Some((mutex, _clock)) = WRITER.get()
+            && let Ok(mut writer_guard) = mutex.lock()
+        {
+            // Replace the current WriteStream with a DummyWriteStream
+            *writer_guard = Box::new(DummyWriteStream);
         }
     }
 }
@@ -141,29 +144,38 @@ impl Drop for LoggerRuntime {
 /// It moves entry by design, it will be absorbed in the queue.
 #[inline(always)]
 pub fn log(entry: &mut CuLogEntry) -> CuResult<()> {
-    let d = WRITER.get().map(|(writer, clock)| (writer, clock));
-    if d.is_none() {
+    let Some((writer, clock)) = WRITER.get() else {
         return Err("Logger not initialized.".into());
-    }
-    let (writer, clock) = d.unwrap();
+    };
     entry.time = clock.now();
 
     #[cfg(not(feature = "std"))]
-    writer.lock().log(entry)?;
+    {
+        let mut guard = writer.lock();
+        guard.log(entry)?;
+        if let Some(bytes) = guard.last_log_bytes() {
+            STRUCTURED_LOG_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        }
+    }
 
     #[cfg(feature = "std")]
-    if let Err(err) = writer.lock().unwrap().log(entry) {
-        eprintln!("Failed to log data: {err}");
-    }
-
-    // This is only for debug builds with standard textual logging implemented.
-    #[cfg(debug_assertions)]
     {
-        // This scope is important :).
-        // if we have not passed a text logger in debug mode, it is ok just move along.
+        let mut guard = writer.lock().unwrap_or_else(|err| {
+            eprintln!("cu29_log: Logger mutex poisoned, recovering.");
+            err.into_inner()
+        });
+        if let Err(err) = guard.log(entry) {
+            eprintln!("Failed to log data: {err}");
+        } else if let Some(bytes) = guard.last_log_bytes() {
+            STRUCTURED_LOG_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        }
     }
-
     Ok(())
+}
+
+/// Returns the total number of bytes written to the structured log stream.
+pub fn structured_log_bytes_total() -> u64 {
+    STRUCTURED_LOG_BYTES.load(Ordering::Relaxed) as u64
 }
 
 /// This version of log is only compiled in debug mode
@@ -187,55 +199,47 @@ pub fn log_debug_mode(
 #[cfg(feature = "std")]
 fn extra_log(entry: &mut CuLogEntry, format_str: &str, param_names: &[&str]) -> CuResult<()> {
     let guarded_logger = EXTRA_TEXT_LOGGER.read().unwrap();
-    if guarded_logger.is_none() {
+    let Some(logger) = guarded_logger.as_ref() else {
         return Ok(());
-    }
+    };
 
-    if let Some(logger) = guarded_logger.as_ref() {
-        let fstr = format_str.to_string();
-        // transform the slice into a hashmap
-        let params: Vec<String> = entry.params.iter().map(|v| v.to_string()).collect();
-        let named_params: Vec<(&str, String)> = param_names
-            .iter()
-            .zip(params.iter())
-            .map(|(name, value)| (*name, value.clone()))
-            .collect();
-        // build hashmap of string, string from named_paramgs
-        let named_params: HashMap<String, String> = named_params
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect();
+    // transform the slice into a hashmap
+    let params: Vec<String> = entry.params.iter().map(|v| v.to_string()).collect();
+    let named_params: HashMap<String, String> = param_names
+        .iter()
+        .zip(params.iter())
+        .map(|(name, value)| (name.to_string(), value.clone()))
+        .collect();
 
-        // Convert Copper log level to the standard log level
-        // Note: CuLogLevel::Critical is mapped to log::Level::Error because the `log` crate
-        // does not have a `Critical` level. `Error` is the highest severity level available
-        // in the `log` crate, making it the closest equivalent.
-        let log_level = match entry.level {
-            CuLogLevel::Debug => log::Level::Debug,
-            CuLogLevel::Info => log::Level::Info,
-            CuLogLevel::Warning => log::Level::Warn,
-            CuLogLevel::Error => log::Level::Error,
-            CuLogLevel::Critical => log::Level::Error,
-        };
+    // Convert Copper log level to the standard log level
+    // Note: CuLogLevel::Critical is mapped to log::Level::Error because the `log` crate
+    // does not have a `Critical` level. `Error` is the highest severity level available
+    // in the `log` crate, making it the closest equivalent.
+    let log_level = match entry.level {
+        CuLogLevel::Debug => log::Level::Debug,
+        CuLogLevel::Info => log::Level::Info,
+        CuLogLevel::Warning => log::Level::Warn,
+        CuLogLevel::Error => log::Level::Error,
+        CuLogLevel::Critical => log::Level::Error,
+    };
 
-        let logline = format_logline(
-            entry.time,
-            entry.level,
-            &fstr,
-            params.as_slice(),
-            &named_params,
-        )?;
-        logger.log(
-            &log::Record::builder()
-                .args(format_args!("{logline}"))
-                .level(log_level)
-                .target("cu29_log")
-                .module_path_static(Some("cu29_log"))
-                .file_static(Some("cu29_log"))
-                .line(Some(0))
-                .build(),
-        );
-    }
+    let logline = format_logline(
+        entry.time,
+        entry.level,
+        format_str,
+        params.as_slice(),
+        &named_params,
+    )?;
+    logger.log(
+        &log::Record::builder()
+            .args(format_args!("{logline}"))
+            .level(log_level)
+            .target("cu29_log")
+            .module_path_static(Some("cu29_log"))
+            .file_static(Some("cu29_log"))
+            .line(Some(0))
+            .build(),
+    );
     Ok(())
 }
 // This is an adaptation of the Iowriter from bincode.

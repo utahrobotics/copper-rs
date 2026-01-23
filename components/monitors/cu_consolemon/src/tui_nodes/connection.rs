@@ -7,7 +7,7 @@ use ratatui::{
 };
 use std::collections::{BTreeMap as Map, BinaryHeap};
 
-const SEARCH_TIMEOUT: usize = 5000;
+const SEARCH_TIMEOUT: usize = 20000;
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LineType {
@@ -19,7 +19,7 @@ pub enum LineType {
 }
 
 impl LineType {
-    pub fn to_line_set(self) -> line::Set {
+    pub fn to_line_set(self) -> line::Set<'static> {
         match self {
             LineType::Plain => line::NORMAL,
             LineType::Rounded => line::ROUNDED,
@@ -36,7 +36,14 @@ impl From<BorderType> for LineType {
             BorderType::Rounded => LineType::Rounded,
             BorderType::Double => LineType::Double,
             BorderType::Thick => LineType::Thick,
-            _ => unimplemented!(),
+            BorderType::LightDoubleDashed
+            | BorderType::LightTripleDashed
+            | BorderType::LightQuadrupleDashed
+            | BorderType::QuadrantInside
+            | BorderType::QuadrantOutside => LineType::Plain,
+            BorderType::HeavyDoubleDashed
+            | BorderType::HeavyTripleDashed
+            | BorderType::HeavyQuadrupleDashed => LineType::Thick,
         }
     }
 }
@@ -134,11 +141,39 @@ impl Connection {
 /// Generate the correct connection symbol for this node
 pub fn conn_symbol(is_input: bool, block_style: BorderType, conn_style: LineType) -> &'static str {
     let out = match (block_style, conn_style) {
-        (BorderType::Plain | BorderType::Rounded, LineType::Thick) => ("┥", "┝"),
-        (BorderType::Plain | BorderType::Rounded, LineType::Double) => ("╡", "╞"),
-        (BorderType::Plain | BorderType::Rounded, LineType::Plain | LineType::Rounded) => {
-            ("┤", "├")
-        }
+        (
+            BorderType::Plain
+            | BorderType::Rounded
+            | BorderType::LightDoubleDashed
+            | BorderType::HeavyDoubleDashed
+            | BorderType::LightTripleDashed
+            | BorderType::HeavyTripleDashed
+            | BorderType::LightQuadrupleDashed
+            | BorderType::HeavyQuadrupleDashed,
+            LineType::Thick,
+        ) => ("┥", "┝"),
+        (
+            BorderType::Plain
+            | BorderType::Rounded
+            | BorderType::LightDoubleDashed
+            | BorderType::HeavyDoubleDashed
+            | BorderType::LightTripleDashed
+            | BorderType::HeavyTripleDashed
+            | BorderType::LightQuadrupleDashed
+            | BorderType::HeavyQuadrupleDashed,
+            LineType::Double,
+        ) => ("╡", "╞"),
+        (
+            BorderType::Plain
+            | BorderType::Rounded
+            | BorderType::LightDoubleDashed
+            | BorderType::HeavyDoubleDashed
+            | BorderType::LightTripleDashed
+            | BorderType::HeavyTripleDashed
+            | BorderType::LightQuadrupleDashed
+            | BorderType::HeavyQuadrupleDashed,
+            LineType::Plain | LineType::Rounded,
+        ) => ("┤", "├"),
 
         (BorderType::Thick, LineType::Thick) => ("┫", "┣"),
         (BorderType::Thick, LineType::Double) => ("╡", "╞"), // fallback
@@ -149,11 +184,7 @@ pub fn conn_symbol(is_input: bool, block_style: BorderType, conn_style: LineType
         (BorderType::Double, LineType::Plain | LineType::Rounded) => ("╢", "╟"),
         (BorderType::QuadrantInside | BorderType::QuadrantOutside, _) => ("u", "u"),
     };
-    if is_input {
-        out.0
-    } else {
-        out.1
-    }
+    if is_input { out.0 } else { out.1 }
 }
 
 pub const ALIAS_CHARS: [&str; 24] = [
@@ -210,19 +241,17 @@ impl ConnectionsLayout {
     pub fn block_zone(&mut self, area: Rect) {
         for x in 0..area.width {
             for y in 0..area.height {
-                if x != area.width - 1 {
-                    self.edge_field[(
-                        ((x + area.x) as usize, (y + area.y) as usize),
-                        Direction::East,
-                    )
-                        .into()] = Edge::Blocked;
+                let xi = (x + area.x) as usize;
+                let yi = (y + area.y) as usize;
+                // Skip any cells that would fall outside the allocated grid to avoid panics.
+                if xi >= self.width || yi >= self.height {
+                    continue;
                 }
-                if y != area.height - 1 {
-                    self.edge_field[(
-                        ((x + area.x) as usize, (y + area.y) as usize),
-                        Direction::South,
-                    )
-                        .into()] = Edge::Blocked;
+                if x != area.width - 1 && xi + 1 < self.width {
+                    self.edge_field[((xi, yi), Direction::East).into()] = Edge::Blocked;
+                }
+                if y != area.height - 1 && yi + 1 < self.height {
+                    self.edge_field[((xi, yi), Direction::South).into()] = Edge::Blocked;
                 }
             }
         }
@@ -249,10 +278,10 @@ impl ConnectionsLayout {
                 self.ports[&(true, ea_conn.0.to_node, ea_conn.0.to_port)],
                 Direction::East,
             );
-            if start.0 .0 > self.edge_field.width || start.0 .1 > self.edge_field.height {
+            if start.0.0 >= self.edge_field.width || start.0.1 >= self.edge_field.height {
                 continue;
             }
-            if goal.0 .0 > self.edge_field.width || goal.0 .1 > self.edge_field.height {
+            if goal.0.0 >= self.edge_field.width || goal.0.1 >= self.edge_field.height {
                 continue;
             }
             //println!("drawing connection {start:?} to {goal:?}");
@@ -353,7 +382,7 @@ impl ConnectionsLayout {
     }
 
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
-        let bor = |idx: Edge| -> line::Set {
+        let bor = |idx: Edge| -> line::Set<'static> {
             if let Edge::Connection(idx) = idx {
                 self.line_types[&idx].to_line_set()
             } else if idx == Edge::Blocked {
@@ -519,8 +548,8 @@ impl ConnectionsLayout {
                     {
                         isize::MAX
                     } else {
-                        let ax = current.0 .0 as isize;
-                        let ay = current.0 .1 as isize;
+                        let ax = current.0.0 as isize;
+                        let ay = current.0.1 as isize;
                         let sx = start.0 as isize;
                         let sy = start.1 as isize;
                         let ex = end.0 as isize;
@@ -574,23 +603,23 @@ impl From<((usize, usize), Direction)> for EdgeIdx {
     fn from(value: ((usize, usize), Direction)) -> Self {
         match value.1 {
             Direction::North => Self {
-                x: value.0 .0,
-                y: value.0 .1,
+                x: value.0.0,
+                y: value.0.1,
                 is_vertical: true,
             },
             Direction::South => Self {
-                x: value.0 .0,
-                y: value.0 .1 + 1,
+                x: value.0.0,
+                y: value.0.1 + 1,
                 is_vertical: true,
             },
             Direction::East => Self {
-                x: value.0 .0 + 1,
-                y: value.0 .1,
+                x: value.0.0 + 1,
+                y: value.0.1,
                 is_vertical: false,
             },
             Direction::West => Self {
-                x: value.0 .0,
-                y: value.0 .1,
+                x: value.0.0,
+                y: value.0.1,
                 is_vertical: false,
             },
         }

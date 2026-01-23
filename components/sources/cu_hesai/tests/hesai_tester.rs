@@ -1,8 +1,8 @@
+use cu_hesai::LidarCuMsgPayload;
+use cu_hesai::parser::Packet;
+use cu_udp_inject::PcapStreamer;
 use cu29::prelude::*;
 use cu29_helpers::basic_copper_setup;
-use cu_hesai::parser::Packet;
-use cu_hesai::LidarCuMsgPayload;
-use cu_udp_inject::PcapStreamer;
 
 use std::thread;
 use std::time::Duration;
@@ -12,9 +12,10 @@ struct HesaiTestSink {}
 impl Freezable for HesaiTestSink {}
 
 impl CuSinkTask for HesaiTestSink {
+    type Resources<'r> = ();
     type Input<'m> = input_msg!(LidarCuMsgPayload);
 
-    fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {

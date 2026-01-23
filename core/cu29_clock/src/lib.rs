@@ -1,6 +1,5 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
-#[cfg(not(feature = "std"))]
 extern crate alloc;
 #[cfg(test)]
 extern crate approx;
@@ -23,11 +22,11 @@ mod raw_counter;
 
 pub use raw_counter::*;
 
+use bincode::BorrowDecode;
 use bincode::de::BorrowDecoder;
 use bincode::de::Decoder;
 use bincode::enc::Encoder;
 use bincode::error::{DecodeError, EncodeError};
-use bincode::BorrowDecode;
 use bincode::{Decode, Encode};
 use core::ops::{Add, Sub};
 use serde::{Deserialize, Serialize};
@@ -35,23 +34,10 @@ use serde::{Deserialize, Serialize};
 // We use this to be able to support embedded 32bit platforms
 use portable_atomic::{AtomicU64, Ordering};
 
-#[cfg(not(feature = "std"))]
-mod imp {
-    pub use alloc::format;
-    pub use alloc::sync::Arc;
-    pub use core::fmt::{Display, Formatter};
-    pub use core::ops::{AddAssign, Div, Mul, SubAssign};
-}
-
-#[cfg(feature = "std")]
-mod imp {
-    pub use std::convert::Into;
-    pub use std::fmt::{Display, Formatter};
-    pub use std::ops::{AddAssign, Div, Mul, SubAssign};
-    pub use std::sync::Arc;
-}
-
-use imp::*;
+use alloc::format;
+use alloc::sync::Arc;
+use core::fmt::{Display, Formatter};
+use core::ops::{AddAssign, Div, Mul, SubAssign};
 
 /// High-precision instant in time, represented as nanoseconds since an arbitrary epoch
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -150,6 +136,19 @@ impl CuDuration {
 
     pub fn from_secs(secs: u64) -> Self {
         CuDuration(secs * 1_000_000_000)
+    }
+}
+
+/// Saturating subtraction for time and duration types.
+pub trait SaturatingSub {
+    fn saturating_sub(self, other: Self) -> Self;
+}
+
+impl SaturatingSub for CuDuration {
+    fn saturating_sub(self, other: Self) -> Self {
+        let Self(lhs) = self;
+        let Self(rhs) = other;
+        CuDuration(lhs.saturating_sub(rhs))
     }
 }
 
@@ -356,7 +355,7 @@ impl OptionCuTime {
     }
 
     #[inline]
-    pub fn none() -> Self {
+    pub const fn none() -> Self {
         OptionCuTime(CuDuration(NONE_VALUE))
     }
 

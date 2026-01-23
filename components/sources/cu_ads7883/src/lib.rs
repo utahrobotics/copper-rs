@@ -90,18 +90,19 @@ fn read_adc(spi: &mut Spidev) -> std::io::Result<u16> {
 use mock::read_adc;
 
 impl CuSrcTask for ADS7883 {
+    type Resources<'r> = ();
     type Output<'m> = output_msg!(ADSReadingPayload);
 
-    fn new(config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {
         match config {
             #[allow(unused_variables)]
             Some(config) => {
-                let maybe_string: Option<String> = config.get::<String>("spi_dev");
+                let maybe_string: Option<String> = config.get::<String>("spi_dev")?;
                 let maybe_spidev: Option<&str> = maybe_string.as_deref();
-                let maybe_max_speed_hz: Option<u32> = config.get("max_speed_hz");
+                let maybe_max_speed_hz: Option<u32> = config.get("max_speed_hz")?;
 
                 #[cfg(hardware)]
                 let spi = open_spi(maybe_spidev, maybe_max_speed_hz).map_err(|e| {
@@ -173,9 +174,13 @@ pub mod test_support {
     impl Freezable for ADS78883TestSink {}
 
     impl CuSinkTask for ADS78883TestSink {
+        type Resources<'r> = ();
         type Input<'m> = input_msg!(ADSReadingPayload);
 
-        fn new(_config: Option<&ComponentConfig>) -> CuResult<Self> {
+        fn new(
+            _config: Option<&ComponentConfig>,
+            _resources: Self::Resources<'_>,
+        ) -> CuResult<Self> {
             Ok(Self {})
         }
 

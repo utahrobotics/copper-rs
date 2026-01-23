@@ -12,9 +12,10 @@ pub mod tasks {
     impl Freezable for ExampleSrc {}
 
     impl CuSrcTask for ExampleSrc {
+        type Resources<'r> = ();
         type Output<'m> = output_msg!(i32);
 
-        fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+        fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
         where
             Self: Sized,
         {
@@ -32,10 +33,11 @@ pub mod tasks {
     impl Freezable for ExampleTask {}
 
     impl CuTask for ExampleTask {
+        type Resources<'r> = ();
         type Input<'m> = input_msg!(i32);
         type Output<'m> = output_msg!(i32);
 
-        fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+        fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
         where
             Self: Sized,
         {
@@ -58,9 +60,10 @@ pub mod tasks {
     impl Freezable for ExampleSink {}
 
     impl CuSinkTask for ExampleSink {
+        type Resources<'r> = ();
         type Input<'m> = input_msg!(i32);
 
-        fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+        fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
         where
             Self: Sized,
         {
@@ -83,7 +86,7 @@ struct App {}
 impl CuMonitor for ExampleMonitor {
     fn new(_config: &CuConfig, taskids: &'static [&str]) -> CuResult<Self> {
         debug!("Monitoring: created: {}", taskids);
-        Ok(ExampleMonitor { tasks: taskids })
+        Ok(Self { tasks: taskids })
     }
 
     fn start(&mut self, clock: &RobotClock) -> CuResult<()> {
@@ -93,8 +96,7 @@ impl CuMonitor for ExampleMonitor {
 
     fn process_copperlist(&self, msgs: &[&CuMsgMetadata]) -> CuResult<()> {
         debug!("Monitoring: Processing copperlist...");
-        for t in msgs.iter().enumerate() {
-            let (taskid, metadata) = t;
+        for (taskid, metadata) in msgs.iter().enumerate() {
             debug!("Task: {} -> {}", taskid, metadata);
         }
         Ok(())

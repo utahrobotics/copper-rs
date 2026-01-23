@@ -3,7 +3,7 @@ use bincode::enc::Encoder;
 use bincode::error::{DecodeError, EncodeError};
 use bincode::{Decode, Encode};
 use cu29::prelude::*;
-use serde::Serializer;
+use serde::{Deserialize, Serialize, Serializer};
 use std::sync::Arc;
 
 pub struct DoraSource<const S: usize> {
@@ -13,9 +13,10 @@ pub struct DoraSource<const S: usize> {
 impl<const S: usize> Freezable for DoraSource<S> {}
 
 impl<const S: usize> CuSrcTask for DoraSource<S> {
+    type Resources<'r> = ();
     type Output<'m> = output_msg!(DoraPayload);
 
-    fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {
@@ -37,9 +38,10 @@ pub struct DoraSink<const S: usize> {}
 impl<const S: usize> Freezable for DoraSink<S> {}
 
 impl<const S: usize> CuSinkTask for DoraSink<S> {
+    type Resources<'r> = ();
     type Input<'m> = input_msg!(DoraPayload);
 
-    fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {
@@ -79,11 +81,21 @@ impl Encode for DoraPayload {
 }
 
 impl Serialize for DoraPayload {
-    fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        // Not needed for this benchmark.
-        todo!()
+        let data = self.0.with_inner(|inner| inner.to_vec());
+        serializer.serialize_bytes(&data)
+    }
+}
+
+impl<'de> Deserialize<'de> for DoraPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let data = Vec::<u8>::deserialize(deserializer)?;
+        Ok(DoraPayload(CuHandle::new_detached(data)))
     }
 }

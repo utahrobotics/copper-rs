@@ -2,47 +2,51 @@
 //! It is exposed to the user via the `copper_runtime` macro injecting it as a field in their application struct.
 //!
 
-use crate::config::{ComponentConfig, CuDirection, Node, DEFAULT_KEYFRAME_INTERVAL};
+use crate::config::{ComponentConfig, CuDirection, DEFAULT_KEYFRAME_INTERVAL, Node};
 use crate::config::{CuConfig, CuGraph, NodeId, RuntimeConfig};
 use crate::copperlist::{CopperList, CopperListState, CuListZeroedInit, CuListsManager};
 use crate::cutask::{BincodeAdapter, Freezable};
-use crate::monitoring::{build_monitor_topology, CuMonitor};
+use crate::monitoring::{CuMonitor, build_monitor_topology};
+use crate::resource::ResourceManager;
 use cu29_clock::{ClockProvider, CuTime, RobotClock};
 use cu29_traits::CuResult;
 use cu29_traits::WriteStream;
 use cu29_traits::{CopperListTuple, CuError};
 
-use bincode::enc::write::{SizeWriter, SliceWriter};
+#[cfg(target_os = "none")]
+#[allow(unused_imports)]
+use cu29_log::{ANONYMOUS, CuLogEntry, CuLogLevel};
+#[cfg(target_os = "none")]
+#[allow(unused_imports)]
+use cu29_log_derive::info;
+#[cfg(target_os = "none")]
+#[allow(unused_imports)]
+use cu29_log_runtime::log;
+#[cfg(all(target_os = "none", debug_assertions))]
+#[allow(unused_imports)]
+use cu29_log_runtime::log_debug_mode;
+#[cfg(target_os = "none")]
+#[allow(unused_imports)]
+use cu29_value::to_value;
+
+use alloc::boxed::Box;
+use alloc::collections::{BTreeSet, VecDeque};
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use bincode::enc::EncoderImpl;
+use bincode::enc::write::{SizeWriter, SliceWriter};
 use bincode::error::EncodeError;
 use bincode::{Decode, Encode};
+use core::fmt::Result as FmtResult;
 use core::fmt::{Debug, Formatter};
-use petgraph::prelude::*;
-use petgraph::visit::VisitMap;
-use petgraph::visit::Visitable;
-
-#[cfg(not(feature = "std"))]
-mod imp {
-    pub use alloc::boxed::Box;
-    pub use alloc::collections::VecDeque;
-    pub use alloc::format;
-    pub use alloc::string::String;
-    pub use alloc::string::ToString;
-    pub use alloc::vec::Vec;
-    pub use core::fmt::Result as FmtResult;
-}
 
 #[cfg(feature = "std")]
-mod imp {
-    pub use cu29_log_runtime::LoggerRuntime;
-    pub use cu29_unifiedlog::UnifiedLoggerWrite;
-    pub use rayon::ThreadPool;
-    pub use std::collections::VecDeque;
-    pub use std::fmt::Result as FmtResult;
-    pub use std::sync::{Arc, Mutex};
-}
-
-use imp::*;
+use cu29_log_runtime::LoggerRuntime;
+#[cfg(feature = "std")]
+use cu29_unifiedlog::UnifiedLoggerWrite;
+#[cfg(feature = "std")]
+use std::sync::{Arc, Mutex};
 
 /// Just a simple struct to hold the various bits needed to run a Copper application.
 #[cfg(feature = "std")]
@@ -57,6 +61,8 @@ pub struct CopperListsManager<P: CopperListTuple + Default, const NBCL: usize> {
     pub inner: CuListsManager<P, NBCL>,
     /// Logger for the copper lists (messages between tasks)
     pub logger: Option<Box<dyn WriteStream<CopperList<P>>>>,
+    /// Last encoded size returned by logger.log
+    pub last_encoded_bytes: u64,
 }
 
 impl<P: CopperListTuple + Default, const NBCL: usize> CopperListsManager<P, NBCL> {
@@ -71,6 +77,7 @@ impl<P: CopperListTuple + Default, const NBCL: usize> CopperListsManager<P, NBCL
                 if let Some(logger) = &mut self.logger {
                     cl.change_state(CopperListState::BeingSerialized);
                     logger.log(cl)?;
+                    self.last_encoded_bytes = logger.last_log_bytes().unwrap_or(0) as u64;
                 }
                 cl.change_state(CopperListState::Free);
                 nb_done += 1;
@@ -99,6 +106,9 @@ pub struct KeyFramesManager {
 
     /// Capture a keyframe only each...
     keyframe_interval: u32,
+
+    /// Bytes written by the last keyframe log
+    pub last_encoded_bytes: u64,
 }
 
 impl KeyFramesManager {
@@ -115,7 +125,10 @@ impl KeyFramesManager {
     pub fn freeze_task(&mut self, culistid: u32, task: &impl Freezable) -> CuResult<usize> {
         if self.is_keyframe(culistid) {
             if self.inner.culistid != culistid {
-                panic!("Freezing task for a different culistid");
+                return Err(CuError::from(format!(
+                    "Freezing task for culistid {} but current keyframe is {}",
+                    culistid, self.inner.culistid
+                )));
             }
             self.inner
                 .add_frozen_task(task)
@@ -128,8 +141,12 @@ impl KeyFramesManager {
     pub fn end_of_processing(&mut self, culistid: u32) -> CuResult<()> {
         if self.is_keyframe(culistid) {
             let logger = self.logger.as_mut().unwrap();
-            logger.log(&self.inner)
+            logger.log(&self.inner)?;
+            self.last_encoded_bytes = logger.last_log_bytes().unwrap_or(0) as u64;
+            Ok(())
         } else {
+            // Not a keyframe for this CL; ensure we don't carry stale sizes forward.
+            self.last_encoded_bytes = 0;
             Ok(())
         }
     }
@@ -148,9 +165,8 @@ pub struct CuRuntime<CT, CB, P: CopperListTuple, M: CuMonitor, const NBCL: usize
     /// Tuple of all instantiated bridges.
     pub bridges: CB,
 
-    /// For backgrounded tasks.
-    #[cfg(feature = "std")]
-    pub threadpool: Arc<ThreadPool>,
+    /// Resource registry kept alive for tasks borrowing shared handles.
+    pub resources: ResourceManager,
 
     /// The runtime monitoring.
     pub monitor: M,
@@ -220,12 +236,12 @@ impl KeyFrame {
 }
 
 impl<
-        CT,
-        CB,
-        P: CopperListTuple + CuListZeroedInit + Default + 'static,
-        M: CuMonitor,
-        const NBCL: usize,
-    > CuRuntime<CT, CB, P, M, NBCL>
+    CT,
+    CB,
+    P: CopperListTuple + CuListZeroedInit + Default + 'static,
+    M: CuMonitor,
+    const NBCL: usize,
+> CuRuntime<CT, CB, P, M, NBCL>
 {
     // FIXME(gbin): this became REALLY ugly with no-std
     #[allow(clippy::too_many_arguments)]
@@ -234,12 +250,43 @@ impl<
         clock: RobotClock,
         config: &CuConfig,
         mission: Option<&str>,
+        resources_instanciator: impl Fn(&CuConfig) -> CuResult<ResourceManager>,
         tasks_instanciator: impl for<'c> Fn(
             Vec<Option<&'c ComponentConfig>>,
-            Arc<ThreadPool>,
+            &mut ResourceManager,
         ) -> CuResult<CT>,
         monitor_instanciator: impl Fn(&CuConfig) -> M,
-        bridges_instanciator: impl Fn(&CuConfig) -> CuResult<CB>,
+        bridges_instanciator: impl Fn(&CuConfig, &mut ResourceManager) -> CuResult<CB>,
+        copperlists_logger: impl WriteStream<CopperList<P>> + 'static,
+        keyframes_logger: impl WriteStream<KeyFrame> + 'static,
+    ) -> CuResult<Self> {
+        let resources = resources_instanciator(config)?;
+        Self::new_with_resources(
+            clock,
+            config,
+            mission,
+            resources,
+            tasks_instanciator,
+            monitor_instanciator,
+            bridges_instanciator,
+            copperlists_logger,
+            keyframes_logger,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[cfg(feature = "std")]
+    pub fn new_with_resources(
+        clock: RobotClock,
+        config: &CuConfig,
+        mission: Option<&str>,
+        mut resources: ResourceManager,
+        tasks_instanciator: impl for<'c> Fn(
+            Vec<Option<&'c ComponentConfig>>,
+            &mut ResourceManager,
+        ) -> CuResult<CT>,
+        monitor_instanciator: impl Fn(&CuConfig) -> M,
+        bridges_instanciator: impl Fn(&CuConfig, &mut ResourceManager) -> CuResult<CB>,
         copperlists_logger: impl WriteStream<CopperList<P>> + 'static,
         keyframes_logger: impl WriteStream<KeyFrame> + 'static,
     ) -> CuResult<Self> {
@@ -250,22 +297,12 @@ impl<
             .map(|(_, node)| node.get_instance_config())
             .collect();
 
-        // TODO: make that configurable
-
-        let threadpool = Arc::new(
-            rayon::ThreadPoolBuilder::new()
-                .stack_size(5e6 as usize)
-                .num_threads(2) // default to 4 threads if not specified
-                .build()
-                .expect("Could not create the threadpool"),
-        );
-
-        let tasks = tasks_instanciator(all_instances_configs, threadpool.clone())?;
+        let tasks = tasks_instanciator(all_instances_configs, &mut resources)?;
         let mut monitor = monitor_instanciator(config);
         if let Ok(topology) = build_monitor_topology(config, mission) {
             monitor.set_topology(topology);
         }
-        let bridges = bridges_instanciator(config)?;
+        let bridges = bridges_instanciator(config, &mut resources)?;
 
         let (copperlists_logger, keyframes_logger, keyframe_interval) = match &config.logging {
             Some(logging_config) if logging_config.enable_task_logging => (
@@ -285,12 +322,23 @@ impl<
         let copperlists_manager = CopperListsManager {
             inner: CuListsManager::new(),
             logger: copperlists_logger,
+            last_encoded_bytes: 0,
         };
+        #[cfg(target_os = "none")]
+        {
+            let cl_size = core::mem::size_of::<CopperList<P>>();
+            let total_bytes = cl_size.saturating_mul(NBCL);
+            info!(
+                "CuRuntime::new: copperlists count={} cl_size={} total_bytes={}",
+                NBCL, cl_size, total_bytes
+            );
+        }
 
         let keyframes_manager = KeyFramesManager {
             inner: KeyFrame::new(),
             logger: keyframes_logger,
             keyframe_interval,
+            last_encoded_bytes: 0,
         };
 
         let runtime_config = config.runtime.clone().unwrap_or_default();
@@ -298,7 +346,7 @@ impl<
         let runtime = Self {
             tasks,
             bridges,
-            threadpool,
+            resources,
             monitor,
             clock,
             copperlists_manager,
@@ -315,26 +363,80 @@ impl<
         clock: RobotClock,
         config: &CuConfig,
         mission: Option<&str>,
-        tasks_instanciator: impl for<'c> Fn(Vec<Option<&'c ComponentConfig>>) -> CuResult<CT>,
+        resources_instanciator: impl Fn(&CuConfig) -> CuResult<ResourceManager>,
+        tasks_instanciator: impl for<'c> Fn(
+            Vec<Option<&'c ComponentConfig>>,
+            &mut ResourceManager,
+        ) -> CuResult<CT>,
         monitor_instanciator: impl Fn(&CuConfig) -> M,
-        bridges_instanciator: impl Fn(&CuConfig) -> CuResult<CB>,
+        bridges_instanciator: impl Fn(&CuConfig, &mut ResourceManager) -> CuResult<CB>,
         copperlists_logger: impl WriteStream<CopperList<P>> + 'static,
         keyframes_logger: impl WriteStream<KeyFrame> + 'static,
     ) -> CuResult<Self> {
+        #[cfg(target_os = "none")]
+        info!("CuRuntime::new: resources instanciator");
+        let resources = resources_instanciator(config)?;
+        Self::new_with_resources(
+            clock,
+            config,
+            mission,
+            resources,
+            tasks_instanciator,
+            monitor_instanciator,
+            bridges_instanciator,
+            copperlists_logger,
+            keyframes_logger,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[cfg(not(feature = "std"))]
+    pub fn new_with_resources(
+        clock: RobotClock,
+        config: &CuConfig,
+        mission: Option<&str>,
+        mut resources: ResourceManager,
+        tasks_instanciator: impl for<'c> Fn(
+            Vec<Option<&'c ComponentConfig>>,
+            &mut ResourceManager,
+        ) -> CuResult<CT>,
+        monitor_instanciator: impl Fn(&CuConfig) -> M,
+        bridges_instanciator: impl Fn(&CuConfig, &mut ResourceManager) -> CuResult<CB>,
+        copperlists_logger: impl WriteStream<CopperList<P>> + 'static,
+        keyframes_logger: impl WriteStream<KeyFrame> + 'static,
+    ) -> CuResult<Self> {
+        #[cfg(target_os = "none")]
+        info!("CuRuntime::new: get graph");
         let graph = config.get_graph(mission)?;
+        #[cfg(target_os = "none")]
+        info!("CuRuntime::new: graph ok");
         let all_instances_configs: Vec<Option<&ComponentConfig>> = graph
             .get_all_nodes()
             .iter()
             .map(|(_, node)| node.get_instance_config())
             .collect();
 
-        let tasks = tasks_instanciator(all_instances_configs)?;
+        #[cfg(target_os = "none")]
+        info!("CuRuntime::new: tasks instanciator");
+        let tasks = tasks_instanciator(all_instances_configs, &mut resources)?;
 
+        #[cfg(target_os = "none")]
+        info!("CuRuntime::new: monitor instanciator");
         let mut monitor = monitor_instanciator(config);
+        #[cfg(target_os = "none")]
+        info!("CuRuntime::new: monitor instanciator ok");
+        #[cfg(target_os = "none")]
+        info!("CuRuntime::new: build monitor topology");
         if let Ok(topology) = build_monitor_topology(config, mission) {
+            #[cfg(target_os = "none")]
+            info!("CuRuntime::new: monitor topology ok");
             monitor.set_topology(topology);
+            #[cfg(target_os = "none")]
+            info!("CuRuntime::new: monitor topology set");
         }
-        let bridges = bridges_instanciator(config)?;
+        #[cfg(target_os = "none")]
+        info!("CuRuntime::new: bridges instanciator");
+        let bridges = bridges_instanciator(config, &mut resources)?;
 
         let (copperlists_logger, keyframes_logger, keyframe_interval) = match &config.logging {
             Some(logging_config) if logging_config.enable_task_logging => (
@@ -354,12 +456,23 @@ impl<
         let copperlists_manager = CopperListsManager {
             inner: CuListsManager::new(),
             logger: copperlists_logger,
+            last_encoded_bytes: 0,
         };
+        #[cfg(target_os = "none")]
+        {
+            let cl_size = core::mem::size_of::<CopperList<P>>();
+            let total_bytes = cl_size.saturating_mul(NBCL);
+            info!(
+                "CuRuntime::new: copperlists count={} cl_size={} total_bytes={}",
+                NBCL, cl_size, total_bytes
+            );
+        }
 
         let keyframes_manager = KeyFramesManager {
             inner: KeyFrame::new(),
             logger: keyframes_logger,
             keyframe_interval,
+            last_encoded_bytes: 0,
         };
 
         let runtime_config = config.runtime.clone().unwrap_or_default();
@@ -367,8 +480,7 @@ impl<
         let runtime = Self {
             tasks,
             bridges,
-            #[cfg(feature = "std")]
-            threadpool,
+            resources,
             monitor,
             clock,
             copperlists_manager,
@@ -391,6 +503,20 @@ pub enum CuTaskType {
     Sink,
 }
 
+#[derive(Debug, Clone)]
+pub struct CuOutputPack {
+    pub culist_index: u32,
+    pub msg_types: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CuInputMsg {
+    pub culist_index: u32,
+    pub msg_type: String,
+    pub src_port: usize,
+    pub edge_id: usize,
+}
+
 /// This structure represents a step in the execution plan.
 pub struct CuExecutionStep {
     /// NodeId: node id of the task to execute
@@ -401,10 +527,10 @@ pub struct CuExecutionStep {
     pub task_type: CuTaskType,
 
     /// the indices in the copper list of the input messages and their types
-    pub input_msg_indices_types: Vec<(u32, String)>,
+    pub input_msg_indices_types: Vec<CuInputMsg>,
 
     /// the index in the copper list of the output message and its type
-    pub output_msg_index_type: Option<(u32, String)>,
+    pub output_msg_pack: Option<CuOutputPack>,
 }
 
 impl Debug for CuExecutionStep {
@@ -419,9 +545,7 @@ impl Debug for CuExecutionStep {
             )
             .as_str(),
         )?;
-        f.write_str(
-            format!("       output_msg_type: {:?}\n", self.output_msg_index_type).as_str(),
-        )?;
+        f.write_str(format!("       output_msg_pack: {:?}\n", self.output_msg_pack).as_str())?;
         Ok(())
     }
 }
@@ -461,20 +585,20 @@ pub enum CuExecutionUnit {
     Loop(CuExecutionLoop),
 }
 
-fn find_output_index_type_from_nodeid(
+fn find_output_pack_from_nodeid(
     node_id: NodeId,
     steps: &Vec<CuExecutionUnit>,
-) -> Option<(u32, String)> {
+) -> Option<CuOutputPack> {
     for step in steps {
         match step {
             CuExecutionUnit::Loop(loop_unit) => {
-                if let Some(index) = find_output_index_type_from_nodeid(node_id, &loop_unit.steps) {
-                    return Some(index);
+                if let Some(output_pack) = find_output_pack_from_nodeid(node_id, &loop_unit.steps) {
+                    return Some(output_pack);
                 }
             }
             CuExecutionUnit::Step(step) => {
                 if step.node_id == node_id {
-                    return step.output_msg_index_type.clone();
+                    return step.output_msg_pack.clone();
                 }
             }
         }
@@ -492,43 +616,28 @@ pub fn find_task_type_for_id(graph: &CuGraph, node_id: NodeId) -> CuTaskType {
     }
 }
 
-/// This function gets the input node by using the input step plan id, to get the edge that
-/// connects the input to the output in the config graph
-fn find_edge_with_plan_input_id(
-    plan: &[CuExecutionUnit],
-    graph: &CuGraph,
-    plan_id: u32,
-    output_node_id: NodeId,
-) -> usize {
-    let input_node = plan
-        .get(plan_id as usize)
-        .expect("Input step should've been added to plan before the step that receives the input");
-    let CuExecutionUnit::Step(input_step) = input_node else {
-        panic!("Expected input to be from a step, not a loop");
-    };
-    let input_node_id = input_step.node_id;
-
-    graph
-        .0
-        .edges_connecting(input_node_id.into(), output_node_id.into())
-        .map(|edge| edge.id().index())
-        .next()
-        .expect("An edge connecting the input to the output should exist")
+/// The connection id used here is the index of the config graph edge that equates to the wanted
+/// connection.
+fn sort_inputs_by_cnx_id(input_msg_indices_types: &mut [CuInputMsg]) {
+    input_msg_indices_types.sort_by_key(|input| input.edge_id);
 }
 
-/// The connection id used here is the index of the config graph edge that equates to the wanted
-/// connection
-fn sort_inputs_by_cnx_id(
-    input_msg_indices_types: &mut [(u32, String)],
-    plan: &[CuExecutionUnit],
-    graph: &CuGraph,
-    curr_node_id: NodeId,
-) {
-    input_msg_indices_types.sort_by(|(a_index, _), (b_index, _)| {
-        let a_edge_id = find_edge_with_plan_input_id(plan, graph, *a_index, curr_node_id);
-        let b_edge_id = find_edge_with_plan_input_id(plan, graph, *b_index, curr_node_id);
-        a_edge_id.cmp(&b_edge_id)
-    });
+fn collect_output_msg_types(graph: &CuGraph, node_id: NodeId) -> Vec<String> {
+    let mut edge_ids = graph.get_src_edges(node_id).unwrap_or_default();
+    edge_ids.sort();
+
+    let mut msg_types = Vec::new();
+    let mut seen = Vec::new();
+    for edge_id in edge_ids {
+        if let Some(edge) = graph.edge(edge_id) {
+            if seen.iter().any(|msg| msg == &edge.msg) {
+                continue;
+            }
+            seen.push(edge.msg.clone());
+            msg_types.push(edge.msg.clone());
+        }
+    }
+    msg_types
 }
 /// Explores a subbranch and build the partial plan out of it.
 fn plan_tasks_tree_branch(
@@ -540,85 +649,136 @@ fn plan_tasks_tree_branch(
     #[cfg(all(feature = "std", feature = "macro_debug"))]
     eprintln!("-- starting branch from node {starting_point}");
 
-    let mut visitor = Bfs::new(&graph.0, starting_point.into());
     let mut handled = false;
 
-    while let Some(node) = visitor.next(&graph.0) {
-        let id = node.index() as NodeId;
+    for id in graph.bfs_nodes(starting_point) {
         let node_ref = graph.get_node(id).unwrap();
         #[cfg(all(feature = "std", feature = "macro_debug"))]
         eprintln!("  Visiting node: {node_ref:?}");
 
-        let mut input_msg_indices_types: Vec<(u32, String)> = Vec::new();
-        let output_msg_index_type: Option<(u32, String)>;
+        let mut input_msg_indices_types: Vec<CuInputMsg> = Vec::new();
+        let output_msg_pack: Option<CuOutputPack>;
         let task_type = find_task_type_for_id(graph, id);
 
         match task_type {
             CuTaskType::Source => {
                 #[cfg(all(feature = "std", feature = "macro_debug"))]
                 eprintln!("    → Source node, assign output index {next_culist_output_index}");
-                output_msg_index_type = Some((
-                    next_culist_output_index,
-                    graph
-                        .0
-                        .edge_weight(EdgeIndex::new(graph.get_src_edges(id).unwrap()[0]))
-                        .unwrap() // FIXME(gbin): Error handling
-                        .msg
-                        .clone(),
-                ));
+                let msg_types = collect_output_msg_types(graph, id);
+                if msg_types.is_empty() {
+                    panic!(
+                        "Source node '{}' has no outgoing connections",
+                        node_ref.get_id()
+                    );
+                }
+                output_msg_pack = Some(CuOutputPack {
+                    culist_index: next_culist_output_index,
+                    msg_types,
+                });
                 next_culist_output_index += 1;
             }
             CuTaskType::Sink => {
-                let parents: Vec<NodeId> = graph.get_neighbor_ids(id, CuDirection::Incoming);
+                let mut edge_ids = graph.get_dst_edges(id).unwrap_or_default();
+                edge_ids.sort();
                 #[cfg(all(feature = "std", feature = "macro_debug"))]
-                eprintln!("    → Sink with parents: {parents:?}");
-                for parent in parents {
-                    let pid = parent;
-                    let index_type = find_output_index_type_from_nodeid(pid, plan);
-                    if let Some(index_type) = index_type {
+                eprintln!("    → Sink with incoming edges: {edge_ids:?}");
+                for edge_id in edge_ids {
+                    let edge = graph
+                        .edge(edge_id)
+                        .unwrap_or_else(|| panic!("Missing edge {edge_id} for node {id}"));
+                    let pid = graph
+                        .get_node_id_by_name(edge.src.as_str())
+                        .unwrap_or_else(|| {
+                            panic!("Missing source node '{}' for edge {edge_id}", edge.src)
+                        });
+                    let output_pack = find_output_pack_from_nodeid(pid, plan);
+                    if let Some(output_pack) = output_pack {
                         #[cfg(all(feature = "std", feature = "macro_debug"))]
-                        eprintln!("      ✓ Input from {pid} ready: {index_type:?}");
-                        input_msg_indices_types.push(index_type);
+                        eprintln!("      ✓ Input from {pid} ready: {output_pack:?}");
+                        let msg_type = edge.msg.as_str();
+                        let src_port = output_pack
+                            .msg_types
+                            .iter()
+                            .position(|msg| msg == msg_type)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "Missing output port for message type '{msg_type}' on node {pid}"
+                                )
+                            });
+                        input_msg_indices_types.push(CuInputMsg {
+                            culist_index: output_pack.culist_index,
+                            msg_type: msg_type.to_string(),
+                            src_port,
+                            edge_id,
+                        });
                     } else {
                         #[cfg(all(feature = "std", feature = "macro_debug"))]
                         eprintln!("      ✗ Input from {pid} not ready, returning");
                         return (next_culist_output_index, handled);
                     }
                 }
-                output_msg_index_type = Some((next_culist_output_index, "()".to_string()));
+                output_msg_pack = Some(CuOutputPack {
+                    culist_index: next_culist_output_index,
+                    msg_types: Vec::from(["()".to_string()]),
+                });
                 next_culist_output_index += 1;
             }
             CuTaskType::Regular => {
-                let parents: Vec<NodeId> = graph.get_neighbor_ids(id, CuDirection::Incoming);
+                let mut edge_ids = graph.get_dst_edges(id).unwrap_or_default();
+                edge_ids.sort();
                 #[cfg(all(feature = "std", feature = "macro_debug"))]
-                eprintln!("    → Regular task with parents: {parents:?}");
-                for parent in parents {
-                    let pid = parent;
-                    let index_type = find_output_index_type_from_nodeid(pid, plan);
-                    if let Some(index_type) = index_type {
+                eprintln!("    → Regular task with incoming edges: {edge_ids:?}");
+                for edge_id in edge_ids {
+                    let edge = graph
+                        .edge(edge_id)
+                        .unwrap_or_else(|| panic!("Missing edge {edge_id} for node {id}"));
+                    let pid = graph
+                        .get_node_id_by_name(edge.src.as_str())
+                        .unwrap_or_else(|| {
+                            panic!("Missing source node '{}' for edge {edge_id}", edge.src)
+                        });
+                    let output_pack = find_output_pack_from_nodeid(pid, plan);
+                    if let Some(output_pack) = output_pack {
                         #[cfg(all(feature = "std", feature = "macro_debug"))]
-                        eprintln!("      ✓ Input from {pid} ready: {index_type:?}");
-                        input_msg_indices_types.push(index_type);
+                        eprintln!("      ✓ Input from {pid} ready: {output_pack:?}");
+                        let msg_type = edge.msg.as_str();
+                        let src_port = output_pack
+                            .msg_types
+                            .iter()
+                            .position(|msg| msg == msg_type)
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "Missing output port for message type '{msg_type}' on node {pid}"
+                                )
+                            });
+                        input_msg_indices_types.push(CuInputMsg {
+                            culist_index: output_pack.culist_index,
+                            msg_type: msg_type.to_string(),
+                            src_port,
+                            edge_id,
+                        });
                     } else {
                         #[cfg(all(feature = "std", feature = "macro_debug"))]
                         eprintln!("      ✗ Input from {pid} not ready, returning");
                         return (next_culist_output_index, handled);
                     }
                 }
-                output_msg_index_type = Some((
-                    next_culist_output_index,
-                    graph
-                        .0
-                        .edge_weight(EdgeIndex::new(graph.get_src_edges(id).unwrap()[0])) // FIXME(gbin): Error handling and multimission
-                        .unwrap()
-                        .msg
-                        .clone(),
-                ));
+                let msg_types = collect_output_msg_types(graph, id);
+                if msg_types.is_empty() {
+                    panic!(
+                        "Regular node '{}' has no outgoing connections",
+                        node_ref.get_id()
+                    );
+                }
+                output_msg_pack = Some(CuOutputPack {
+                    culist_index: next_culist_output_index,
+                    msg_types,
+                });
                 next_culist_output_index += 1;
             }
         }
 
-        sort_inputs_by_cnx_id(&mut input_msg_indices_types, plan, graph, id);
+        sort_inputs_by_cnx_id(&mut input_msg_indices_types);
 
         if let Some(pos) = plan
             .iter()
@@ -639,7 +799,7 @@ fn plan_tasks_tree_branch(
                 node: node_ref.clone(),
                 task_type,
                 input_msg_indices_types,
-                output_msg_index_type,
+                output_msg_pack,
             };
             plan.push(CuExecutionUnit::Step(step));
         }
@@ -657,33 +817,22 @@ fn plan_tasks_tree_branch(
 pub fn compute_runtime_plan(graph: &CuGraph) -> CuResult<CuExecutionLoop> {
     #[cfg(all(feature = "std", feature = "macro_debug"))]
     eprintln!("[runtime plan]");
-    let visited = graph.0.visit_map();
     let mut plan = Vec::new();
     let mut next_culist_output_index = 0u32;
 
     let mut queue: VecDeque<NodeId> = graph
-        .node_indices()
-        .iter()
-        .filter(|&node| find_task_type_for_id(graph, node.index() as NodeId) == CuTaskType::Source)
-        .map(|node| node.index() as NodeId)
+        .node_ids()
+        .into_iter()
+        .filter(|&node_id| find_task_type_for_id(graph, node_id) == CuTaskType::Source)
         .collect();
 
     #[cfg(all(feature = "std", feature = "macro_debug"))]
     eprintln!("Initial source nodes: {queue:?}");
 
     while let Some(start_node) = queue.pop_front() {
-        if visited.is_visited(&start_node) {
-            #[cfg(all(feature = "std", feature = "macro_debug"))]
-            eprintln!("→ Skipping already visited source {start_node}");
-            continue;
-        }
-
         #[cfg(all(feature = "std", feature = "macro_debug"))]
         eprintln!("→ Starting BFS from source {start_node}");
-        let mut bfs = Bfs::new(&graph.0, start_node.into());
-
-        while let Some(node_index) = bfs.next(&graph.0) {
-            let node_id = node_index.index() as NodeId;
+        for node_id in graph.bfs_nodes(start_node) {
             let already_in_plan = plan
                 .iter()
                 .any(|unit| matches!(unit, CuExecutionUnit::Step(s) if s.node_id == node_id));
@@ -707,15 +856,38 @@ pub fn compute_runtime_plan(graph: &CuGraph) -> CuResult<CuExecutionLoop> {
 
             #[cfg(all(feature = "std", feature = "macro_debug"))]
             eprintln!("    ✓ Node {node_id} handled successfully, enqueueing neighbors");
-            for neighbor in graph.0.neighbors(node_index) {
-                if !visited.is_visited(&neighbor) {
-                    let nid = neighbor.index() as NodeId;
-                    #[cfg(all(feature = "std", feature = "macro_debug"))]
-                    eprintln!("      → Enqueueing neighbor {nid}");
-                    queue.push_back(nid);
-                }
+            for neighbor in graph.get_neighbor_ids(node_id, CuDirection::Outgoing) {
+                #[cfg(all(feature = "std", feature = "macro_debug"))]
+                eprintln!("      → Enqueueing neighbor {neighbor}");
+                queue.push_back(neighbor);
             }
         }
+    }
+
+    let mut planned_nodes = BTreeSet::new();
+    for unit in &plan {
+        if let CuExecutionUnit::Step(step) = unit {
+            planned_nodes.insert(step.node_id);
+        }
+    }
+
+    let mut missing = Vec::new();
+    for node_id in graph.node_ids() {
+        if !planned_nodes.contains(&node_id) {
+            if let Some(node) = graph.get_node(node_id) {
+                missing.push(node.get_id().to_string());
+            } else {
+                missing.push(format!("node_id_{node_id}"));
+            }
+        }
+    }
+
+    if !missing.is_empty() {
+        missing.sort();
+        return Err(CuError::from(format!(
+            "Execution plan could not include all nodes. Missing: {}. Check for loopback or missing source connections.",
+            missing.join(", ")
+        )));
     }
 
     Ok(CuExecutionLoop {
@@ -734,15 +906,16 @@ mod tests {
     use crate::monitoring::NoMonitor;
     use bincode::Encode;
     use cu29_traits::{ErasedCuStampedData, ErasedCuStampedDataSet, MatchingTasks};
-    use serde_derive::Serialize;
+    use serde_derive::{Deserialize, Serialize};
 
     pub struct TestSource {}
 
     impl Freezable for TestSource {}
 
     impl CuSrcTask for TestSource {
+        type Resources<'r> = ();
         type Output<'m> = ();
-        fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+        fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
         where
             Self: Sized,
         {
@@ -763,9 +936,10 @@ mod tests {
     impl Freezable for TestSink {}
 
     impl CuSinkTask for TestSink {
+        type Resources<'r> = ();
         type Input<'m> = ();
 
-        fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+        fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
         where
             Self: Sized,
         {
@@ -780,7 +954,7 @@ mod tests {
     // Those should be generated by the derive macro
     type Tasks = (TestSource, TestSink);
 
-    #[derive(Debug, Encode, Decode, Serialize, Default)]
+    #[derive(Debug, Encode, Decode, Serialize, Deserialize, Default)]
     struct Msgs(());
 
     impl ErasedCuStampedDataSet for Msgs {
@@ -802,19 +976,22 @@ mod tests {
     #[cfg(feature = "std")]
     fn tasks_instanciator(
         all_instances_configs: Vec<Option<&ComponentConfig>>,
-        _threadpool: Arc<ThreadPool>,
+        _resources: &mut ResourceManager,
     ) -> CuResult<Tasks> {
         Ok((
-            TestSource::new(all_instances_configs[0])?,
-            TestSink::new(all_instances_configs[1])?,
+            TestSource::new(all_instances_configs[0], ())?,
+            TestSink::new(all_instances_configs[1], ())?,
         ))
     }
 
     #[cfg(not(feature = "std"))]
-    fn tasks_instanciator(all_instances_configs: Vec<Option<&ComponentConfig>>) -> CuResult<Tasks> {
+    fn tasks_instanciator(
+        all_instances_configs: Vec<Option<&ComponentConfig>>,
+        _resources: &mut ResourceManager,
+    ) -> CuResult<Tasks> {
         Ok((
-            TestSource::new(all_instances_configs[0])?,
-            TestSink::new(all_instances_configs[1])?,
+            TestSource::new(all_instances_configs[0], ())?,
+            TestSink::new(all_instances_configs[1], ())?,
         ))
     }
 
@@ -822,8 +999,12 @@ mod tests {
         NoMonitor {}
     }
 
-    fn bridges_instanciator(_config: &CuConfig) -> CuResult<()> {
+    fn bridges_instanciator(_config: &CuConfig, _resources: &mut ResourceManager) -> CuResult<()> {
         Ok(())
+    }
+
+    fn resources_instanciator(_config: &CuConfig) -> CuResult<ResourceManager> {
+        Ok(ResourceManager::new(&[]))
     }
 
     #[derive(Debug)]
@@ -846,6 +1027,7 @@ mod tests {
             RobotClock::default(),
             &config,
             None,
+            resources_instanciator,
             tasks_instanciator,
             monitor_instanciator,
             bridges_instanciator,
@@ -867,6 +1049,7 @@ mod tests {
             RobotClock::default(),
             &config,
             None,
+            resources_instanciator,
             tasks_instanciator,
             monitor_instanciator,
             bridges_instanciator,
@@ -971,8 +1154,100 @@ mod tests {
 
         // since the src2 connection was added before src1 connection, the src2 type should be
         // first
-        assert_eq!(sink_step.input_msg_indices_types[0].1, src2_type);
-        assert_eq!(sink_step.input_msg_indices_types[1].1, src1_type);
+        assert_eq!(sink_step.input_msg_indices_types[0].msg_type, src2_type);
+        assert_eq!(sink_step.input_msg_indices_types[1].msg_type, src1_type);
+    }
+
+    #[test]
+    fn test_runtime_output_ports_unique_ordered() {
+        let mut config = CuConfig::default();
+        let graph = config.get_graph_mut(None).unwrap();
+        let src_id = graph.add_node(Node::new("src", "Source")).unwrap();
+        let dst_a_id = graph.add_node(Node::new("dst_a", "SinkA")).unwrap();
+        let dst_b_id = graph.add_node(Node::new("dst_b", "SinkB")).unwrap();
+        let dst_a2_id = graph.add_node(Node::new("dst_a2", "SinkA2")).unwrap();
+        let dst_c_id = graph.add_node(Node::new("dst_c", "SinkC")).unwrap();
+
+        graph.connect(src_id, dst_a_id, "msg::A").unwrap();
+        graph.connect(src_id, dst_b_id, "msg::B").unwrap();
+        graph.connect(src_id, dst_a2_id, "msg::A").unwrap();
+        graph.connect(src_id, dst_c_id, "msg::C").unwrap();
+
+        let runtime = compute_runtime_plan(graph).unwrap();
+        let src_step = runtime
+            .steps
+            .iter()
+            .find_map(|step| match step {
+                CuExecutionUnit::Step(step) if step.node_id == src_id => Some(step),
+                _ => None,
+            })
+            .unwrap();
+
+        let output_pack = src_step.output_msg_pack.as_ref().unwrap();
+        assert_eq!(output_pack.msg_types, vec!["msg::A", "msg::B", "msg::C"]);
+
+        let dst_a_step = runtime
+            .steps
+            .iter()
+            .find_map(|step| match step {
+                CuExecutionUnit::Step(step) if step.node_id == dst_a_id => Some(step),
+                _ => None,
+            })
+            .unwrap();
+        let dst_b_step = runtime
+            .steps
+            .iter()
+            .find_map(|step| match step {
+                CuExecutionUnit::Step(step) if step.node_id == dst_b_id => Some(step),
+                _ => None,
+            })
+            .unwrap();
+        let dst_a2_step = runtime
+            .steps
+            .iter()
+            .find_map(|step| match step {
+                CuExecutionUnit::Step(step) if step.node_id == dst_a2_id => Some(step),
+                _ => None,
+            })
+            .unwrap();
+        let dst_c_step = runtime
+            .steps
+            .iter()
+            .find_map(|step| match step {
+                CuExecutionUnit::Step(step) if step.node_id == dst_c_id => Some(step),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(dst_a_step.input_msg_indices_types[0].src_port, 0);
+        assert_eq!(dst_b_step.input_msg_indices_types[0].src_port, 1);
+        assert_eq!(dst_a2_step.input_msg_indices_types[0].src_port, 0);
+        assert_eq!(dst_c_step.input_msg_indices_types[0].src_port, 2);
+    }
+
+    #[test]
+    fn test_runtime_output_ports_fanout_single() {
+        let mut config = CuConfig::default();
+        let graph = config.get_graph_mut(None).unwrap();
+        let src_id = graph.add_node(Node::new("src", "Source")).unwrap();
+        let dst_a_id = graph.add_node(Node::new("dst_a", "SinkA")).unwrap();
+        let dst_b_id = graph.add_node(Node::new("dst_b", "SinkB")).unwrap();
+
+        graph.connect(src_id, dst_a_id, "i32").unwrap();
+        graph.connect(src_id, dst_b_id, "i32").unwrap();
+
+        let runtime = compute_runtime_plan(graph).unwrap();
+        let src_step = runtime
+            .steps
+            .iter()
+            .find_map(|step| match step {
+                CuExecutionUnit::Step(step) if step.node_id == src_id => Some(step),
+                _ => None,
+            })
+            .unwrap();
+
+        let output_pack = src_step.output_msg_pack.as_ref().unwrap();
+        assert_eq!(output_pack.msg_types, vec!["i32"]);
     }
 
     #[test]
@@ -1011,8 +1286,8 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(broadcast_step.input_msg_indices_types[0].1, "i32");
-        assert_eq!(broadcast_step.input_msg_indices_types[1].1, "f32");
+        assert_eq!(broadcast_step.input_msg_indices_types[0].msg_type, "i32");
+        assert_eq!(broadcast_step.input_msg_indices_types[1].msg_type, "f32");
     }
 
     #[test]
@@ -1051,7 +1326,7 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(broadcast_step.input_msg_indices_types[0].1, "i32");
-        assert_eq!(broadcast_step.input_msg_indices_types[1].1, "f32");
+        assert_eq!(broadcast_step.input_msg_indices_types[0].msg_type, "i32");
+        assert_eq!(broadcast_step.input_msg_indices_types[1].msg_type, "f32");
     }
 }

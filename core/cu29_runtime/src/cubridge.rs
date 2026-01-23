@@ -4,28 +4,12 @@
 
 use crate::config::ComponentConfig;
 use crate::cutask::{CuMsg, CuMsgPayload, Freezable};
+use alloc::borrow::Cow;
+use alloc::string::String;
+use core::fmt::{Debug, Formatter};
 use core::marker::PhantomData;
 use cu29_clock::RobotClock;
 use cu29_traits::CuResult;
-
-#[cfg(not(feature = "std"))]
-use alloc::borrow::Cow;
-
-#[cfg(feature = "std")]
-use std::borrow::Cow;
-
-#[cfg(not(feature = "std"))]
-mod imp {
-    pub use alloc::fmt::{Debug, Formatter};
-    pub use alloc::string::String;
-}
-
-#[cfg(feature = "std")]
-mod imp {
-    pub use std::fmt::{Debug, Formatter};
-}
-
-use imp::*;
 
 /// Compile-time description of a single bridge channel, including the message type carried on it.
 ///
@@ -174,6 +158,8 @@ pub trait CuBridge: Freezable {
     type Tx: BridgeChannelSet;
     /// Incoming channels (external world -> Copper).
     type Rx: BridgeChannelSet;
+    /// Resources required by the bridge.
+    type Resources<'r>;
 
     /// Constructs a new bridge.
     ///
@@ -183,6 +169,7 @@ pub trait CuBridge: Freezable {
         config: Option<&ComponentConfig>,
         tx_channels: &[BridgeChannelConfig<<Self::Tx as BridgeChannelSet>::Id>],
         rx_channels: &[BridgeChannelConfig<<Self::Rx as BridgeChannelSet>::Id>],
+        resources: Self::Resources<'_>,
     ) -> CuResult<Self>
     where
         Self: Sized;
@@ -481,13 +468,10 @@ mod tests {
     use super::*;
     use crate::config::ComponentConfig;
     use crate::cutask::CuMsg;
-    #[cfg(not(feature = "std"))]
     use alloc::vec::Vec;
     use cu29_clock::RobotClock;
     use cu29_traits::CuError;
     use serde::{Deserialize, Serialize};
-    #[cfg(feature = "std")]
-    use std::vec::Vec;
 
     // ---- Generated channel payload stubs (Copper build output) ---------------
     #[derive(Clone, Debug, Default, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
@@ -583,6 +567,7 @@ mod tests {
     impl Freezable for ExampleBridge {}
 
     impl CuBridge for ExampleBridge {
+        type Resources<'r> = ();
         type Tx = TxChannels;
         type Rx = RxChannels;
 
@@ -590,12 +575,13 @@ mod tests {
             config: Option<&ComponentConfig>,
             _tx_channels: &[BridgeChannelConfig<TxId>],
             _rx_channels: &[BridgeChannelConfig<RxId>],
+            _resources: Self::Resources<'_>,
         ) -> CuResult<Self> {
             let mut instance = ExampleBridge::default();
-            if let Some(cfg) = config {
-                if let Some(port) = cfg.get::<String>("port") {
-                    instance.port = port;
-                }
+            if let Some(cfg) = config
+                && let Some(port) = cfg.get::<String>("port")?
+            {
+                instance.port = port;
             }
             Ok(instance)
         }
@@ -717,8 +703,9 @@ mod tests {
             Some("custom/motor".to_string())
         );
 
-        let mut bridge = ExampleBridge::new(Some(&bridge_cfg), &tx_descriptors, &rx_descriptors)
-            .expect("bridge should build");
+        let mut bridge =
+            ExampleBridge::new(Some(&bridge_cfg), &tx_descriptors, &rx_descriptors, ())
+                .expect("bridge should build");
 
         assert_eq!(bridge.port, "ttyUSB0");
 

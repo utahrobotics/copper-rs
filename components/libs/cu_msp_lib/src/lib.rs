@@ -1,45 +1,30 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
-#[cfg(not(feature = "std"))]
 extern crate alloc;
 
 pub mod commands;
 pub mod structs;
 
-// std implementation
+use core::{
+    fmt::{self, Debug, Display, Formatter},
+    mem,
+};
 #[cfg(feature = "std")]
-mod std_impl {
-    pub use std::{
-        error::Error,
-        fmt::{self, Debug, Display, Formatter},
-        mem,
-    };
-}
-
-// no-std implementation
-#[cfg(not(feature = "std"))]
-mod no_std_impl {
-    pub use core::{
-        fmt::{self, Debug, Display, Formatter},
-        mem,
-    };
-}
-
-#[cfg(not(feature = "std"))]
-use no_std_impl::*;
-#[cfg(feature = "std")]
-use std_impl::*;
+use std::error::Error;
 
 use crc_any::CRCu8;
-use packed_struct::PackedStruct;
-use smallvec::SmallVec;
+use heapless::Vec as HeaplessVec;
+use packed_struct::{PackedStruct, types::bits::ByteArray as PackedByteArray};
 
 #[derive(Clone, PartialEq)]
-pub struct MspPacketData(pub(crate) SmallVec<[u8; 256]>);
+pub struct MspPacketData(pub(crate) MspPacketDataBuffer);
+pub const MSP_MAX_PAYLOAD_LEN: usize = 255;
+const MSP_V2_FRAME_ID: u8 = 255;
+pub(crate) type MspPacketDataBuffer = HeaplessVec<u8, MSP_MAX_PAYLOAD_LEN>;
 
 impl MspPacketData {
     pub(crate) fn new() -> MspPacketData {
-        MspPacketData(SmallVec::new())
+        MspPacketData(MspPacketDataBuffer::new())
     }
 
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
@@ -66,7 +51,9 @@ impl Debug for MspPacketData {
 
 impl From<&[u8]> for MspPacketData {
     fn from(data: &[u8]) -> Self {
-        MspPacketData(SmallVec::from_slice(data))
+        let data = MspPacketDataBuffer::from_slice(data)
+            .expect("MSP packet payload exceeds MSP_MAX_PAYLOAD_LEN");
+        MspPacketData(data)
     }
 }
 
@@ -114,6 +101,9 @@ impl Display for MspPacketParseError {
 #[cfg(feature = "std")]
 impl Error for MspPacketParseError {}
 
+#[cfg(not(feature = "std"))]
+impl core::error::Error for MspPacketParseError {}
+
 /// Packet's desired destination
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum MspPacketDirection {
@@ -135,6 +125,19 @@ impl MspPacketDirection {
         };
         b as u8
     }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MspParsedVersion {
+    V1,
+    V2Native,
+    V2OverV1,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct MspPacketInfo {
+    pub version: MspParsedVersion,
+    pub cmd: u16,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -176,6 +179,7 @@ pub struct MspParser {
     packet_data: MspPacketData,
     packet_crc: u8,
     packet_crc_v2: CRCu8,
+    last_packet_info: Option<MspPacketInfo>,
 }
 
 impl MspParser {
@@ -190,12 +194,17 @@ impl MspParser {
             packet_data: MspPacketData::new(),
             packet_crc: 0,
             packet_crc_v2: CRCu8::crc8dvb_s2(),
+            last_packet_info: None,
         }
     }
 
     /// Are we waiting for the header of a brand new packet?
     pub fn state_is_between_packets(&self) -> bool {
         self.state == MspParserState::Header1
+    }
+
+    pub fn last_packet_info(&self) -> Option<MspPacketInfo> {
+        self.last_packet_info
     }
 
     /// Parse the next input byte. Returns a valid packet whenever a full packet is received, otherwise
@@ -248,9 +257,16 @@ impl MspParser {
             }
 
             MspParserState::CommandV2 => {
-                let MspPacketData(data) = &mut self.packet_data;
-                data.push(input);
+                let overflow = {
+                    let MspPacketData(data) = &mut self.packet_data;
+                    data.push(input).is_err()
+                };
+                if overflow {
+                    self.reset();
+                    return Err(MspPacketParseError::InvalidDataLength);
+                }
 
+                let MspPacketData(data) = &mut self.packet_data;
                 if data.len() == 2 {
                     let mut s = [0u8; core::mem::size_of::<u16>()];
                     s.copy_from_slice(data);
@@ -263,13 +279,24 @@ impl MspParser {
             }
 
             MspParserState::DataLengthV2 => {
-                let MspPacketData(data) = &mut self.packet_data;
-                data.push(input);
+                let overflow = {
+                    let MspPacketData(data) = &mut self.packet_data;
+                    data.push(input).is_err()
+                };
+                if overflow {
+                    self.reset();
+                    return Err(MspPacketParseError::InvalidDataLength);
+                }
 
+                let MspPacketData(data) = &mut self.packet_data;
                 if data.len() == 2 {
                     let mut s = [0u8; core::mem::size_of::<u16>()];
                     s.copy_from_slice(data);
                     self.packet_data_length_remaining = u16::from_le_bytes(s).into();
+                    if self.packet_data_length_remaining > MSP_MAX_PAYLOAD_LEN {
+                        self.reset();
+                        return Err(MspPacketParseError::InvalidDataLength);
+                    }
                     self.packet_crc_v2.digest(data);
                     data.clear();
                     if self.packet_data_length_remaining == 0 {
@@ -281,8 +308,14 @@ impl MspParser {
             }
 
             MspParserState::DataV2 => {
-                let MspPacketData(data) = &mut self.packet_data;
-                data.push(input);
+                let overflow = {
+                    let MspPacketData(data) = &mut self.packet_data;
+                    data.push(input).is_err()
+                };
+                if overflow {
+                    self.reset();
+                    return Err(MspPacketParseError::InvalidDataLength);
+                }
                 self.packet_data_length_remaining -= 1;
 
                 if self.packet_data_length_remaining == 0 {
@@ -311,8 +344,14 @@ impl MspParser {
             }
 
             MspParserState::Data => {
-                let MspPacketData(data) = &mut self.packet_data;
-                data.push(input);
+                let overflow = {
+                    let MspPacketData(data) = &mut self.packet_data;
+                    data.push(input).is_err()
+                };
+                if overflow {
+                    self.reset();
+                    return Err(MspPacketParseError::InvalidDataLength);
+                }
                 self.packet_data_length_remaining -= 1;
 
                 self.packet_crc ^= input;
@@ -341,10 +380,55 @@ impl MspParser {
                 let mut n = MspPacketData::new();
                 mem::swap(&mut self.packet_data, &mut n);
 
-                let packet = MspPacket {
-                    cmd: self.packet_cmd,
-                    direction: self.packet_direction,
-                    data: n,
+                let packet = if self.packet_version == MspVersion::V1
+                    && self.packet_cmd == u16::from(MSP_V2_FRAME_ID)
+                {
+                    let raw = n.as_slice();
+                    if raw.len() < 6 {
+                        self.reset();
+                        return Err(MspPacketParseError::InvalidDataLength);
+                    }
+                    let cmd = u16::from_le_bytes([raw[1], raw[2]]);
+                    let payload_len = u16::from_le_bytes([raw[3], raw[4]]) as usize;
+                    let v2_end = 5 + payload_len;
+                    if raw.len() < v2_end + 1 {
+                        self.reset();
+                        return Err(MspPacketParseError::InvalidDataLength);
+                    }
+                    let v2_crc = raw[v2_end];
+                    let mut crc = CRCu8::crc8dvb_s2();
+                    crc.digest(&raw[..v2_end]);
+                    let calculated = crc.get_crc();
+                    if v2_crc != calculated {
+                        self.reset();
+                        return Err(MspPacketParseError::CrcMismatch {
+                            expected: v2_crc,
+                            calculated,
+                        });
+                    }
+                    self.last_packet_info = Some(MspPacketInfo {
+                        version: MspParsedVersion::V2OverV1,
+                        cmd,
+                    });
+                    MspPacket {
+                        cmd,
+                        direction: self.packet_direction,
+                        data: MspPacketData::from(&raw[5..v2_end]),
+                    }
+                } else {
+                    let version = match self.packet_version {
+                        MspVersion::V1 => MspParsedVersion::V1,
+                        MspVersion::V2 => MspParsedVersion::V2Native,
+                    };
+                    self.last_packet_info = Some(MspPacketInfo {
+                        version,
+                        cmd: self.packet_cmd,
+                    });
+                    MspPacket {
+                        cmd: self.packet_cmd,
+                        direction: self.packet_direction,
+                        data: n,
+                    }
                 };
 
                 self.reset();
@@ -377,6 +461,10 @@ impl Default for MspParser {
 impl MspPacket {
     /// Number of bytes that this packet requires to be packed
     pub fn packet_size_bytes(&self) -> usize {
+        if self.cmd > u16::from(MSP_V2_FRAME_ID) {
+            return self.packet_size_bytes_v2_over_v1();
+        }
+
         let MspPacketData(data) = &self.data;
         6 + data.len()
     }
@@ -387,8 +475,18 @@ impl MspPacket {
         9 + data.len()
     }
 
+    /// Number of bytes that this packet requires to be packed as MSPv2 over MSPv1.
+    pub fn packet_size_bytes_v2_over_v1(&self) -> usize {
+        let MspPacketData(data) = &self.data;
+        12 + data.len()
+    }
+
     /// Serialize to network bytes
     pub fn serialize(&self, output: &mut [u8]) -> Result<(), MspPacketParseError> {
+        if self.cmd > u16::from(MSP_V2_FRAME_ID) {
+            return self.serialize_v2_over_v1(output);
+        }
+
         let MspPacketData(data) = &self.data;
         let l = output.len();
 
@@ -438,8 +536,46 @@ impl MspPacket {
         Ok(())
     }
 
-    pub fn decode_as<T: PackedStruct>(&self) -> Result<T, packed_struct::PackingError> {
-        let expected_size = core::mem::size_of::<T::ByteArray>();
+    /// Serialize to MSPv2-over-MSPv1 (MSP_V2_FRAME) bytes.
+    pub fn serialize_v2_over_v1(&self, output: &mut [u8]) -> Result<(), MspPacketParseError> {
+        let MspPacketData(data) = &self.data;
+        let l = output.len();
+
+        if l != self.packet_size_bytes_v2_over_v1() {
+            return Err(MspPacketParseError::OutputBufferSizeMismatch);
+        }
+
+        let v1_payload_len = data.len() + 6;
+        output[0] = b'$';
+        output[1] = b'M';
+        output[2] = self.direction.to_byte();
+        output[3] = v1_payload_len as u8;
+        output[4] = MSP_V2_FRAME_ID;
+
+        output[5] = 0; // flags
+        output[6..8].copy_from_slice(&self.cmd.to_le_bytes());
+        output[8..10].copy_from_slice(&(data.len() as u16).to_le_bytes());
+        output[10..10 + data.len()].copy_from_slice(data);
+
+        let mut crc_v2 = CRCu8::crc8dvb_s2();
+        crc_v2.digest(&output[5..10 + data.len()]);
+        output[10 + data.len()] = crc_v2.get_crc();
+
+        let mut crc = output[3] ^ output[4];
+        for b in &output[5..11 + data.len()] {
+            crc ^= *b;
+        }
+        output[l - 1] = crc;
+
+        Ok(())
+    }
+
+    pub fn decode_as<T>(&self) -> Result<T, packed_struct::PackingError>
+    where
+        T: PackedStruct,
+        for<'a> &'a T::ByteArray: TryFrom<&'a [u8]>,
+    {
+        let expected_size = <T::ByteArray as PackedByteArray>::len();
 
         if self.data.0.len() < expected_size {
             return Err(packed_struct::PackingError::BufferSizeMismatch {
@@ -448,7 +584,13 @@ impl MspPacket {
             });
         }
 
-        let byte_array: &T::ByteArray = unsafe { &*(self.data.0.as_ptr() as *const T::ByteArray) };
+        let data = &self.data.0[..expected_size];
+        let byte_array: &T::ByteArray =
+            data.try_into()
+                .map_err(|_| packed_struct::PackingError::BufferSizeMismatch {
+                    expected: expected_size,
+                    actual: data.len(),
+                })?;
 
         T::unpack(byte_array)
     }
@@ -457,13 +599,12 @@ impl MspPacket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smallvec::smallvec;
     #[test]
     fn test_serialize() {
         let packet = MspPacket {
             cmd: 2,
             direction: MspPacketDirection::ToFlightController,
-            data: MspPacketData(smallvec![0xbe, 0xef]),
+            data: MspPacketData::from(&[0xbeu8, 0xef][..]),
         };
 
         let size = packet.packet_size_bytes();
@@ -516,7 +657,7 @@ mod tests {
             let packet = MspPacket {
                 cmd: 1,
                 direction: MspPacketDirection::ToFlightController,
-                data: MspPacketData(smallvec![0x00, 0x00, 0x00]),
+                data: MspPacketData::from(&[0x00u8, 0x00, 0x00][..]),
             };
             roundtrip(&packet);
         }
@@ -534,7 +675,7 @@ mod tests {
             let packet = MspPacket {
                 cmd: 100,
                 direction: MspPacketDirection::Unsupported,
-                data: MspPacketData(smallvec![0x44, 0x20, 0x00, 0x80]),
+                data: MspPacketData::from(&[0x44u8, 0x20, 0x00, 0x80][..]),
             };
             roundtrip(&packet);
         }

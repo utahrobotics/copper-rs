@@ -1,4 +1,3 @@
-#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use bincode::de::Decoder;
 use bincode::error::DecodeError;
@@ -7,18 +6,16 @@ use core::fmt::Debug;
 use cu29::prelude::{ArrayLike, CuHandle};
 #[allow(unused_imports)]
 use cu29::{CuError, CuResult};
-#[cfg(feature = "std")]
-use std::vec::Vec;
 
 #[cfg(feature = "image")]
 use image::{ImageBuffer, Pixel};
 #[cfg(feature = "kornia")]
-use kornia_image::allocator::ImageAllocator;
-#[cfg(feature = "kornia")]
 use kornia_image::Image;
-use serde::{Serialize, Serializer};
+#[cfg(feature = "kornia")]
+use kornia_image::allocator::ImageAllocator;
+use serde::{Deserialize, Serialize, Serializer};
 
-#[derive(Default, Debug, Encode, Decode, Clone, Copy, Serialize)]
+#[derive(Default, Debug, Encode, Decode, Clone, Copy, Serialize, Deserialize)]
 pub struct CuImageBufferFormat {
     pub width: u32,
     pub height: u32,
@@ -53,6 +50,27 @@ impl Decode<()> for CuImage<Vec<u8>> {
             seq,
             format,
             buffer_handle,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for CuImage<Vec<u8>> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct CuImageWire {
+            seq: u64,
+            format: CuImageBufferFormat,
+            handle: Vec<u8>,
+        }
+
+        let wire = CuImageWire::deserialize(deserializer)?;
+        Ok(Self {
+            seq: wire.seq,
+            format: wire.format,
+            buffer_handle: CuHandle::new_detached(wire.handle),
         })
     }
 }
@@ -107,9 +125,12 @@ where
             "STRIDE must equal WIDTH for ImageBuffer compatibility."
         );
 
-        let raw_pixels: &[P::Subpixel] = self.buffer_handle.with_inner(|inner| unsafe {
-            let data: &[u8] = inner;
-            core::slice::from_raw_parts(data.as_ptr() as *const P::Subpixel, data.len())
+        let raw_pixels: &[P::Subpixel] = self.buffer_handle.with_inner(|inner| {
+            // SAFETY: The buffer is contiguous, aligned for P::Subpixel (typically u8), and large enough.
+            unsafe {
+                let data: &[u8] = inner;
+                core::slice::from_raw_parts(data.as_ptr() as *const P::Subpixel, data.len())
+            }
         });
         ImageBuffer::from_raw(width, height, raw_pixels)
             .ok_or("Could not create the image:: buffer".into())
@@ -129,14 +150,18 @@ where
         );
 
         let size = width * height * C;
-        let raw_pixels: &[T] = self.buffer_handle.with_inner(|inner| unsafe {
-            let data: &[u8] = inner;
-            core::slice::from_raw_parts(
-                data.as_ptr() as *const T,
-                data.len() / core::mem::size_of::<T>(),
-            )
+        let raw_pixels: &[T] = self.buffer_handle.with_inner(|inner| {
+            // SAFETY: The buffer is aligned for T, its length is a multiple of T, and it lives long enough.
+            unsafe {
+                let data: &[u8] = inner;
+                core::slice::from_raw_parts(
+                    data.as_ptr() as *const T,
+                    data.len() / core::mem::size_of::<T>(),
+                )
+            }
         });
 
+        // SAFETY: raw_pixels points to size elements laid out for the requested shape.
         unsafe { Image::from_raw_parts([height, width].into(), raw_pixels.as_ptr(), size, k) }
             .map_err(|e| CuError::new_with_cause("Could not create a Kornia Image", e))
     }

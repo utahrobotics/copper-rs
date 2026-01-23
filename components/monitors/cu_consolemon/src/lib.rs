@@ -11,9 +11,10 @@ use cu29::clock::{CuDuration, RobotClock};
 use cu29::config::CuConfig;
 use cu29::cutask::CuMsgMetadata;
 use cu29::monitoring::{
-    ComponentKind, CuDurationStatistics, CuMonitor, CuTaskState, Decision, MonitorTopology,
+    ComponentKind, CopperListInfo, CopperListIoStats, CuDurationStatistics, CuMonitor, CuTaskState,
+    Decision, MonitorTopology,
 };
-use cu29::prelude::{pool, CuCompactString, CuTime};
+use cu29::prelude::{CuCompactString, CuTime, pool};
 use cu29::{CuError, CuResult};
 #[cfg(feature = "debug_pane")]
 use debug_pane::UIExt;
@@ -21,41 +22,110 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode};
 use ratatui::crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use ratatui::crossterm::tty::IsTty;
 use ratatui::crossterm::{event, execute};
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Size};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Size};
+use ratatui::prelude::Stylize;
 use ratatui::prelude::{Backend, Rect};
-use ratatui::prelude::{Stylize, Widget};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, StatefulWidget, Table};
+use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, StatefulWidget, Table};
 use ratatui::{Frame, Terminal};
+use std::backtrace::Backtrace;
 use std::fmt::{Display, Formatter};
-use std::io::stdout;
+use std::io::{Write, stdin, stdout};
 use std::marker::PhantomData;
+use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use std::{collections::HashMap, io, panic, thread};
+use std::{collections::HashMap, io, thread};
 use tui_widgets::scrollview::{ScrollView, ScrollViewState};
 
-#[cfg(feature = "debug_pane")]
-const MENU_CONTENT: &str =
-    "   [1] SysInfo  [2] DAG  [3] Latencies  [4] Memory Pools [5] Debug Output  [q] Quit | Scroll: hjkl or ↑↓←→   ";
-#[cfg(not(feature = "debug_pane"))]
-const MENU_CONTENT: &str =
-    "   [1] SysInfo  [2] DAG  [3] Latencies  [4] Memory Pools [q] Quit | Scroll: hjkl or ↑↓←→   ";
+#[derive(Clone, Copy)]
+struct TabDef {
+    screen: Screen,
+    label: &'static str,
+    key: &'static str,
+}
 
-#[derive(PartialEq)]
+#[cfg(feature = "debug_pane")]
+const TAB_DEFS: &[TabDef] = &[
+    TabDef {
+        screen: Screen::Neofetch,
+        label: "SYS",
+        key: "1",
+    },
+    TabDef {
+        screen: Screen::Dag,
+        label: "DAG",
+        key: "2",
+    },
+    TabDef {
+        screen: Screen::Latency,
+        label: "LAT",
+        key: "3",
+    },
+    TabDef {
+        screen: Screen::CopperList,
+        label: "BW",
+        key: "4",
+    },
+    TabDef {
+        screen: Screen::MemoryPools,
+        label: "MEM",
+        key: "5",
+    },
+    TabDef {
+        screen: Screen::DebugOutput,
+        label: "LOG",
+        key: "6",
+    },
+];
+
+#[cfg(not(feature = "debug_pane"))]
+const TAB_DEFS: &[TabDef] = &[
+    TabDef {
+        screen: Screen::Neofetch,
+        label: "SYS",
+        key: "1",
+    },
+    TabDef {
+        screen: Screen::Dag,
+        label: "DAG",
+        key: "2",
+    },
+    TabDef {
+        screen: Screen::Latency,
+        label: "LAT",
+        key: "3",
+    },
+    TabDef {
+        screen: Screen::CopperList,
+        label: "BW",
+        key: "4",
+    },
+    TabDef {
+        screen: Screen::MemoryPools,
+        label: "MEM",
+        key: "5",
+    },
+];
+
+const COPPERLIST_RATE_WINDOW: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Copy, PartialEq)]
 enum Screen {
     Neofetch,
     Dag,
     Latency,
+    MemoryPools,
+    CopperList,
     #[cfg(feature = "debug_pane")]
     DebugOutput,
-    MemoryPools,
 }
 
 struct TaskStats {
@@ -138,6 +208,71 @@ impl PoolStats {
     }
 }
 
+struct CopperListStats {
+    size_bytes: usize,
+    raw_culist_bytes: u64,
+    handle_bytes: u64,
+    encoded_bytes: u64,
+    keyframe_bytes: u64,
+    structured_total_bytes: u64,
+    structured_bytes_per_cl: u64,
+    total_copperlists: u64,
+    window_copperlists: u64,
+    last_rate_at: Instant,
+    rate_hz: f64,
+}
+
+impl CopperListStats {
+    fn new() -> Self {
+        Self {
+            size_bytes: 0,
+            raw_culist_bytes: 0,
+            handle_bytes: 0,
+            encoded_bytes: 0,
+            keyframe_bytes: 0,
+            structured_total_bytes: 0,
+            structured_bytes_per_cl: 0,
+            total_copperlists: 0,
+            window_copperlists: 0,
+            last_rate_at: Instant::now(),
+            rate_hz: 0.0,
+        }
+    }
+
+    fn set_info(&mut self, info: CopperListInfo) {
+        self.size_bytes = info.size_bytes;
+        let _ = info.count;
+    }
+
+    fn update_io(&mut self, stats: cu29::monitoring::CopperListIoStats) {
+        self.raw_culist_bytes = stats.raw_culist_bytes;
+        self.handle_bytes = stats.handle_bytes;
+        self.encoded_bytes = stats.encoded_culist_bytes;
+        self.keyframe_bytes = stats.keyframe_bytes;
+        let total = stats.structured_log_bytes_total;
+        self.structured_bytes_per_cl = total.saturating_sub(self.structured_total_bytes);
+        self.structured_total_bytes = total;
+    }
+
+    fn update_rate(&mut self) {
+        self.total_copperlists = self.total_copperlists.saturating_add(1);
+        self.window_copperlists = self.window_copperlists.saturating_add(1);
+
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.last_rate_at);
+        if elapsed >= COPPERLIST_RATE_WINDOW {
+            let elapsed_secs = elapsed.as_secs_f64();
+            self.rate_hz = if elapsed_secs > 0.0 {
+                self.window_copperlists as f64 / elapsed_secs
+            } else {
+                0.0
+            };
+            self.window_copperlists = 0;
+            self.last_rate_at = now;
+        }
+    }
+}
+
 fn compute_end_to_end_latency(msgs: &[&CuMsgMetadata]) -> CuDuration {
     let start = msgs.first().map(|m| m.process_time.start);
     let end = msgs.last().map(|m| m.process_time.end);
@@ -149,6 +284,21 @@ fn compute_end_to_end_latency(msgs: &[&CuMsgMetadata]) -> CuDuration {
             _ => CuDuration::MIN,
         },
         _ => CuDuration::MIN,
+    }
+}
+
+fn format_bytes(bytes: f64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = bytes;
+    let mut unit_idx = 0;
+    while value >= 1024.0 && unit_idx < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit_idx += 1;
+    }
+    if unit_idx == 0 {
+        format!("{:.0} {}", value, UNITS[unit_idx])
+    } else {
+        format!("{:.2} {}", value, UNITS[unit_idx])
     }
 }
 
@@ -222,6 +372,37 @@ struct DisplayNode {
     outputs: Vec<String>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct GraphCacheKey {
+    area: Size,
+    node_count: usize,
+    connection_count: usize,
+}
+
+struct GraphCache {
+    graph: Option<NodeGraph<'static>>,
+    content_size: Size,
+    key: Option<GraphCacheKey>,
+    dirty: bool,
+}
+
+impl GraphCache {
+    fn new() -> Self {
+        Self {
+            graph: None,
+            content_size: Size::ZERO,
+            key: None,
+            dirty: true,
+        }
+    }
+}
+
+impl GraphCache {
+    fn needs_rebuild(&self, key: GraphCacheKey) -> bool {
+        self.dirty || self.graph.is_none() || self.key != Some(key)
+    }
+}
+
 struct NodesScrollableWidgetState {
     display_nodes: Vec<DisplayNode>,
     connections: Vec<Connection>,
@@ -229,6 +410,7 @@ struct NodesScrollableWidgetState {
     status_index_map: Vec<Option<usize>>,
     task_count: usize,
     nodes_scrollable_state: ScrollViewState,
+    graph_cache: GraphCache,
 }
 
 impl NodesScrollableWidgetState {
@@ -332,29 +514,125 @@ impl NodesScrollableWidgetState {
         NodesScrollableWidgetState {
             display_nodes,
             connections,
-            nodes_scrollable_state: ScrollViewState::default(),
             statuses: errors,
             status_index_map,
             task_count: task_ids.len(),
+            nodes_scrollable_state: ScrollViewState::default(),
+            graph_cache: GraphCache::new(),
         }
+    }
+
+    fn mark_graph_dirty(&mut self) {
+        self.graph_cache.dirty = true;
+    }
+
+    fn ensure_graph_cache(&mut self, area: Rect) -> Size {
+        let key = self.graph_cache_key(area);
+        if self.graph_cache.needs_rebuild(key) {
+            self.rebuild_graph_cache(area, key);
+        }
+        self.graph_cache.content_size
+    }
+
+    fn graph(&self) -> &NodeGraph<'static> {
+        self.graph_cache
+            .graph
+            .as_ref()
+            .expect("graph cache must be initialized before render")
+    }
+
+    fn graph_cache_key(&self, area: Rect) -> GraphCacheKey {
+        GraphCacheKey {
+            area: area.into(),
+            node_count: self.display_nodes.len(),
+            connection_count: self.connections.len(),
+        }
+    }
+
+    fn build_graph(&self, content_size: Size) -> NodeGraph<'static> {
+        let mut graph = NodeGraph::new(
+            self.build_node_layouts(),
+            self.connections.clone(),
+            content_size.width as usize,
+            content_size.height as usize,
+        );
+        graph.calculate();
+        graph
+    }
+
+    fn rebuild_graph_cache(&mut self, area: Rect, key: GraphCacheKey) {
+        let content_size = if self.display_nodes.is_empty() {
+            Size::new(area.width.max(NODE_WIDTH), area.height.max(NODE_HEIGHT))
+        } else {
+            let node_count = self.display_nodes.len();
+            let content_width = (node_count as u16)
+                .saturating_mul(NODE_WIDTH + 20)
+                .max(NODE_WIDTH);
+            let max_ports = self
+                .display_nodes
+                .iter()
+                .map(|node| node.inputs.len().max(node.outputs.len()))
+                .max()
+                .unwrap_or_default();
+            let content_height =
+                (((max_ports + NODE_PORT_ROW_OFFSET) as u16) * 12).max(NODE_HEIGHT * 6);
+
+            let initial_size = Size::new(content_width, content_height);
+            let graph = self.build_graph(initial_size);
+            let bounds = graph.content_bounds();
+            let desired_width = bounds
+                .width
+                .saturating_add(GRAPH_WIDTH_PADDING)
+                .max(NODE_WIDTH);
+            let desired_height = bounds
+                .height
+                .saturating_add(GRAPH_HEIGHT_PADDING)
+                .max(NODE_HEIGHT);
+            Size::new(desired_width, desired_height)
+        };
+
+        self.graph_cache.graph = Some(self.build_graph(content_size));
+        self.graph_cache.content_size = content_size;
+        self.graph_cache.key = Some(key);
+        self.graph_cache.dirty = false;
+
+        self.clamp_scroll_offset(area, content_size);
+    }
+
+    fn build_node_layouts(&self) -> Vec<NodeLayout<'static>> {
+        self.display_nodes
+            .iter()
+            .map(|node| {
+                let ports = node.inputs.len().max(node.outputs.len());
+                let content_rows = ports + NODE_PORT_ROW_OFFSET;
+                let height = (content_rows as u16).saturating_add(2).max(NODE_HEIGHT);
+                let title_line = Line::from(vec![
+                    Span::styled(
+                        format!(" {}", node.node_type),
+                        Style::default().fg(node.node_type.color()),
+                    ),
+                    Span::styled(format!(" {} ", node.id), Style::default().fg(Color::White)),
+                ]);
+                NodeLayout::new((NODE_WIDTH, height)).with_title_line(title_line)
+            })
+            .collect()
+    }
+
+    fn clamp_scroll_offset(&mut self, area: Rect, content_size: Size) {
+        let max_x = content_size
+            .width
+            .saturating_sub(area.width.saturating_sub(1));
+        let max_y = content_size
+            .height
+            .saturating_sub(area.height.saturating_sub(1));
+        let offset = self.nodes_scrollable_state.offset();
+        let clamped = Position::new(offset.x.min(max_x), offset.y.min(max_y));
+        self.nodes_scrollable_state.set_offset(clamped);
     }
 }
 
 struct NodesScrollableWidget<'a> {
     _marker: PhantomData<&'a ()>,
-}
-
-struct GraphWrapper<'a> {
-    inner: NodeGraph<'a>,
-}
-
-impl Widget for GraphWrapper<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer)
-    where
-        Self: Sized,
-    {
-        self.inner.render(area, buf, &mut ())
-    }
 }
 
 const NODE_WIDTH: u16 = 29;
@@ -383,82 +661,20 @@ fn clip_tail(value: &str, max_chars: usize) -> String {
 
 #[allow(dead_code)]
 const NODE_HEIGHT_CONTENT: u16 = NODE_HEIGHT - 2;
-const GRAPH_WIDTH_PADDING: u16 = NODE_WIDTH;
-const GRAPH_HEIGHT_PADDING: u16 = NODE_HEIGHT;
+const GRAPH_WIDTH_PADDING: u16 = NODE_WIDTH * 2;
+const GRAPH_HEIGHT_PADDING: u16 = NODE_HEIGHT * 4;
 
 impl StatefulWidget for NodesScrollableWidget<'_> {
     type State = NodesScrollableWidgetState;
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        let build_node_layouts = || {
-            state
-                .display_nodes
-                .iter()
-                .map(|node| {
-                    let ports = node.inputs.len().max(node.outputs.len());
-                    let content_rows = ports + NODE_PORT_ROW_OFFSET;
-                    let height = (content_rows as u16).saturating_add(2).max(NODE_HEIGHT);
-                    let mut title_line = Line::default();
-                    title_line.spans.push(Span::styled(
-                        format!(" {}", node.node_type),
-                        Style::default().fg(node.node_type.color()),
-                    ));
-                    title_line.spans.push(Span::styled(
-                        format!(" {} ", node.id),
-                        Style::default().fg(Color::White),
-                    ));
-                    NodeLayout::new((NODE_WIDTH, height)).with_title_line(title_line)
-                })
-                .collect::<Vec<_>>()
-        };
-
-        let node_count = state.display_nodes.len().max(1);
-        let content_width = (node_count as u16)
-            .saturating_mul(NODE_WIDTH + 12)
-            .max(NODE_WIDTH);
-        let max_ports = state
-            .display_nodes
-            .iter()
-            .map(|node| node.inputs.len().max(node.outputs.len()))
-            .max()
-            .unwrap_or_default();
-        let content_height = (((max_ports + NODE_PORT_ROW_OFFSET) as u16) * 4).max(NODE_HEIGHT);
-        let connections = state.connections.clone();
-        let build_graph = |width: u16, height: u16| {
-            NodeGraph::new(
-                build_node_layouts(),
-                connections.clone(),
-                width as usize,
-                height as usize,
-            )
-        };
-        let mut graph = build_graph(content_width, content_height);
-        graph.calculate();
-        let mut content_size = Size::new(content_width, content_height);
-        if state.display_nodes.is_empty() {
-            content_size = Size::new(area.width.max(NODE_WIDTH), area.height.max(NODE_HEIGHT));
-            graph = build_graph(content_size.width, content_size.height);
-            graph.calculate();
-        } else {
-            let bounds = graph.content_bounds();
-            let desired_width = bounds
-                .width
-                .saturating_add(GRAPH_WIDTH_PADDING)
-                .max(NODE_WIDTH);
-            let desired_height = bounds
-                .height
-                .saturating_add(GRAPH_HEIGHT_PADDING)
-                .max(NODE_HEIGHT);
-            if desired_width != content_size.width || desired_height != content_size.height {
-                content_size = Size::new(desired_width, desired_height);
-                graph = build_graph(content_size.width, content_size.height);
-                graph.calculate();
-            }
-        }
+        let content_size = state.ensure_graph_cache(area);
         let mut scroll_view = ScrollView::new(content_size);
-        let zones = graph.split(scroll_view.area());
 
         {
+            let graph = state.graph();
+            let zones = graph.split(scroll_view.area());
+
             let mut statuses = state.statuses.lock().unwrap();
             if statuses.len() <= state.task_count {
                 statuses.resize(state.task_count + 1, TaskStatus::default());
@@ -470,13 +686,9 @@ impl StatefulWidget for NodesScrollableWidget<'_> {
                     .get(idx)
                     .and_then(|opt| *opt)
                     .unwrap_or(fallback_idx);
-                let safe_index = if status_idx < statuses.len() {
-                    status_idx
-                } else {
-                    statuses.len() - 1
-                };
+                let safe_index = status_idx.min(statuses.len().saturating_sub(1));
                 let status = &mut statuses[safe_index];
-                let s = &state.display_nodes[idx].type_label;
+                let node = &state.display_nodes[idx];
                 let status_line = if status.is_error {
                     format!("❌ {}", status.error)
                 } else {
@@ -484,7 +696,7 @@ impl StatefulWidget for NodesScrollableWidget<'_> {
                 };
 
                 let label_width = (NODE_WIDTH_CONTENT as usize).saturating_sub(2);
-                let type_label = clip_tail(s, label_width);
+                let type_label = clip_tail(&node.type_label, label_width);
                 let status_text = clip_tail(&status_line, label_width);
                 let base_style = if status.is_error {
                     Style::default().fg(Color::Red)
@@ -495,10 +707,7 @@ impl StatefulWidget for NodesScrollableWidget<'_> {
                 lines.push(Line::styled(format!(" {}", type_label), base_style));
                 lines.push(Line::styled(format!(" {}", status_text), base_style));
 
-                let max_ports = state.display_nodes[idx]
-                    .inputs
-                    .len()
-                    .max(state.display_nodes[idx].outputs.len());
+                let max_ports = node.inputs.len().max(node.outputs.len());
                 if max_ports > 0 {
                     let left_width = (NODE_WIDTH_CONTENT as usize - 2) / 2;
                     let right_width = NODE_WIDTH_CONTENT as usize - 2 - left_width;
@@ -506,12 +715,12 @@ impl StatefulWidget for NodesScrollableWidget<'_> {
                     let output_style = Style::default().fg(Color::Cyan);
                     let dotted_style = Style::default().fg(Color::DarkGray);
                     for port_idx in 0..max_ports {
-                        let input = state.display_nodes[idx]
+                        let input = node
                             .inputs
                             .get(port_idx)
                             .map(|label| clip_tail(label, left_width))
                             .unwrap_or_default();
-                        let output = state.display_nodes[idx]
+                        let output = node
                             .outputs
                             .get(port_idx)
                             .map(|label| clip_tail(label, right_width))
@@ -530,22 +739,15 @@ impl StatefulWidget for NodesScrollableWidget<'_> {
                     }
                 }
 
-                let txt = Text::from(lines);
-                let paragraph = Paragraph::new(txt);
+                let paragraph = Paragraph::new(Text::from(lines));
                 status.is_error = false; // reset if it was displayed
                 scroll_view.render_widget(paragraph, ea_zone);
             }
+
+            let content_area = Rect::new(0, 0, content_size.width, content_size.height);
+            scroll_view.render_widget(graph, content_area);
         }
 
-        scroll_view.render_widget(
-            GraphWrapper { inner: graph },
-            Rect {
-                x: 0,
-                y: 0,
-                width: content_size.width,
-                height: content_size.height,
-            },
-        );
         scroll_view.render(area, buf, &mut state.nodes_scrollable_state);
     }
 }
@@ -558,6 +760,7 @@ pub struct CuConsoleMon {
     task_statuses: Arc<Mutex<Vec<TaskStatus>>>,
     ui_handle: Option<JoinHandle<()>>,
     pool_stats: Arc<Mutex<Vec<PoolStats>>>,
+    copperlist_stats: Arc<Mutex<CopperListStats>>,
     quitting: Arc<AtomicBool>,
     topology: Option<MonitorTopology>,
 }
@@ -584,6 +787,7 @@ struct UI {
     #[cfg(feature = "debug_pane")]
     debug_output: Option<debug_pane::DebugLog>,
     pool_stats: Arc<Mutex<Vec<PoolStats>>>,
+    copperlist_stats: Arc<Mutex<CopperListStats>>,
 }
 
 impl UI {
@@ -599,6 +803,7 @@ impl UI {
         error_redirect: gag::BufferRedirect,
         debug_output: Option<debug_pane::DebugLog>,
         pool_stats: Arc<Mutex<Vec<PoolStats>>>,
+        copperlist_stats: Arc<Mutex<CopperListStats>>,
         topology: Option<MonitorTopology>,
     ) -> UI {
         init_error_hooks();
@@ -620,6 +825,7 @@ impl UI {
             error_redirect,
             debug_output,
             pool_stats,
+            copperlist_stats,
         }
     }
 
@@ -631,6 +837,7 @@ impl UI {
         task_statuses: Arc<Mutex<Vec<TaskStatus>>>,
         quitting: Arc<AtomicBool>,
         pool_stats: Arc<Mutex<Vec<PoolStats>>>,
+        copperlist_stats: Arc<Mutex<CopperListStats>>,
         topology: Option<MonitorTopology>,
     ) -> UI {
         init_error_hooks();
@@ -650,6 +857,7 @@ impl UI {
             quitting,
             nodes_scrollable_widget_state,
             pool_stats,
+            copperlist_stats,
         }
     }
 
@@ -765,7 +973,12 @@ impl UI {
             ],
         )
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title(" Latencies "));
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(" Latencies "),
+        );
 
         f.render_widget(table, area);
     }
@@ -846,10 +1059,185 @@ impl UI {
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .title(" Memory Pools "),
         );
 
         f.render_widget(table, area);
+    }
+
+    fn draw_copperlist_stats(&self, f: &mut Frame, area: Rect) {
+        let stats = self.copperlist_stats.lock().unwrap();
+        let size_display = if stats.size_bytes > 0 {
+            format_bytes(stats.size_bytes as f64)
+        } else {
+            "unknown".to_string()
+        };
+        let raw_total = stats.raw_culist_bytes.max(stats.size_bytes as u64);
+        let handles_display = if stats.handle_bytes > 0 {
+            format_bytes(stats.handle_bytes as f64)
+        } else {
+            "0 B".to_string()
+        };
+        let mem_total = raw_total
+            .saturating_add(stats.keyframe_bytes)
+            .saturating_add(stats.structured_bytes_per_cl);
+        let mem_total_display = if mem_total > 0 {
+            format_bytes(mem_total as f64)
+        } else {
+            "unknown".to_string()
+        };
+        let encoded_display = if stats.encoded_bytes > 0 {
+            format_bytes(stats.encoded_bytes as f64)
+        } else {
+            "n/a".to_string()
+        };
+        let efficiency_display = if raw_total > 0 && stats.encoded_bytes > 0 {
+            let ratio = (stats.encoded_bytes as f64) / (raw_total as f64);
+            format!("{:.1}%", ratio * 100.0)
+        } else {
+            "n/a".to_string()
+        };
+        let rate_display = format!("{:.2} Hz", stats.rate_hz);
+        let raw_bw = if mem_total > 0 {
+            format!("{}/s", format_bytes((mem_total as f64) * stats.rate_hz))
+        } else {
+            "n/a".to_string()
+        };
+        let _encoded_bw = if stats.encoded_bytes > 0 {
+            format!(
+                "{}/s",
+                format_bytes((stats.encoded_bytes as f64) * stats.rate_hz)
+            )
+        } else {
+            "n/a".to_string()
+        };
+        let keyframe_display = if stats.keyframe_bytes > 0 {
+            format_bytes(stats.keyframe_bytes as f64)
+        } else {
+            "0 B".to_string()
+        };
+        let structured_display = if stats.structured_bytes_per_cl > 0 {
+            format_bytes(stats.structured_bytes_per_cl as f64)
+        } else {
+            "0 B".to_string()
+        };
+        let structured_bw = if stats.structured_bytes_per_cl > 0 {
+            format!(
+                "{}/s",
+                format_bytes((stats.structured_bytes_per_cl as f64) * stats.rate_hz)
+            )
+        } else {
+            "n/a".to_string()
+        };
+        let disk_total_bytes = stats
+            .encoded_bytes
+            .saturating_add(stats.keyframe_bytes)
+            .saturating_add(stats.structured_bytes_per_cl);
+        let disk_total_bw = if disk_total_bytes > 0 {
+            format!(
+                "{}/s",
+                format_bytes((disk_total_bytes as f64) * stats.rate_hz)
+            )
+        } else {
+            "n/a".to_string()
+        };
+
+        let header_cells = ["Metric", "Value"].iter().map(|h| {
+            Cell::from(Line::from(*h)).style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+        });
+
+        let header = Row::new(header_cells).bottom_margin(1);
+
+        let spacer = Row::new(vec![
+            Cell::from(Line::from(" ")),
+            Cell::from(Line::from(" ")),
+        ]);
+
+        let rate_style = Style::default().fg(Color::Cyan);
+        let mem_rows = vec![
+            Row::new(vec![
+                Cell::from(Line::from("Observed rate")),
+                Cell::from(Line::from(rate_display).alignment(Alignment::Right)),
+            ])
+            .style(rate_style),
+            spacer.clone(),
+            Row::new(vec![
+                Cell::from(Line::from("CopperList size")),
+                Cell::from(Line::from(size_display).alignment(Alignment::Right)),
+            ]),
+            Row::new(vec![
+                Cell::from(Line::from("Pool memory used")),
+                Cell::from(Line::from(handles_display).alignment(Alignment::Right)),
+            ]),
+            Row::new(vec![
+                Cell::from(Line::from("Keyframe size")),
+                Cell::from(Line::from(keyframe_display).alignment(Alignment::Right)),
+            ]),
+            Row::new(vec![
+                Cell::from(Line::from("Mem total (CL+KF+SL)")),
+                Cell::from(Line::from(mem_total_display).alignment(Alignment::Right)),
+            ]),
+            spacer.clone(),
+            Row::new(vec![
+                Cell::from(Line::from("RAM BW (raw)")),
+                Cell::from(Line::from(raw_bw).alignment(Alignment::Right)),
+            ]),
+        ];
+
+        let disk_rows = vec![
+            Row::new(vec![
+                Cell::from(Line::from("CL serialized size")),
+                Cell::from(Line::from(encoded_display).alignment(Alignment::Right)),
+            ]),
+            Row::new(vec![
+                Cell::from(Line::from("CL encoding efficiency")),
+                Cell::from(Line::from(efficiency_display).alignment(Alignment::Right)),
+            ]),
+            Row::new(vec![
+                Cell::from(Line::from("Structured log / CL")),
+                Cell::from(Line::from(structured_display).alignment(Alignment::Right)),
+            ]),
+            Row::new(vec![
+                Cell::from(Line::from("Structured BW")),
+                Cell::from(Line::from(structured_bw).alignment(Alignment::Right)),
+            ]),
+            spacer.clone(),
+            Row::new(vec![
+                Cell::from(Line::from("Total disk BW")),
+                Cell::from(Line::from(disk_total_bw).alignment(Alignment::Right)),
+            ]),
+        ];
+
+        let mem_table = Table::new(mem_rows, &[Constraint::Length(24), Constraint::Length(12)])
+            .header(header.clone())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .title(" Memory BW "),
+            );
+
+        let disk_table = Table::new(disk_rows, &[Constraint::Length(24), Constraint::Length(12)])
+            .header(header)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .title(" Disk / Encoding "),
+            );
+
+        let layout = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(42), Constraint::Length(42)].as_ref())
+            .split(area);
+
+        f.render_widget(mem_table, layout[0]);
+        f.render_widget(disk_table, layout[1]);
     }
 
     fn draw_nodes(&mut self, f: &mut Frame, space: Rect) {
@@ -863,26 +1251,116 @@ impl UI {
         )
     }
 
+    fn render_tabs(&self, f: &mut Frame, area: Rect) {
+        let base_bg = Color::Rgb(16, 18, 20);
+        let active_bg = Color::Rgb(56, 110, 120);
+        let inactive_bg = Color::Rgb(40, 44, 52);
+        let active_fg = Color::Rgb(245, 246, 247);
+        let inactive_fg = Color::Rgb(198, 200, 204);
+        let key_fg = Color::Rgb(255, 208, 128);
+
+        let mut spans = Vec::new();
+        spans.push(Span::styled(" ", Style::default().bg(base_bg)));
+
+        for tab in TAB_DEFS {
+            let is_active = self.active_screen == tab.screen;
+            let bg = if is_active { active_bg } else { inactive_bg };
+            let fg = if is_active { active_fg } else { inactive_fg };
+            let label_style = if is_active {
+                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(fg).bg(bg)
+            };
+
+            spans.push(Span::styled("", Style::default().fg(bg).bg(base_bg)));
+            spans.push(Span::styled(" ", Style::default().bg(bg)));
+            spans.push(Span::styled(
+                tab.key,
+                Style::default()
+                    .fg(key_fg)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(" ", Style::default().bg(bg)));
+            spans.push(Span::styled(tab.label, label_style));
+            spans.push(Span::styled(" ", Style::default().bg(bg)));
+            spans.push(Span::styled("", Style::default().fg(bg).bg(base_bg)));
+            spans.push(Span::styled(" ", Style::default().bg(base_bg)));
+        }
+
+        let tabs = Paragraph::new(Line::from(spans))
+            .style(Style::default().bg(base_bg))
+            .block(
+                Block::default()
+                    .borders(Borders::BOTTOM)
+                    .style(Style::default().bg(base_bg)),
+            );
+        f.render_widget(tabs, area);
+    }
+
+    fn render_help(&self, f: &mut Frame, area: Rect) {
+        let base_bg = Color::Rgb(18, 16, 22);
+        let key_fg = Color::Rgb(248, 231, 176);
+        let text_fg = Color::Rgb(236, 236, 236);
+
+        let mut spans = Vec::new();
+        spans.push(Span::styled(" ", Style::default().bg(base_bg)));
+
+        let tab_hint = if cfg!(feature = "debug_pane") {
+            "1-6"
+        } else {
+            "1-5"
+        };
+
+        let segments = [
+            (tab_hint, "Tabs", Color::Rgb(86, 114, 98)),
+            ("r", "Reset latency", Color::Rgb(136, 92, 78)),
+            ("hjkl/←↑→↓", "Scroll", Color::Rgb(92, 102, 150)),
+            ("q", "Quit", Color::Rgb(124, 118, 76)),
+        ];
+
+        for (key, label, bg) in segments {
+            spans.push(Span::styled("", Style::default().fg(bg).bg(base_bg)));
+            spans.push(Span::styled(" ", Style::default().bg(bg)));
+            spans.push(Span::styled(
+                key,
+                Style::default()
+                    .fg(key_fg)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(" ", Style::default().bg(bg)));
+            spans.push(Span::styled(label, Style::default().fg(text_fg).bg(bg)));
+            spans.push(Span::styled(" ", Style::default().bg(bg)));
+            spans.push(Span::styled("", Style::default().fg(bg).bg(base_bg)));
+            spans.push(Span::styled(" ", Style::default().bg(base_bg)));
+        }
+
+        let help = Paragraph::new(Line::from(spans))
+            .style(Style::default().bg(base_bg))
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .style(Style::default().bg(base_bg)),
+            );
+        f.render_widget(help, area);
+    }
+
     fn draw(&mut self, f: &mut Frame) {
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints(
                 [
-                    Constraint::Length(3), // For the top menu bar
-                    Constraint::Min(0),    // For the main content
+                    Constraint::Length(2), // Top tabs
+                    Constraint::Min(0),    // Main content
+                    Constraint::Length(2), // Bottom help bar
                 ]
                 .as_ref(),
             )
             .split(f.area());
 
-        let menu = Paragraph::new(MENU_CONTENT)
-            .style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::ITALIC),
-            )
-            .block(Block::default().borders(Borders::BOTTOM));
-        f.render_widget(menu, layout[0]);
+        self.render_tabs(f, layout[0]);
+        self.render_help(f, layout[2]);
 
         match self.active_screen {
             Screen::Neofetch => {
@@ -893,7 +1371,8 @@ impl UI {
                 let p = Paragraph::new::<Text>(text).block(
                     Block::default()
                         .title(" System Info ")
-                        .borders(Borders::ALL),
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
                 );
                 f.render_widget(p, layout[1]);
             }
@@ -902,12 +1381,16 @@ impl UI {
             }
             Screen::Latency => self.draw_latency_table(f, layout[1]),
             Screen::MemoryPools => self.draw_memory_pools(f, layout[1]),
+            Screen::CopperList => self.draw_copperlist_stats(f, layout[1]),
             #[cfg(feature = "debug_pane")]
             Screen::DebugOutput => self.draw_debug_output(f, layout[1]),
         };
     }
 
-    fn run_app<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> io::Result<()> {
+    fn run_app<B: Backend<Error = io::Error>>(
+        &mut self,
+        terminal: &mut Terminal<B>,
+    ) -> io::Result<()> {
         loop {
             if self.quitting.load(Ordering::SeqCst) {
                 break;
@@ -927,9 +1410,10 @@ impl UI {
                         KeyCode::Char('1') => self.active_screen = Screen::Neofetch,
                         KeyCode::Char('2') => self.active_screen = Screen::Dag,
                         KeyCode::Char('3') => self.active_screen = Screen::Latency,
-                        KeyCode::Char('4') => self.active_screen = Screen::MemoryPools,
+                        KeyCode::Char('4') => self.active_screen = Screen::CopperList,
+                        KeyCode::Char('5') => self.active_screen = Screen::MemoryPools,
                         #[cfg(feature = "debug_pane")]
-                        KeyCode::Char('5') => self.active_screen = Screen::DebugOutput,
+                        KeyCode::Char('6') => self.active_screen = Screen::DebugOutput,
                         KeyCode::Char('r') => {
                             if self.active_screen == Screen::Latency {
                                 self.task_stats.lock().unwrap().reset()
@@ -977,8 +1461,11 @@ impl UI {
                         _ => {}
                     },
 
-                    #[cfg(feature = "debug_pane")]
                     Event::Resize(_columns, rows) => {
+                        self.nodes_scrollable_widget_state.mark_graph_dirty();
+                        #[cfg(not(feature = "debug_pane"))]
+                        let _ = rows;
+                        #[cfg(feature = "debug_pane")]
                         if let Some(debug_output) = self.debug_output.as_mut() {
                             debug_output.max_rows.store(rows, Ordering::SeqCst)
                         }
@@ -1009,6 +1496,7 @@ impl CuMonitor for CuConsoleMon {
             ui_handle: None,
             quitting: Arc::new(AtomicBool::new(false)),
             pool_stats: Arc::new(Mutex::new(Vec::new())),
+            copperlist_stats: Arc::new(Mutex::new(CopperListStats::new())),
             topology: None,
         })
     }
@@ -1016,13 +1504,28 @@ impl CuMonitor for CuConsoleMon {
         self.topology = Some(topology);
     }
 
+    fn set_copperlist_info(&mut self, info: CopperListInfo) {
+        let mut stats = self.copperlist_stats.lock().unwrap();
+        stats.set_info(info);
+    }
+
+    fn observe_copperlist_io(&self, stats: CopperListIoStats) {
+        let mut cl_stats = self.copperlist_stats.lock().unwrap();
+        cl_stats.update_io(stats);
+    }
+
     fn start(&mut self, _clock: &RobotClock) -> CuResult<()> {
+        if !should_start_ui() {
+            return Ok(());
+        }
+
         let config_dup = self.config.clone();
         let taskids = self.taskids;
 
         let task_stats_ui = self.task_stats.clone();
         let error_states = self.task_statuses.clone();
         let pool_stats_ui = self.pool_stats.clone();
+        let copperlist_stats_ui = self.copperlist_stats.clone();
         let quitting = self.quitting.clone();
         let topology = self.topology.clone();
 
@@ -1030,15 +1533,6 @@ impl CuMonitor for CuConsoleMon {
         let handle = thread::spawn(move || {
             let backend = CrosstermBackend::new(stdout());
             let _terminal_guard = TerminalRestoreGuard;
-
-            // Ensure the terminal is restored if a panic occurs while the TUI is active.
-            let prev_hook = panic::take_hook();
-            panic::set_hook(Box::new(move |info| {
-                let _ = restore_terminal();
-                prev_hook(info);
-            }));
-
-            install_signal_handlers(quitting.clone());
 
             if let Err(err) = setup_terminal() {
                 eprintln!("Failed to prepare terminal UI: {err}");
@@ -1068,6 +1562,7 @@ impl CuMonitor for CuConsoleMon {
                     error_redirect,
                     None,
                     pool_stats_ui,
+                    copperlist_stats_ui,
                     topology.clone(),
                 );
 
@@ -1095,7 +1590,11 @@ impl CuMonitor for CuConsoleMon {
                 } else {
                     println!("EXTRA_TEXT_LOGGER is none");
                 }
-                ui.run_app(&mut terminal).expect("Failed to run app");
+                if let Err(err) = ui.run_app(&mut terminal) {
+                    let _ = restore_terminal();
+                    eprintln!("CuConsoleMon UI exited with error: {err}");
+                    return;
+                }
             }
 
             #[cfg(not(feature = "debug_pane"))]
@@ -1109,9 +1608,14 @@ impl CuMonitor for CuConsoleMon {
                     error_states,
                     quitting,
                     pool_stats_ui,
+                    copperlist_stats_ui,
                     topology,
                 );
-                ui.run_app(&mut terminal).expect("Failed to run app");
+                if let Err(err) = ui.run_app(&mut terminal) {
+                    let _ = restore_terminal();
+                    eprintln!("CuConsoleMon UI exited with error: {err}");
+                    return;
+                }
 
                 drop(stderr_gag);
             }
@@ -1129,6 +1633,10 @@ impl CuMonitor for CuConsoleMon {
         {
             let mut task_stats = self.task_stats.lock().unwrap();
             task_stats.update(msgs);
+        }
+        {
+            let mut copperlist_stats = self.copperlist_stats.lock().unwrap();
+            copperlist_stats.update_rate();
         }
         {
             let mut task_statuses = self.task_statuses.lock().unwrap();
@@ -1201,25 +1709,13 @@ impl Drop for TerminalRestoreGuard {
     }
 }
 
-fn install_signal_handlers(quitting: Arc<AtomicBool>) {
-    static SIGNAL_HANDLER: OnceLock<()> = OnceLock::new();
-
-    let _ = SIGNAL_HANDLER.get_or_init(|| {
-        let quitting = quitting.clone();
-        if let Err(err) = ctrlc::set_handler(move || {
-            quitting.store(true, Ordering::SeqCst);
-            let _ = restore_terminal();
-            // Match the conventional 130 exit code for Ctrl-C.
-            std::process::exit(130);
-        }) {
-            eprintln!("Failed to install Ctrl-C handler: {err}");
-        }
-    });
-}
-
 fn init_error_hooks() {
-    let (panic, error) = HookBuilder::default().into_hooks();
-    let panic = panic.into_panic_hook();
+    static ONCE: OnceLock<()> = OnceLock::new();
+    if ONCE.get().is_some() {
+        return;
+    }
+
+    let (_panic_hook, error) = HookBuilder::default().into_hooks();
     let error = error.into_eyre_hook();
     color_eyre::eyre::set_hook(Box::new(move |e| {
         let _ = restore_terminal();
@@ -1228,8 +1724,16 @@ fn init_error_hooks() {
     .unwrap();
     std::panic::set_hook(Box::new(move |info| {
         let _ = restore_terminal();
-        panic(info)
+        let bt = Backtrace::force_capture();
+        // stderr may be gagged; print to stdout so the panic is visible.
+        println!("CuConsoleMon panic: {info}");
+        println!("Backtrace:\n{bt}");
+        let _ = stdout().flush();
+        // Exit immediately so the process doesn't hang after the TUI restores.
+        process::exit(1);
     }));
+
+    let _ = ONCE.set(());
 }
 
 fn setup_terminal() -> io::Result<()> {
@@ -1241,4 +1745,28 @@ fn setup_terminal() -> io::Result<()> {
 fn restore_terminal() -> io::Result<()> {
     execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
     disable_raw_mode()
+}
+
+fn should_start_ui() -> bool {
+    if !stdout().is_tty() || !stdin().is_tty() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let stdin_fd = stdin().as_raw_fd();
+        // SAFETY: tcgetpgrp only reads process group state for a valid fd.
+        let fg_pgrp = unsafe { libc::tcgetpgrp(stdin_fd) };
+        if fg_pgrp == -1 {
+            return false;
+        }
+        // SAFETY: getpgrp has no safety requirements beyond being called in a process.
+        let pgrp = unsafe { libc::getpgrp() };
+        if fg_pgrp != pgrp {
+            return false;
+        }
+    }
+
+    true
 }

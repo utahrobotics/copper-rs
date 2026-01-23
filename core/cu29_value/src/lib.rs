@@ -1,21 +1,11 @@
 #![doc(html_root_url = "https://docs.rs/serde-value/0.7.0/")]
 #![cfg_attr(not(feature = "std"), no_std)]
-#[cfg(not(feature = "std"))]
 extern crate alloc;
 
-#[cfg(not(feature = "std"))]
-mod imp {
-    pub use alloc::boxed::Box;
-    pub use alloc::collections::BTreeMap;
-    pub use alloc::string::String;
-    pub use alloc::vec::Vec;
-}
-#[cfg(feature = "std")]
-mod imp {
-    pub use std::collections::BTreeMap;
-}
-
-use imp::*;
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 use core::cmp::Ordering;
 use core::fmt::{Display, Formatter};
@@ -317,7 +307,7 @@ mod tests {
 
     #[test]
     fn ser_smoke_test() {
-        #[derive(Serialize)]
+        #[derive(Serialize, Deserialize)]
         struct Foo {
             a: u32,
             b: String,
@@ -368,7 +358,7 @@ mod tests {
 
     #[test]
     fn serialize_from_enum() {
-        #[derive(Serialize)]
+        #[derive(Serialize, Deserialize)]
         enum Foo {
             Bar,
             Baz(u8),
@@ -449,7 +439,7 @@ mod tests {
                     "ADDED" => Event::Added(<_>::deserialize(object_deserializer)?),
                     "ERROR" => Event::Error(<_>::deserialize(object_deserializer)?),
                     kind => {
-                        return Err(serde::de::Error::unknown_variant(kind, &["ADDED", "ERROR"]))
+                        return Err(serde::de::Error::unknown_variant(kind, &["ADDED", "ERROR"]));
                     }
                 })
             }

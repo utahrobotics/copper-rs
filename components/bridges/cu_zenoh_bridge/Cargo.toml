@@ -1,0 +1,23 @@
+[package]
+name = "cu-zenoh-bridge"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Copper bridge for bidirectional Zenoh messaging."
+
+[dependencies]
+zenoh = { version = "1.7.0", default-features = false, features = [
+  "transport_tcp",
+] }
+cu29 = { workspace = true }
+serde = { workspace = true }
+serde_json = "1.0"
+minicbor-serde = { version = "0.6.2", default-features = false, features = [
+  "alloc",
+] }
+bincode = { workspace = true }

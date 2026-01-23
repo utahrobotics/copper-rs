@@ -1,16 +1,38 @@
 mod fsck;
+pub mod logstats;
+
+#[cfg(feature = "mcap")]
+pub mod mcap_export;
+
+#[cfg(feature = "mcap")]
+pub mod serde_to_jsonschema;
 
 use bincode::config::standard;
 use bincode::decode_from_std_read;
 use bincode::error::DecodeError;
+use bincode::Decode;
 use clap::{Parser, Subcommand, ValueEnum};
 use cu29::prelude::*;
 use cu29::UnifiedLogType;
 use cu29_intern_strs::read_interned_strings;
 use fsck::check;
+#[cfg(feature = "mcap")]
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use logstats::{compute_logstats, write_logstats};
+use serde::Serialize;
 use std::fmt::{Display, Formatter};
+#[cfg(feature = "mcap")]
+use std::io::IsTerminal;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+
+#[cfg(feature = "mcap")]
+pub use mcap_export::{
+    export_to_mcap, export_to_mcap_with_schemas, mcap_info, McapExportStats, PayloadSchemas,
+};
+
+#[cfg(feature = "mcap")]
+pub use serde_to_jsonschema::trace_type_to_jsonschema;
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 pub enum ExportFormat {
@@ -53,24 +75,99 @@ pub enum Command {
         #[arg(short, long, action = clap::ArgAction::Count)]
         verbose: u8,
     },
+    /// Export log statistics to JSON for offline DAG rendering.
+    LogStats {
+        /// Output JSON file path
+        #[arg(short, long, default_value = "cu29_logstats.json")]
+        output: PathBuf,
+        /// Config file used to map outputs to edges
+        #[arg(long, default_value = "copperconfig.ron")]
+        config: PathBuf,
+        /// Mission id to use when reading the config
+        #[arg(long)]
+        mission: Option<String>,
+    },
+    /// Export copperlists to MCAP format (requires 'mcap' feature)
+    #[cfg(feature = "mcap")]
+    ExportMcap {
+        /// Output MCAP file path
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Force progress bar even when stderr is not a TTY
+        #[arg(long)]
+        progress: bool,
+        /// Suppress the progress bar
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Inspect an MCAP file and dump metadata, schemas, and stats (requires 'mcap' feature)
+    #[cfg(feature = "mcap")]
+    McapInfo {
+        /// Path to the MCAP file to inspect
+        mcap_file: PathBuf,
+        /// Show full schema content
+        #[arg(short, long)]
+        schemas: bool,
+        /// Show sample messages (first N messages per channel)
+        #[arg(short = 'n', long, default_value_t = 0)]
+        sample_messages: usize,
+    },
+}
+
+fn write_json_pretty<T: Serialize + ?Sized>(value: &T) -> CuResult<()> {
+    serde_json::to_writer_pretty(std::io::stdout(), value)
+        .map_err(|e| CuError::new_with_cause("Failed to write JSON output", e))
+}
+
+fn write_json<T: Serialize + ?Sized>(value: &T) -> CuResult<()> {
+    serde_json::to_writer(std::io::stdout(), value)
+        .map_err(|e| CuError::new_with_cause("Failed to write JSON output", e))
+}
+
+fn build_read_logger(unifiedlog_base: &Path) -> CuResult<UnifiedLoggerRead> {
+    let logger = UnifiedLoggerBuilder::new()
+        .file_base_name(unifiedlog_base)
+        .build()
+        .map_err(|e| CuError::new_with_cause("Failed to create logger", e))?;
+    match logger {
+        UnifiedLogger::Read(dl) => Ok(dl),
+        UnifiedLogger::Write(_) => Err(CuError::from(
+            "Expected read-only unified logger in export CLI",
+        )),
+    }
 }
 
 /// This is a generator for a main function to build a log extractor.
 /// It depends on the specific type of the CopperList payload that is determined at compile time from the configuration.
+///
+/// When the `mcap` feature is enabled, P must also implement `PayloadSchemas` for MCAP export support.
+#[cfg(feature = "mcap")]
 pub fn run_cli<P>() -> CuResult<()>
 where
-    P: CopperListTuple,
+    P: CopperListTuple + CuPayloadRawBytes + mcap_export::PayloadSchemas,
+{
+    run_cli_inner::<P>()
+}
+
+/// This is a generator for a main function to build a log extractor.
+/// It depends on the specific type of the CopperList payload that is determined at compile time from the configuration.
+#[cfg(not(feature = "mcap"))]
+pub fn run_cli<P>() -> CuResult<()>
+where
+    P: CopperListTuple + CuPayloadRawBytes,
+{
+    run_cli_inner::<P>()
+}
+
+#[cfg(feature = "mcap")]
+fn run_cli_inner<P>() -> CuResult<()>
+where
+    P: CopperListTuple + CuPayloadRawBytes + mcap_export::PayloadSchemas,
 {
     let args = LogReaderCli::parse();
     let unifiedlog_base = args.unifiedlog_base;
 
-    let UnifiedLogger::Read(mut dl) = UnifiedLoggerBuilder::new()
-        .file_base_name(&unifiedlog_base)
-        .build()
-        .expect("Failed to create logger")
-    else {
-        panic!("Failed to create logger");
-    };
+    let mut dl = build_read_logger(&unifiedlog_base)?;
 
     match args.command {
         Command::ExtractTextLog { log_index } => {
@@ -85,7 +182,7 @@ where
             match export_format {
                 ExportFormat::Json => {
                     for entry in iter {
-                        serde_json::to_writer_pretty(std::io::stdout(), &entry).unwrap();
+                        write_json_pretty(&entry)?;
                     }
                 }
                 ExportFormat::Csv => {
@@ -111,7 +208,7 @@ where
                                 }
                                 let metadata = msg.metadata();
                                 print!("{}, {}, ", metadata.process_time(), msg.tov());
-                                serde_json::to_writer(std::io::stdout(), payload).unwrap(); // TODO: escape for CSV
+                                write_json(payload)?; // TODO: escape for CSV
                                 first = false;
                             }
                         }
@@ -125,63 +222,246 @@ where
                 return value;
             }
         }
+        Command::LogStats {
+            output,
+            config,
+            mission,
+        } => {
+            run_logstats::<P>(dl, output, config, mission)?;
+        }
+        #[cfg(feature = "mcap")]
+        Command::ExportMcap {
+            output,
+            progress,
+            quiet,
+        } => {
+            println!("Exporting copperlists to MCAP format: {}", output.display());
+
+            let show_progress = should_show_progress(progress, quiet);
+            let total_bytes = if show_progress {
+                Some(copperlist_total_bytes(&unifiedlog_base)?)
+            } else {
+                None
+            };
+
+            let reader = UnifiedLoggerIOReader::new(dl, UnifiedLogType::CopperList);
+
+            // Export to MCAP with schemas
+            // Note: P must implement PayloadSchemas trait (generated by gen_cumsgs! macro with mcap feature)
+            let stats = if let Some(total_bytes) = total_bytes {
+                let progress_bar = make_progress_bar(total_bytes);
+                let reader = ProgressReader::new(reader, progress_bar.clone());
+                let result = export_to_mcap_impl::<P>(reader, &output);
+                progress_bar.finish_and_clear();
+                result?
+            } else {
+                export_to_mcap_impl::<P>(reader, &output)?
+            };
+            println!("{stats}");
+        }
+        #[cfg(feature = "mcap")]
+        Command::McapInfo {
+            mcap_file,
+            schemas,
+            sample_messages,
+        } => {
+            mcap_info(&mcap_file, schemas, sample_messages)?;
+        }
     }
 
     Ok(())
 }
+
+#[cfg(not(feature = "mcap"))]
+fn run_cli_inner<P>() -> CuResult<()>
+where
+    P: CopperListTuple + CuPayloadRawBytes,
+{
+    let args = LogReaderCli::parse();
+    let unifiedlog_base = args.unifiedlog_base;
+
+    let mut dl = build_read_logger(&unifiedlog_base)?;
+
+    match args.command {
+        Command::ExtractTextLog { log_index } => {
+            let reader = UnifiedLoggerIOReader::new(dl, UnifiedLogType::StructuredLogLine);
+            textlog_dump(reader, &log_index)?;
+        }
+        Command::ExtractCopperlists { export_format } => {
+            println!("Extracting copperlists with format: {export_format}");
+            let mut reader = UnifiedLoggerIOReader::new(dl, UnifiedLogType::CopperList);
+            let iter = copperlists_reader::<P>(&mut reader);
+
+            match export_format {
+                ExportFormat::Json => {
+                    for entry in iter {
+                        write_json_pretty(&entry)?;
+                    }
+                }
+                ExportFormat::Csv => {
+                    let mut first = true;
+                    for origin in P::get_all_task_ids() {
+                        if !first {
+                            print!(", ");
+                        } else {
+                            print!("id, ");
+                        }
+                        print!("{origin}_time, {origin}_tov, {origin},");
+                        first = false;
+                    }
+                    println!();
+                    for entry in iter {
+                        let mut first = true;
+                        for msg in entry.cumsgs() {
+                            if let Some(payload) = msg.payload() {
+                                if !first {
+                                    print!(", ");
+                                } else {
+                                    print!("{}, ", entry.id);
+                                }
+                                let metadata = msg.metadata();
+                                print!("{}, {}, ", metadata.process_time(), msg.tov());
+                                write_json(payload)?;
+                                first = false;
+                            }
+                        }
+                        println!();
+                    }
+                }
+            }
+        }
+        Command::Fsck { verbose } => {
+            if let Some(value) = check::<P>(&mut dl, verbose) {
+                return value;
+            }
+        }
+        Command::LogStats {
+            output,
+            config,
+            mission,
+        } => {
+            run_logstats::<P>(dl, output, config, mission)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn run_logstats<P>(
+    dl: UnifiedLoggerRead,
+    output: PathBuf,
+    config: PathBuf,
+    mission: Option<String>,
+) -> CuResult<()>
+where
+    P: CopperListTuple + CuPayloadRawBytes,
+{
+    let config_path = config
+        .to_str()
+        .ok_or_else(|| CuError::from("Config path is not valid UTF-8"))?;
+    let cfg = read_configuration(config_path)
+        .map_err(|e| CuError::new_with_cause("Failed to read configuration", e))?;
+    let reader = UnifiedLoggerIOReader::new(dl, UnifiedLogType::CopperList);
+    let stats = compute_logstats::<P>(reader, &cfg, mission.as_deref())?;
+    write_logstats(&stats, &output)
+}
+
+/// Helper function for MCAP export.
+///
+/// Uses the PayloadSchemas trait to get compile-time generated schemas.
+#[cfg(feature = "mcap")]
+fn export_to_mcap_impl<P>(src: impl Read, output: &Path) -> CuResult<McapExportStats>
+where
+    P: CopperListTuple + mcap_export::PayloadSchemas,
+{
+    mcap_export::export_to_mcap::<P, _>(src, output)
+}
+
+#[cfg(feature = "mcap")]
+struct ProgressReader<R> {
+    inner: R,
+    progress: ProgressBar,
+}
+
+#[cfg(feature = "mcap")]
+impl<R> ProgressReader<R> {
+    fn new(inner: R, progress: ProgressBar) -> Self {
+        Self { inner, progress }
+    }
+}
+
+#[cfg(feature = "mcap")]
+impl<R: Read> Read for ProgressReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        if read > 0 {
+            self.progress.inc(read as u64);
+        }
+        Ok(read)
+    }
+}
+
+#[cfg(feature = "mcap")]
+fn make_progress_bar(total_bytes: u64) -> ProgressBar {
+    let progress_bar = ProgressBar::new(total_bytes);
+    progress_bar.set_draw_target(ProgressDrawTarget::stderr_with_hz(5));
+
+    let style = ProgressStyle::with_template(
+        "[{elapsed_precise}] {bar:40} {bytes}/{total_bytes} ({bytes_per_sec}, ETA {eta})",
+    )
+    .unwrap_or_else(|_| ProgressStyle::default_bar());
+
+    progress_bar.set_style(style.progress_chars("=>-"));
+    progress_bar
+}
+
+#[cfg(feature = "mcap")]
+fn should_show_progress(force_progress: bool, quiet: bool) -> bool {
+    !quiet && (force_progress || std::io::stderr().is_terminal())
+}
+
+#[cfg(feature = "mcap")]
+fn copperlist_total_bytes(log_base: &Path) -> CuResult<u64> {
+    let mut reader = UnifiedLoggerRead::new(log_base)
+        .map_err(|e| CuError::new_with_cause("Failed to open log for progress estimation", e))?;
+    reader
+        .scan_section_bytes(UnifiedLogType::CopperList)
+        .map_err(|e| CuError::new_with_cause("Failed to scan log for progress estimation", e))
+}
+
+fn read_next_entry<T: Decode<()>>(src: &mut impl Read) -> Option<T> {
+    let entry = decode_from_std_read::<T, _, _>(src, standard());
+    match entry {
+        Ok(entry) => Some(entry),
+        Err(DecodeError::UnexpectedEnd { .. }) => None,
+        Err(DecodeError::Io { inner, additional }) => {
+            eprintln!("Are your saved logs incompatable with the config?");
+            if inner.kind() == std::io::ErrorKind::UnexpectedEof {
+                None
+            } else {
+                println!("Error {inner:?} additional:{additional}");
+                None
+            }
+        }
+        Err(e) => {
+            eprintln!("Are your saved logs incompatable with the config?");
+            println!("Error {e:?}");
+            None
+        }
+    }
+}
+
 /// Extracts the copper lists from a binary representation.
 /// P is the Payload determined by the configuration of the application.
 pub fn copperlists_reader<P: CopperListTuple>(
     mut src: impl Read,
 ) -> impl Iterator<Item = CopperList<P>> {
-    std::iter::from_fn(move || {
-        let entry = decode_from_std_read::<CopperList<P>, _, _>(&mut src, standard());
-        match entry {
-            Ok(entry) => Some(entry),
-            Err(e) => match e {
-                DecodeError::UnexpectedEnd { .. } => None,
-                DecodeError::Io { inner, additional } => {
-                    if inner.kind() == std::io::ErrorKind::UnexpectedEof {
-                        None
-                    } else {
-                        println!("Copperlist Decode Error {inner:?} additional:{additional}");
-                        println!("Are the saved copper lists compatable with your copper config?");
-                        None
-                    }
-                }
-                _ => {
-                    println!("Copperlist Decode Error {e:?}");
-                    println!("Are the saved copper lists compatable with your copper config?");
-                    None
-                }
-            },
-        }
-    })
+    std::iter::from_fn(move || read_next_entry::<CopperList<P>>(&mut src))
 }
 
 /// Extracts the keyframes from the log.
 pub fn keyframes_reader(mut src: impl Read) -> impl Iterator<Item = KeyFrame> {
-    std::iter::from_fn(move || {
-        let entry = decode_from_std_read::<KeyFrame, _, _>(&mut src, standard());
-        match entry {
-            Ok(entry) => Some(entry),
-            Err(e) => match e {
-                DecodeError::UnexpectedEnd { .. } => None,
-                DecodeError::Io { inner, additional } => {
-                    if inner.kind() == std::io::ErrorKind::UnexpectedEof {
-                        None
-                    } else {
-                        println!("Error {inner:?} additional:{additional}");
-                        None
-                    }
-                }
-                _ => {
-                    println!("Error {e:?}");
-                    None
-                }
-            },
-        }
-    })
+    std::iter::from_fn(move || read_next_entry::<KeyFrame>(&mut src))
 }
 
 pub fn structlog_reader(mut src: impl Read) -> impl Iterator<Item = CuResult<CuLogEntry>> {
@@ -312,12 +592,17 @@ mod python {
         let all_strings = read_interned_strings(Path::new(index_path))
             .map_err(|e| PyIOError::new_err(e.to_string()))?;
 
-        let UnifiedLogger::Read(dl) = UnifiedLoggerBuilder::new()
+        let logger = UnifiedLoggerBuilder::new()
             .file_base_name(Path::new(unified_src_path))
             .build()
-            .expect("Failed to create logger")
-        else {
-            panic!("Failed to create logger");
+            .map_err(|e| PyIOError::new_err(e.to_string()))?;
+        let dl = match logger {
+            UnifiedLogger::Read(dl) => dl,
+            UnifiedLogger::Write(_) => {
+                return Err(PyIOError::new_err(
+                    "Expected read-only unified logger for Python export",
+                ));
+            }
         };
 
         let reader = UnifiedLoggerIOReader::new(dl, UnifiedLogType::StructuredLogLine);
@@ -338,7 +623,7 @@ mod python {
     #[pymethods]
     impl PyCuLogEntry {
         /// Returns the timestamp of the log entry.
-        pub fn ts<'a>(&self, py: Python<'a>) -> Bound<'a, PyDelta> {
+        pub fn ts<'a>(&self, py: Python<'a>) -> PyResult<Bound<'a, PyDelta>> {
             let nanoseconds: u64 = self.inner.time.into();
 
             // Convert nanoseconds to seconds and microseconds
@@ -346,7 +631,7 @@ mod python {
             let seconds = (nanoseconds / 1_000_000_000) as i32;
             let microseconds = ((nanoseconds % 1_000_000_000) / 1_000) as i32;
 
-            PyDelta::new(py, days, seconds, microseconds, false).unwrap()
+            PyDelta::new(py, days, seconds, microseconds, false)
         }
 
         /// Returns the index of the message in the vector of interned strings.
@@ -360,8 +645,12 @@ mod python {
         }
 
         /// Returns the parameters of this log line
-        pub fn params(&self) -> Vec<Py<PyAny>> {
-            self.inner.params.iter().map(value_to_py).collect()
+        pub fn params(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+            self.inner
+                .params
+                .iter()
+                .map(|value| value_to_py(value, py))
+                .collect()
         }
     }
 
@@ -375,43 +664,44 @@ mod python {
         Ok(())
     }
 
-    fn value_to_py(value: &cu29::prelude::Value) -> Py<PyAny> {
+    fn value_to_py(value: &cu29::prelude::Value, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match value {
-            Value::String(s) => Python::attach(|py| s.into_pyobject(py).unwrap().into()),
-            Value::U64(u) => Python::attach(|py| u.into_pyobject(py).unwrap().into()),
-            Value::I64(i) => Python::attach(|py| i.into_pyobject(py).unwrap().into()),
-            Value::F64(f) => Python::attach(|py| f.into_pyobject(py).unwrap().into()),
-            Value::Bool(b) => Python::attach(|py| b.into_pyobject(py).unwrap().to_owned().into()),
-            Value::CuTime(t) => Python::attach(|py| t.0.into_pyobject(py).unwrap().into()),
-            Value::Bytes(b) => Python::attach(|py| b.into_pyobject(py).unwrap().into()),
-            Value::Char(c) => Python::attach(|py| c.into_pyobject(py).unwrap().into()),
-            Value::I8(i) => Python::attach(|py| i.into_pyobject(py).unwrap().into()),
-            Value::U8(u) => Python::attach(|py| u.into_pyobject(py).unwrap().into()),
-            Value::I16(i) => Python::attach(|py| i.into_pyobject(py).unwrap().into()),
-            Value::U16(u) => Python::attach(|py| u.into_pyobject(py).unwrap().into()),
-            Value::I32(i) => Python::attach(|py| i.into_pyobject(py).unwrap().into()),
-            Value::U32(u) => Python::attach(|py| u.into_pyobject(py).unwrap().into()),
-            Value::Map(m) => Python::attach(|py| {
+            Value::String(s) => Ok(s.into_pyobject(py)?.into()),
+            Value::U64(u) => Ok(u.into_pyobject(py)?.into()),
+            Value::I64(i) => Ok(i.into_pyobject(py)?.into()),
+            Value::F64(f) => Ok(f.into_pyobject(py)?.into()),
+            Value::Bool(b) => Ok(b.into_pyobject(py)?.to_owned().into()),
+            Value::CuTime(t) => Ok(t.0.into_pyobject(py)?.into()),
+            Value::Bytes(b) => Ok(b.into_pyobject(py)?.into()),
+            Value::Char(c) => Ok(c.into_pyobject(py)?.into()),
+            Value::I8(i) => Ok(i.into_pyobject(py)?.into()),
+            Value::U8(u) => Ok(u.into_pyobject(py)?.into()),
+            Value::I16(i) => Ok(i.into_pyobject(py)?.into()),
+            Value::U16(u) => Ok(u.into_pyobject(py)?.into()),
+            Value::I32(i) => Ok(i.into_pyobject(py)?.into()),
+            Value::U32(u) => Ok(u.into_pyobject(py)?.into()),
+            Value::Map(m) => {
                 let dict = PyDict::new(py);
                 for (k, v) in m.iter() {
-                    dict.set_item(value_to_py(k), value_to_py(v)).unwrap();
+                    dict.set_item(value_to_py(k, py)?, value_to_py(v, py)?)?;
                 }
-                dict.into_pyobject(py).unwrap().into()
-            }),
-            Value::F32(f) => Python::attach(|py| f.into_pyobject(py).unwrap().into()),
-            Value::Option(o) => Python::attach(|py| {
-                if o.is_none() {
-                    py.None()
-                } else {
-                    o.clone().map(|v| value_to_py(&v)).unwrap()
-                }
-            }),
-            Value::Unit => Python::attach(|py| py.None()),
-            Value::Newtype(v) => value_to_py(v),
-            Value::Seq(s) => Python::attach(|py| {
-                let list = PyList::new(py, s.iter().map(value_to_py)).unwrap();
-                list.into_pyobject(py).unwrap().into()
-            }),
+                Ok(dict.into_pyobject(py)?.into())
+            }
+            Value::F32(f) => Ok(f.into_pyobject(py)?.into()),
+            Value::Option(o) => match o.as_ref() {
+                Some(value) => value_to_py(value, py),
+                None => Ok(py.None()),
+            },
+            Value::Unit => Ok(py.None()),
+            Value::Newtype(v) => value_to_py(v, py),
+            Value::Seq(s) => {
+                let items: Vec<Py<PyAny>> = s
+                    .iter()
+                    .map(|value| value_to_py(value, py))
+                    .collect::<PyResult<_>>()?;
+                let list = PyList::new(py, items)?;
+                Ok(list.into_pyobject(py)?.into())
+            }
         }
     }
 }
@@ -420,6 +710,7 @@ mod python {
 mod tests {
     use super::*;
     use bincode::{encode_into_slice, Decode, Encode};
+    use serde::Deserialize;
     use std::env;
     use std::fs;
     use std::io::Cursor;
@@ -431,7 +722,10 @@ mod tests {
         // Build a minimal index on the fly so tests don't depend on build-time artifacts.
         let fake_out_dir = tmpdir.path().join("build").join("out").join("dir");
         fs::create_dir_all(&fake_out_dir).unwrap();
-        env::set_var("LOG_INDEX_DIR", &fake_out_dir);
+        // SAFETY: Tests run single-threaded here and we only read the variable after setting it.
+        unsafe {
+            env::set_var("LOG_INDEX_DIR", &fake_out_dir);
+        }
 
         // Provide entries for the message indexes used in this test module.
         let _ = cu29_intern_strs::intern_string("unused to start counter");
@@ -508,7 +802,7 @@ mod tests {
     }
 
     // This is normally generated at compile time in CuPayload.
-    #[derive(Debug, PartialEq, Clone, Copy, Serialize, Encode, Decode, Default)]
+    #[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize, Encode, Decode, Default)]
     struct MyMsgs((u8, i32, f32));
 
     impl ErasedCuStampedDataSet for MyMsgs {

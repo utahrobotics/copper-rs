@@ -5,7 +5,7 @@ use bincode::enc::Encoder;
 use bincode::error::{DecodeError, EncodeError};
 use bincode::{Decode, Encode};
 use cu29::prelude::*;
-use serde::Serializer;
+use serde::{Deserialize, Serialize, Serializer};
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -19,8 +19,9 @@ impl<const S: usize> Freezable for DoraSource<S> {}
 
 impl<const S: usize> CuSrcTask for DoraSource<S> {
     type Output<'m> = output_msg!(DoraPayload);
+    type Resources<'r> = ();
 
-    fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {
@@ -29,7 +30,7 @@ impl<const S: usize> CuSrcTask for DoraSource<S> {
 
     fn process(&mut self, clock: &RobotClock, new_msg: &mut Self::Output<'_>) -> CuResult<()> {
         new_msg.tov = Tov::Time(clock.now());
-        let DoraPayload(ref mut v) = new_msg.payload_mut().as_mut().unwrap();
+        let DoraPayload(v) = new_msg.payload_mut().as_mut().unwrap();
         v.resize(FORTY_K, 0);
         v[42] = 42;
         Ok(())
@@ -42,8 +43,9 @@ impl<const S: usize> Freezable for DoraSink<S> {}
 
 impl<const S: usize> CuSinkTask for DoraSink<S> {
     type Input<'m> = input_msg!(DoraPayload);
+    type Resources<'r> = ();
 
-    fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {
@@ -83,11 +85,21 @@ impl Encode for DoraPayload {
 }
 
 impl Serialize for DoraPayload {
-    fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         // Not needed for this benchmark.
-        _serializer.serialize_bytes(&self.0)
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for DoraPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        Ok(DoraPayload(bytes))
     }
 }

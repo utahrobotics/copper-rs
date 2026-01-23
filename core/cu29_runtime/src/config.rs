@@ -5,21 +5,21 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+use ConfigGraphs::{Missions, Simple};
 use core::fmt;
 use core::fmt::Display;
 use cu29_traits::{CuError, CuResult};
 use hashbrown::HashMap;
-use petgraph::stable_graph::{EdgeIndex, NodeIndex, StableDiGraph};
-use petgraph::visit::EdgeRef;
-#[cfg(feature = "std")]
-use petgraph::visit::IntoEdgeReferences;
 pub use petgraph::Direction::Incoming;
 pub use petgraph::Direction::Outgoing;
+use petgraph::stable_graph::{EdgeIndex, NodeIndex, StableDiGraph};
+#[cfg(feature = "std")]
+use petgraph::visit::IntoEdgeReferences;
+use petgraph::visit::{Bfs, EdgeRef};
 use ron::extensions::Extensions;
 use ron::value::Value as RonValue;
 use ron::{Number, Options};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use ConfigGraphs::{Missions, Simple};
 
 #[cfg(not(feature = "std"))]
 mod imp {
@@ -48,6 +48,8 @@ pub type NodeId = u32;
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct ComponentConfig(pub HashMap<String, Value>);
 
+/// Mapping between resource binding names and bundle-scoped resource ids.
+#[allow(dead_code)]
 impl Display for ComponentConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut first = true;
@@ -72,9 +74,15 @@ impl ComponentConfig {
     }
 
     #[allow(dead_code)]
-    pub fn get<T: From<Value>>(&self, key: &str) -> Option<T> {
+    pub fn get<T>(&self, key: &str) -> Result<Option<T>, ConfigError>
+    where
+        T: for<'a> TryFrom<&'a Value, Error = ConfigError>,
+    {
         let ComponentConfig(config) = self;
-        config.get(key).map(|v| T::from(v.clone()))
+        match config.get(key) {
+            Some(value) => T::try_from(value).map(Some),
+            None => Ok(None),
+        }
     }
 
     #[allow(dead_code)]
@@ -107,6 +115,37 @@ where
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfigError {
+    message: String,
+}
+
+impl ConfigError {
+    fn type_mismatch(expected: &'static str, value: &Value) -> Self {
+        ConfigError {
+            message: format!("Expected {expected} but got {value:?}"),
+        }
+    }
+}
+
+impl Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for ConfigError {}
+
+#[cfg(not(feature = "std"))]
+impl core::error::Error for ConfigError {}
+
+impl From<ConfigError> for CuError {
+    fn from(err: ConfigError) -> Self {
+        CuError::from(err.to_string())
+    }
+}
+
 // Macro for implementing From<T> for Value where T is a numeric type
 macro_rules! impl_from_numeric_for_value {
     ($($source:ty),* $(,)?) => {
@@ -120,6 +159,18 @@ macro_rules! impl_from_numeric_for_value {
 
 // Implement From for common numeric types
 impl_from_numeric_for_value!(i8, i16, i32, i64, u8, u16, u32, u64, f32, f64);
+
+impl TryFrom<&Value> for bool {
+    type Error = ConfigError;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
+        if let Value(RonValue::Bool(v)) = value {
+            Ok(*v)
+        } else {
+            Err(ConfigError::type_mismatch("bool", value))
+        }
+    }
+}
 
 impl From<Value> for bool {
     fn from(value: Value) -> Self {
@@ -160,6 +211,65 @@ macro_rules! impl_from_value_for_int {
 
 impl_from_value_for_int!(u8, i8, u16, i16, u32, i32, u64, i64);
 
+macro_rules! impl_try_from_value_for_int {
+    ($($target:ty),* $(,)?) => {
+        $(
+            impl TryFrom<&Value> for $target {
+                type Error = ConfigError;
+
+                fn try_from(value: &Value) -> Result<Self, Self::Error> {
+                    if let Value(RonValue::Number(num)) = value {
+                        match num {
+                            Number::I8(n) => Ok(*n as $target),
+                            Number::I16(n) => Ok(*n as $target),
+                            Number::I32(n) => Ok(*n as $target),
+                            Number::I64(n) => Ok(*n as $target),
+                            Number::U8(n) => Ok(*n as $target),
+                            Number::U16(n) => Ok(*n as $target),
+                            Number::U32(n) => Ok(*n as $target),
+                            Number::U64(n) => Ok(*n as $target),
+                            Number::F32(_) | Number::F64(_) | Number::__NonExhaustive(_) => {
+                                Err(ConfigError::type_mismatch("integer", value))
+                            }
+                        }
+                    } else {
+                        Err(ConfigError::type_mismatch("integer", value))
+                    }
+                }
+            }
+        )*
+    };
+}
+
+impl_try_from_value_for_int!(u8, i8, u16, i16, u32, i32, u64, i64);
+
+impl TryFrom<&Value> for f64 {
+    type Error = ConfigError;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
+        if let Value(RonValue::Number(num)) = value {
+            let number = match num {
+                Number::I8(n) => *n as f64,
+                Number::I16(n) => *n as f64,
+                Number::I32(n) => *n as f64,
+                Number::I64(n) => *n as f64,
+                Number::U8(n) => *n as f64,
+                Number::U16(n) => *n as f64,
+                Number::U32(n) => *n as f64,
+                Number::U64(n) => *n as f64,
+                Number::F32(n) => n.0 as f64,
+                Number::F64(n) => n.0,
+                Number::__NonExhaustive(_) => {
+                    return Err(ConfigError::type_mismatch("number", value));
+                }
+            };
+            Ok(number)
+        } else {
+            Err(ConfigError::type_mismatch("number", value))
+        }
+    }
+}
+
 impl From<Value> for f64 {
     fn from(value: Value) -> Self {
         if let Value(RonValue::Number(num)) = value {
@@ -173,6 +283,18 @@ impl From<Value> for f64 {
 impl From<String> for Value {
     fn from(value: String) -> Self {
         Value(RonValue::String(value))
+    }
+}
+
+impl TryFrom<&Value> for String {
+    type Error = ConfigError;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
+        if let Value(RonValue::String(s)) = value {
+            Ok(s.clone())
+        } else {
+            Err(ConfigError::type_mismatch("string", value))
+        }
     }
 }
 
@@ -248,6 +370,10 @@ pub struct Node {
     #[serde(skip_serializing_if = "Option::is_none")]
     config: Option<ComponentConfig>,
 
+    /// Resources requested by the task.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resources: Option<HashMap<String, String>>,
+
     /// Missions for which this task is run.
     missions: Option<Vec<String>>,
 
@@ -280,6 +406,7 @@ impl Node {
             id: id.to_string(),
             type_: Some(ptype.to_string()),
             config: None,
+            resources: None,
             missions: None,
             background: None,
             run_in_sim: None,
@@ -312,6 +439,14 @@ impl Node {
     }
 
     #[allow(dead_code)]
+    pub fn set_resources<I>(&mut self, resources: Option<I>)
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
+        self.resources = resources.map(|iter| iter.into_iter().collect());
+    }
+
+    #[allow(dead_code)]
     pub fn is_background(&self) -> bool {
         self.background.unwrap_or(false)
     }
@@ -319,6 +454,11 @@ impl Node {
     #[allow(dead_code)]
     pub fn get_instance_config(&self) -> Option<&ComponentConfig> {
         self.config.as_ref()
+    }
+
+    #[allow(dead_code)]
+    pub fn get_resources(&self) -> Option<&HashMap<String, String>> {
+        self.resources.as_ref()
     }
 
     /// By default, assume a source or a sink is not run in sim.
@@ -338,11 +478,19 @@ impl Node {
     }
 
     #[allow(dead_code)]
-    pub fn get_param<T: From<Value>>(&self, key: &str) -> Option<T> {
-        let pc = self.config.as_ref()?;
+    pub fn get_param<T>(&self, key: &str) -> Result<Option<T>, ConfigError>
+    where
+        T: for<'a> TryFrom<&'a Value, Error = ConfigError>,
+    {
+        let pc = match self.config.as_ref() {
+            Some(pc) => pc,
+            None => return Ok(None),
+        };
         let ComponentConfig(pc) = pc;
-        let v = pc.get(key)?;
-        Some(T::from(v.clone()))
+        match pc.get(key) {
+            Some(v) => T::try_from(v).map(Some),
+            None => Ok(None),
+        }
     }
 
     #[allow(dead_code)]
@@ -447,6 +595,18 @@ fn validate_bridge_channel(
     }
 }
 
+/// Declarative definition of a resource bundle.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ResourceBundleConfig {
+    pub id: String,
+    #[serde(rename = "provider")]
+    pub provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<ComponentConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missions: Option<Vec<String>>,
+}
+
 /// Declarative definition of a bridge component with a list of channels.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct BridgeConfig {
@@ -455,6 +615,8 @@ pub struct BridgeConfig {
     pub type_: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<ComponentConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub missions: Option<Vec<String>>,
     /// List of logical endpoints exposed by this bridge.
@@ -465,6 +627,7 @@ impl BridgeConfig {
     fn to_node(&self) -> Node {
         let mut node = Node::new_with_flavor(&self.id, &self.type_, Flavor::Bridge);
         node.config = self.config.clone();
+        node.resources = self.resources.clone();
         node.missions = self.missions.clone();
         node
     }
@@ -605,6 +768,43 @@ impl CuGraph {
             .neighbors_directed(node_id.into(), dir.into())
             .map(|petgraph_index| petgraph_index.index() as NodeId)
             .collect()
+    }
+
+    #[allow(dead_code)]
+    pub fn node_ids(&self) -> Vec<NodeId> {
+        self.0
+            .node_indices()
+            .map(|index| index.index() as NodeId)
+            .collect()
+    }
+
+    #[allow(dead_code)]
+    pub fn edge_id_between(&self, source: NodeId, target: NodeId) -> Option<usize> {
+        self.0
+            .find_edge(source.into(), target.into())
+            .map(|edge| edge.index())
+    }
+
+    #[allow(dead_code)]
+    pub fn edge(&self, edge_id: usize) -> Option<&Cnx> {
+        self.0.edge_weight(EdgeIndex::new(edge_id))
+    }
+
+    #[allow(dead_code)]
+    pub fn edges(&self) -> impl Iterator<Item = &Cnx> {
+        self.0
+            .edge_indices()
+            .filter_map(|edge| self.0.edge_weight(edge))
+    }
+
+    #[allow(dead_code)]
+    pub fn bfs_nodes(&self, start: NodeId) -> Vec<NodeId> {
+        let mut visitor = Bfs::new(&self.0, start.into());
+        let mut nodes = Vec::new();
+        while let Some(node) = visitor.next(&self.0) {
+            nodes.push(node.index() as NodeId);
+        }
+        nodes
     }
 
     #[allow(dead_code)]
@@ -873,14 +1073,14 @@ impl ConfigGraphs {
     #[allow(dead_code)]
     pub fn get_graph_mut(&mut self, mission_id: Option<&str>) -> CuResult<&mut CuGraph> {
         match self {
-            Simple(ref mut graph) => {
+            Simple(graph) => {
                 if mission_id.is_none() {
                     Ok(graph)
                 } else {
                     Err("Cannot get mission graph from simple config".into())
                 }
             }
-            Missions(ref mut graphs) => {
+            Missions(graphs) => {
                 if let Some(id) = mission_id {
                     graphs
                         .get_mut(id)
@@ -922,10 +1122,53 @@ pub struct CuConfig {
     pub logging: Option<LoggingConfig>,
     /// Optional runtime configuration
     pub runtime: Option<RuntimeConfig>,
+    /// Declarative resource bundle definitions
+    pub resources: Vec<ResourceBundleConfig>,
     /// Declarative bridge definitions that are yet to be expanded into the graph
     pub bridges: Vec<BridgeConfig>,
     /// Graph structure - either a single graph or multiple mission-specific graphs
     pub graphs: ConfigGraphs,
+}
+
+impl CuConfig {
+    #[cfg(feature = "std")]
+    fn ensure_threadpool_bundle(&mut self) {
+        if !self.has_background_tasks() {
+            return;
+        }
+        if self
+            .resources
+            .iter()
+            .any(|bundle| bundle.id == "threadpool")
+        {
+            return;
+        }
+
+        let mut config = ComponentConfig::default();
+        config.set("threads", 2u64);
+        self.resources.push(ResourceBundleConfig {
+            id: "threadpool".to_string(),
+            provider: "cu29::resource::ThreadPoolBundle".to_string(),
+            config: Some(config),
+            missions: None,
+        });
+    }
+
+    #[cfg(feature = "std")]
+    fn has_background_tasks(&self) -> bool {
+        match &self.graphs {
+            ConfigGraphs::Simple(graph) => graph
+                .get_all_nodes()
+                .iter()
+                .any(|(_, node)| node.is_background()),
+            ConfigGraphs::Missions(graphs) => graphs.values().any(|graph| {
+                graph
+                    .get_all_nodes()
+                    .iter()
+                    .any(|(_, node)| node.is_background())
+            }),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
@@ -1009,6 +1252,7 @@ pub struct IncludesConfig {
 #[derive(Serialize, Deserialize, Default)]
 struct CuConfigRepresentation {
     tasks: Option<Vec<Node>>,
+    resources: Option<Vec<ResourceBundleConfig>>,
     bridges: Option<Vec<BridgeConfig>>,
     cnx: Option<Vec<SerializedCnx>>,
     monitor: Option<MonitorConfig>,
@@ -1166,6 +1410,7 @@ where
     cuconfig.monitor = representation.monitor.clone();
     cuconfig.logging = representation.logging.clone();
     cuconfig.runtime = representation.runtime.clone();
+    cuconfig.resources = representation.resources.clone().unwrap_or_default();
     cuconfig.bridges = representation.bridges.clone().unwrap_or_default();
 
     Ok(cuconfig)
@@ -1199,6 +1444,11 @@ impl Serialize for CuConfig {
         } else {
             Some(self.bridges.clone())
         };
+        let resources = if self.resources.is_empty() {
+            None
+        } else {
+            Some(self.resources.clone())
+        };
         match &self.graphs {
             Simple(graph) => {
                 let tasks: Vec<Node> = graph
@@ -1221,6 +1471,7 @@ impl Serialize for CuConfig {
                     monitor: self.monitor.clone(),
                     logging: self.logging.clone(),
                     runtime: self.runtime.clone(),
+                    resources: resources.clone(),
                     missions: None,
                     includes: None,
                 }
@@ -1263,6 +1514,7 @@ impl Serialize for CuConfig {
 
                 CuConfigRepresentation {
                     tasks: Some(tasks),
+                    resources: resources.clone(),
                     bridges,
                     cnx: Some(cnx),
                     monitor: self.monitor.clone(),
@@ -1284,6 +1536,7 @@ impl Default for CuConfig {
             monitor: None,
             logging: None,
             runtime: None,
+            resources: Vec::new(),
             bridges: Vec::new(),
         }
     }
@@ -1304,6 +1557,7 @@ impl CuConfig {
             monitor: None,
             logging: None,
             runtime: None,
+            resources: Vec::new(),
             bridges: Vec::new(),
         }
     }
@@ -1316,20 +1570,23 @@ impl CuConfig {
     }
 
     #[allow(dead_code)]
-    pub fn serialize_ron(&self) -> String {
+    pub fn serialize_ron(&self) -> CuResult<String> {
         let ron = Self::get_options();
         let pretty = ron::ser::PrettyConfig::default();
-        ron.to_string_pretty(&self, pretty).unwrap()
+        ron.to_string_pretty(&self, pretty)
+            .map_err(|e| CuError::from(format!("Error serializing configuration: {e}")))
     }
 
     #[allow(dead_code)]
-    pub fn deserialize_ron(ron: &str) -> Self {
-        match Self::get_options().from_str(ron) {
-            Ok(representation) => Self::deserialize_impl(representation).unwrap_or_else(|e| {
-                panic!("Error deserializing configuration: {e}");
-            }),
-            Err(e) => panic!("Syntax Error in config: {} at position {}", e.code, e.span),
-        }
+    pub fn deserialize_ron(ron: &str) -> CuResult<Self> {
+        let representation = Self::get_options().from_str(ron).map_err(|e| {
+            CuError::from(format!(
+                "Syntax Error in config: {} at position {}",
+                e.code, e.span
+            ))
+        })?;
+        Self::deserialize_impl(representation)
+            .map_err(|e| CuError::from(format!("Error deserializing configuration: {e}")))
     }
 
     fn deserialize_impl(representation: CuConfigRepresentation) -> Result<Self, String> {
@@ -1338,15 +1595,20 @@ impl CuConfig {
 
     /// Render the configuration graph in the dot format.
     #[cfg(feature = "std")]
+    #[allow(dead_code)]
     pub fn render(
         &self,
         output: &mut dyn std::io::Write,
         mission_id: Option<&str>,
     ) -> CuResult<()> {
-        writeln!(output, "digraph G {{").unwrap();
-        writeln!(output, "    graph [rankdir=LR, nodesep=0.8, ranksep=1.2];").unwrap();
-        writeln!(output, "    node [shape=plain, fontname=\"Noto Sans\"];").unwrap();
-        writeln!(output, "    edge [fontname=\"Noto Sans\"];").unwrap();
+        writeln!(output, "digraph G {{")
+            .map_err(|e| CuError::new_with_cause("Failed to write render output", e))?;
+        writeln!(output, "    graph [rankdir=LR, nodesep=0.8, ranksep=1.2];")
+            .map_err(|e| CuError::new_with_cause("Failed to write render output", e))?;
+        writeln!(output, "    node [shape=plain, fontname=\"Noto Sans\"];")
+            .map_err(|e| CuError::new_with_cause("Failed to write render output", e))?;
+        writeln!(output, "    edge [fontname=\"Noto Sans\"];")
+            .map_err(|e| CuError::new_with_cause("Failed to write render output", e))?;
 
         let sections = match (&self.graphs, mission_id) {
             (Simple(graph), _) => vec![RenderSection { label: None, graph }],
@@ -1376,7 +1638,8 @@ impl CuConfig {
             self.render_section(output, section.graph, section.label.as_deref())?;
         }
 
-        writeln!(output, "}}").unwrap();
+        writeln!(output, "}}")
+            .map_err(|e| CuError::new_with_cause("Failed to write render output", e))?;
         Ok(())
     }
 
@@ -1424,40 +1687,58 @@ impl CuConfig {
 }
 
 #[cfg(feature = "std")]
-struct PortLookup {
-    inputs: HashMap<String, String>,
-    outputs: HashMap<String, String>,
-    default_input: Option<String>,
-    default_output: Option<String>,
+#[derive(Default)]
+pub(crate) struct PortLookup {
+    pub inputs: HashMap<String, String>,
+    pub outputs: HashMap<String, String>,
+    pub default_input: Option<String>,
+    pub default_output: Option<String>,
 }
 
 #[cfg(feature = "std")]
 #[derive(Clone)]
-struct RenderNode {
-    id: String,
-    type_name: String,
-    flavor: Flavor,
-    inputs: Vec<String>,
-    outputs: Vec<String>,
+pub(crate) struct RenderNode {
+    pub id: String,
+    pub type_name: String,
+    pub flavor: Flavor,
+    pub inputs: Vec<String>,
+    pub outputs: Vec<String>,
 }
 
 #[cfg(feature = "std")]
 #[derive(Clone)]
-struct RenderConnection {
-    src: String,
-    src_port: Option<String>,
-    dst: String,
-    dst_port: Option<String>,
-    msg: String,
+pub(crate) struct RenderConnection {
+    pub src: String,
+    pub src_port: Option<String>,
+    #[allow(dead_code)]
+    pub src_channel: Option<String>,
+    pub dst: String,
+    pub dst_port: Option<String>,
+    #[allow(dead_code)]
+    pub dst_channel: Option<String>,
+    pub msg: String,
 }
 
 #[cfg(feature = "std")]
-struct RenderTopology {
-    nodes: Vec<RenderNode>,
-    connections: Vec<RenderConnection>,
+pub(crate) struct RenderTopology {
+    pub nodes: Vec<RenderNode>,
+    pub connections: Vec<RenderConnection>,
 }
 
 #[cfg(feature = "std")]
+impl RenderTopology {
+    pub fn sort_connections(&mut self) {
+        self.connections.sort_by(|a, b| {
+            a.src
+                .cmp(&b.src)
+                .then(a.dst.cmp(&b.dst))
+                .then(a.msg.cmp(&b.msg))
+        });
+    }
+}
+
+#[cfg(feature = "std")]
+#[allow(dead_code)]
 struct RenderSection<'a> {
     label: Option<String>,
     graph: &'a CuGraph,
@@ -1465,6 +1746,7 @@ struct RenderSection<'a> {
 
 #[cfg(feature = "std")]
 impl CuConfig {
+    #[allow(dead_code)]
     fn render_section(
         &self,
         output: &mut dyn std::io::Write,
@@ -1475,27 +1757,23 @@ impl CuConfig {
 
         let mut topology = build_render_topology(graph, &self.bridges);
         topology.nodes.sort_by(|a, b| a.id.cmp(&b.id));
-        topology.connections.sort_by(|a, b| {
-            a.src
-                .cmp(&b.src)
-                .then(a.dst.cmp(&b.dst))
-                .then(a.msg.cmp(&b.msg))
-        });
+        topology.sort_connections();
 
         let cluster_id = label.map(|lbl| format!("cluster_{}", sanitize_identifier(lbl)));
         if let Some(ref cluster_id) = cluster_id {
-            writeln!(output, "    subgraph \"{cluster_id}\" {{").unwrap();
+            writeln!(output, "    subgraph \"{cluster_id}\" {{")
+                .map_err(|e| CuError::new_with_cause("Failed to write render output", e))?;
             writeln!(
                 output,
                 "        label=<<B>Mission: {}</B>>;",
                 encode_text(label.unwrap())
             )
-            .unwrap();
+            .map_err(|e| CuError::new_with_cause("Failed to write render output", e))?;
             writeln!(
                 output,
                 "        labelloc=t; labeljust=l; color=\"#bbbbbb\"; style=\"rounded\"; margin=20;"
             )
-            .unwrap();
+            .map_err(|e| CuError::new_with_cause("Failed to write render output", e))?;
         }
         let indent = if cluster_id.is_some() {
             "        "
@@ -1569,7 +1847,8 @@ impl CuConfig {
                 format!("{node_prefix}{}", node.id)
             };
             let identifier = escape_dot_id(&identifier_raw);
-            writeln!(output, "{indent}\"{identifier}\" [label=<{label_html}>];").unwrap();
+            writeln!(output, "{indent}\"{identifier}\" [label=<{label_html}>];")
+                .map_err(|e| CuError::new_with_cause("Failed to write render output", e))?;
 
             id_lookup.insert(node.id.clone(), identifier);
             port_lookup.insert(
@@ -1605,11 +1884,12 @@ impl CuConfig {
                 output,
                 "{indent}\"{src_id}\"{src_suffix} -> \"{dst_id}\"{dst_suffix} [label=< <B><FONT COLOR=\"gray\">{msg}</FONT></B> >];"
             )
-            .unwrap();
+            .map_err(|e| CuError::new_with_cause("Failed to write render output", e))?;
         }
 
         if cluster_id.is_some() {
-            writeln!(output, "    }}").unwrap();
+            writeln!(output, "    }}")
+                .map_err(|e| CuError::new_with_cause("Failed to write render output", e))?;
         }
 
         Ok(())
@@ -1617,96 +1897,136 @@ impl CuConfig {
 }
 
 #[cfg(feature = "std")]
-fn build_render_topology(graph: &CuGraph, bridges: &[BridgeConfig]) -> RenderTopology {
+pub(crate) fn build_render_topology(graph: &CuGraph, bridges: &[BridgeConfig]) -> RenderTopology {
     let mut bridge_lookup = HashMap::new();
     for bridge in bridges {
         bridge_lookup.insert(bridge.id.as_str(), bridge);
     }
 
-    let mut nodes: HashMap<String, RenderNode> = HashMap::new();
+    let mut nodes: Vec<RenderNode> = Vec::new();
+    let mut node_lookup: HashMap<String, usize> = HashMap::new();
     for (_, node) in graph.get_all_nodes() {
         let node_id = node.get_id();
         let mut inputs = Vec::new();
         let mut outputs = Vec::new();
-        if node.get_flavor() == Flavor::Bridge {
-            if let Some(bridge) = bridge_lookup.get(node_id.as_str()) {
-                for channel in &bridge.channels {
-                    match channel {
-                        // Rx brings data from the bridge into the graph, so treat it as an output.
-                        BridgeChannelConfigRepresentation::Rx { id, .. } => {
-                            outputs.push(id.clone())
-                        }
-                        // Tx consumes data from the graph heading into the bridge, so show it on the input side.
-                        BridgeChannelConfigRepresentation::Tx { id, .. } => inputs.push(id.clone()),
-                    }
+        if node.get_flavor() == Flavor::Bridge
+            && let Some(bridge) = bridge_lookup.get(node_id.as_str())
+        {
+            for channel in &bridge.channels {
+                match channel {
+                    // Rx brings data from the bridge into the graph, so treat it as an output.
+                    BridgeChannelConfigRepresentation::Rx { id, .. } => outputs.push(id.clone()),
+                    // Tx consumes data from the graph heading into the bridge, so show it on the input side.
+                    BridgeChannelConfigRepresentation::Tx { id, .. } => inputs.push(id.clone()),
                 }
             }
         }
 
-        nodes.insert(
-            node_id.clone(),
-            RenderNode {
-                id: node_id,
-                type_name: node.get_type().to_string(),
-                flavor: node.get_flavor(),
-                inputs,
-                outputs,
-            },
-        );
+        node_lookup.insert(node_id.clone(), nodes.len());
+        nodes.push(RenderNode {
+            id: node_id,
+            type_name: node.get_type().to_string(),
+            flavor: node.get_flavor(),
+            inputs,
+            outputs,
+        });
     }
 
+    let mut output_port_lookup: Vec<HashMap<String, String>> = vec![HashMap::new(); nodes.len()];
+    let mut output_edges: Vec<_> = graph.0.edge_references().collect();
+    output_edges.sort_by_key(|edge| edge.id().index());
+    for edge in output_edges {
+        let cnx = edge.weight();
+        if let Some(&idx) = node_lookup.get(&cnx.src)
+            && nodes[idx].flavor == Flavor::Task
+            && cnx.src_channel.is_none()
+        {
+            let port_map = &mut output_port_lookup[idx];
+            if !port_map.contains_key(&cnx.msg) {
+                let label = format!("out{}: {}", port_map.len(), cnx.msg);
+                port_map.insert(cnx.msg.clone(), label.clone());
+                nodes[idx].outputs.push(label);
+            }
+        }
+    }
+
+    let mut auto_input_counts = vec![0usize; nodes.len()];
+    for edge in graph.0.edge_references() {
+        let cnx = edge.weight();
+        if let Some(&idx) = node_lookup.get(&cnx.dst)
+            && nodes[idx].flavor == Flavor::Task
+            && cnx.dst_channel.is_none()
+        {
+            auto_input_counts[idx] += 1;
+        }
+    }
+
+    let mut next_auto_input = vec![0usize; nodes.len()];
     let mut connections = Vec::new();
     for edge in graph.0.edge_references() {
         let cnx = edge.weight();
-        if let Some(node) = nodes.get_mut(&cnx.src) {
-            if node.flavor == Flavor::Task && cnx.src_channel.is_none() && node.outputs.is_empty() {
-                node.outputs.push("out0".to_string());
+        let mut src_port = cnx.src_channel.clone();
+        let mut dst_port = cnx.dst_channel.clone();
+
+        if let Some(&idx) = node_lookup.get(&cnx.src) {
+            let node = &mut nodes[idx];
+            if node.flavor == Flavor::Task && src_port.is_none() {
+                src_port = output_port_lookup[idx].get(&cnx.msg).cloned();
             }
         }
-        if let Some(node) = nodes.get_mut(&cnx.dst) {
-            if node.flavor == Flavor::Task && cnx.dst_channel.is_none() {
-                let next = format!("in{}", node.inputs.len());
-                node.inputs.push(next);
+        if let Some(&idx) = node_lookup.get(&cnx.dst) {
+            let node = &mut nodes[idx];
+            if node.flavor == Flavor::Task && dst_port.is_none() {
+                let count = auto_input_counts[idx];
+                let next = if count <= 1 {
+                    "in".to_string()
+                } else {
+                    let next = format!("in.{}", next_auto_input[idx]);
+                    next_auto_input[idx] += 1;
+                    next
+                };
+                node.inputs.push(next.clone());
+                dst_port = Some(next);
             }
         }
 
         connections.push(RenderConnection {
             src: cnx.src.clone(),
-            src_port: cnx.src_channel.clone(),
+            src_port,
+            src_channel: cnx.src_channel.clone(),
             dst: cnx.dst.clone(),
-            dst_port: cnx.dst_channel.clone(),
+            dst_port,
+            dst_channel: cnx.dst_channel.clone(),
             msg: cnx.msg.clone(),
         });
     }
 
-    RenderTopology {
-        nodes: nodes.into_values().collect(),
-        connections,
-    }
+    RenderTopology { nodes, connections }
 }
 
 #[cfg(feature = "std")]
 impl PortLookup {
-    fn resolve_input(&self, name: Option<&str>) -> Option<&str> {
-        if let Some(name) = name {
-            if let Some(port) = self.inputs.get(name) {
-                return Some(port.as_str());
-            }
+    pub fn resolve_input(&self, name: Option<&str>) -> Option<&str> {
+        if let Some(name) = name
+            && let Some(port) = self.inputs.get(name)
+        {
+            return Some(port.as_str());
         }
         self.default_input.as_deref()
     }
 
-    fn resolve_output(&self, name: Option<&str>) -> Option<&str> {
-        if let Some(name) = name {
-            if let Some(port) = self.outputs.get(name) {
-                return Some(port.as_str());
-            }
+    pub fn resolve_output(&self, name: Option<&str>) -> Option<&str> {
+        if let Some(name) = name
+            && let Some(port) = self.outputs.get(name)
+        {
+            return Some(port.as_str());
         }
         self.default_output.as_deref()
     }
 }
 
 #[cfg(feature = "std")]
+#[allow(dead_code)]
 fn build_port_table(
     title: &str,
     names: &[String],
@@ -1754,6 +2074,7 @@ fn build_port_table(
 }
 
 #[cfg(feature = "std")]
+#[allow(dead_code)]
 fn build_config_table(config: &ComponentConfig) -> Option<String> {
     use std::fmt::Write as FmtWrite;
 
@@ -1781,6 +2102,7 @@ fn build_config_table(config: &ComponentConfig) -> Option<String> {
 }
 
 #[cfg(feature = "std")]
+#[allow(dead_code)]
 fn sanitize_identifier(value: &str) -> String {
     value
         .chars()
@@ -1789,6 +2111,7 @@ fn sanitize_identifier(value: &str) -> String {
 }
 
 #[cfg(feature = "std")]
+#[allow(dead_code)]
 fn escape_dot_id(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -1804,12 +2127,13 @@ fn escape_dot_id(value: &str) -> String {
 impl LoggingConfig {
     /// Validate the logging configuration to ensure section pre-allocation sizes do not exceed slab sizes.
     pub fn validate(&self) -> CuResult<()> {
-        if let Some(section_size_mib) = self.section_size_mib {
-            if let Some(slab_size_mib) = self.slab_size_mib {
-                if section_size_mib > slab_size_mib {
-                    return Err(CuError::from(format!("Section size ({section_size_mib} MiB) cannot be larger than slab size ({slab_size_mib} MiB). Adjust the parameters accordingly.")));
-                }
-            }
+        if let Some(section_size_mib) = self.section_size_mib
+            && let Some(slab_size_mib) = self.slab_size_mib
+            && section_size_mib > slab_size_mib
+        {
+            return Err(CuError::from(format!(
+                "Section size ({section_size_mib} MiB) cannot be larger than slab size ({slab_size_mib} MiB). Adjust the parameters accordingly."
+            )));
         }
 
         Ok(())
@@ -1910,6 +2234,20 @@ fn process_includes(
                 }
             }
 
+            if let Some(included_resources) = included_representation.resources {
+                if result.resources.is_none() {
+                    result.resources = Some(included_resources);
+                } else {
+                    let mut resources = result.resources.take().unwrap();
+                    for included_resource in included_resources {
+                        if !resources.iter().any(|r| r.id == included_resource.id) {
+                            resources.push(included_resource);
+                        }
+                    }
+                    result.resources = Some(resources);
+                }
+            }
+
             if let Some(included_cnx) = included_representation.cnx {
                 if result.cnx.is_none() {
                     result.cnx = Some(included_cnx);
@@ -1991,8 +2329,12 @@ fn parse_config_string(content: &str) -> CuResult<CuConfigRepresentation> {
 /// Convert a CuConfigRepresentation to a CuConfig.
 /// Uses the deserialize_impl method and validates the logging configuration.
 fn config_representation_to_config(representation: CuConfigRepresentation) -> CuResult<CuConfig> {
-    let cuconfig = CuConfig::deserialize_impl(representation)
+    #[allow(unused_mut)]
+    let mut cuconfig = CuConfig::deserialize_impl(representation)
         .map_err(|e| CuError::from(format!("Error deserializing configuration: {e}")))?;
+
+    #[cfg(feature = "std")]
+    cuconfig.ensure_threadpool_bundle();
 
     cuconfig.validate_logging_config()?;
 
@@ -2038,8 +2380,8 @@ mod tests {
             .add_node(Node::new("test2", "package::Plugin2"))
             .unwrap();
         graph.connect(n1, n2, "msgpkg::MsgType").unwrap();
-        let serialized = config.serialize_ron();
-        let deserialized = CuConfig::deserialize_ron(&serialized);
+        let serialized = config.serialize_ron().unwrap();
+        let deserialized = CuConfig::deserialize_ron(&serialized).unwrap();
         let graph = config.graphs.get_graph(None).unwrap();
         let deserialized_graph = deserialized.graphs.get_graph(None).unwrap();
         assert_eq!(graph.node_count(), deserialized_graph.node_count());
@@ -2053,30 +2395,31 @@ mod tests {
         let mut camera = Node::new("copper-camera", "camerapkg::Camera");
         camera.set_param::<Value>("resolution-height", 1080.into());
         graph.add_node(camera).unwrap();
-        let serialized = config.serialize_ron();
-        let config = CuConfig::deserialize_ron(&serialized);
+        let serialized = config.serialize_ron().unwrap();
+        let config = CuConfig::deserialize_ron(&serialized).unwrap();
         let deserialized = config.get_graph(None).unwrap();
-        assert_eq!(
-            deserialized
-                .get_node(0)
-                .unwrap()
-                .get_param::<i32>("resolution-height")
-                .unwrap(),
-            1080
-        );
+        let resolution = deserialized
+            .get_node(0)
+            .unwrap()
+            .get_param::<i32>("resolution-height")
+            .expect("resolution-height lookup failed");
+        assert_eq!(resolution, Some(1080));
     }
 
     #[test]
-    #[should_panic(expected = "Syntax Error in config: Expected opening `[` at position 1:9-1:10")]
     fn test_deserialization_error() {
         // Task needs to be an array, but provided tuple wrongfully
         let txt = r#"( tasks: (), cnx: [], monitor: (type: "ExampleMonitor", ) ) "#;
-        CuConfig::deserialize_ron(txt);
+        let err = CuConfig::deserialize_ron(txt).expect_err("expected deserialization error");
+        assert!(
+            err.to_string()
+                .contains("Syntax Error in config: Expected opening `[` at position 1:9-1:10")
+        );
     }
     #[test]
     fn test_missions() {
         let txt = r#"( missions: [ (id: "data_collection"), (id: "autonomous")])"#;
-        let config = CuConfig::deserialize_ron(txt);
+        let config = CuConfig::deserialize_ron(txt).unwrap();
         let graph = config.graphs.get_graph(Some("data_collection")).unwrap();
         assert!(graph.node_count() == 0);
         let graph = config.graphs.get_graph(Some("autonomous")).unwrap();
@@ -2086,12 +2429,12 @@ mod tests {
     #[test]
     fn test_monitor() {
         let txt = r#"( tasks: [], cnx: [], monitor: (type: "ExampleMonitor", ) ) "#;
-        let config = CuConfig::deserialize_ron(txt);
+        let config = CuConfig::deserialize_ron(txt).unwrap();
         assert_eq!(config.monitor.as_ref().unwrap().type_, "ExampleMonitor");
 
         let txt =
             r#"( tasks: [], cnx: [], monitor: (type: "ExampleMonitor", config: { "toto": 4, } )) "#;
-        let config = CuConfig::deserialize_ron(txt);
+        let config = CuConfig::deserialize_ron(txt).unwrap();
         assert_eq!(
             config.monitor.as_ref().unwrap().config.as_ref().unwrap().0["toto"].0,
             4u8.into()
@@ -2099,11 +2442,40 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "std")]
+    fn test_render_topology_multi_input_ports() {
+        let mut config = CuConfig::default();
+        let graph = config.get_graph_mut(None).unwrap();
+        let src1 = graph.add_node(Node::new("src1", "tasks::Source1")).unwrap();
+        let src2 = graph.add_node(Node::new("src2", "tasks::Source2")).unwrap();
+        let dst = graph.add_node(Node::new("dst", "tasks::Dst")).unwrap();
+        graph.connect(src1, dst, "msg::A").unwrap();
+        graph.connect(src2, dst, "msg::B").unwrap();
+
+        let topology = build_render_topology(graph, &[]);
+        let dst_node = topology
+            .nodes
+            .iter()
+            .find(|node| node.id == "dst")
+            .expect("missing dst node");
+        assert_eq!(dst_node.inputs.len(), 2);
+
+        let mut dst_ports: Vec<_> = topology
+            .connections
+            .iter()
+            .filter(|cnx| cnx.dst == "dst")
+            .map(|cnx| cnx.dst_port.as_deref().expect("missing dst port"))
+            .collect();
+        dst_ports.sort();
+        assert_eq!(dst_ports, vec!["in.0", "in.1"]);
+    }
+
+    #[test]
     fn test_logging_parameters() {
         // Test with `enable_task_logging: false`
         let txt = r#"( tasks: [], cnx: [], logging: ( slab_size_mib: 1024, section_size_mib: 100, enable_task_logging: false ),) "#;
 
-        let config = CuConfig::deserialize_ron(txt);
+        let config = CuConfig::deserialize_ron(txt).unwrap();
         assert!(config.logging.is_some());
         let logging_config = config.logging.unwrap();
         assert_eq!(logging_config.slab_size_mib.unwrap(), 1024);
@@ -2113,7 +2485,7 @@ mod tests {
         // Test with `enable_task_logging` not provided
         let txt =
             r#"( tasks: [], cnx: [], logging: ( slab_size_mib: 1024, section_size_mib: 100, ),) "#;
-        let config = CuConfig::deserialize_ron(txt);
+        let config = CuConfig::deserialize_ron(txt).unwrap();
         assert!(config.logging.is_some());
         let logging_config = config.logging.unwrap();
         assert_eq!(logging_config.slab_size_mib.unwrap(), 1024);
@@ -2147,7 +2519,7 @@ mod tests {
         )
         "#;
 
-        let config = CuConfig::deserialize_ron(txt);
+        let config = CuConfig::deserialize_ron(txt).unwrap();
         assert_eq!(config.bridges.len(), 1);
         let bridge = &config.bridges[0];
         assert_eq!(bridge.id, "radio");
@@ -2201,6 +2573,7 @@ mod tests {
             id: "radio".to_string(),
             type_: "tasks::SerialBridge".to_string(),
             config: Some(bridge_config),
+            resources: None,
             missions: None,
             channels: vec![
                 BridgeChannelConfigRepresentation::Rx {
@@ -2216,12 +2589,12 @@ mod tests {
             ],
         });
 
-        let serialized = config.serialize_ron();
+        let serialized = config.serialize_ron().unwrap();
         assert!(
             serialized.contains("bridges"),
             "bridges section missing from serialized config"
         );
-        let deserialized = CuConfig::deserialize_ron(&serialized);
+        let deserialized = CuConfig::deserialize_ron(&serialized).unwrap();
         assert_eq!(deserialized.bridges.len(), 1);
         let bridge = &deserialized.bridges[0];
         assert_eq!(bridge.channels.len(), 2);
@@ -2233,6 +2606,74 @@ mod tests {
             bridge.channels[1],
             BridgeChannelConfigRepresentation::Tx { .. }
         ));
+    }
+
+    #[test]
+    fn test_resource_parsing() {
+        let txt = r#"
+        (
+            resources: [
+                (
+                    id: "fc",
+                    provider: "copper_board_px4::Px4Bundle",
+                    config: { "baud": 921600 },
+                    missions: ["m1"],
+                ),
+                (
+                    id: "misc",
+                    provider: "cu29_runtime::StdClockBundle",
+                ),
+            ],
+        )
+        "#;
+
+        let config = CuConfig::deserialize_ron(txt).unwrap();
+        assert_eq!(config.resources.len(), 2);
+        let fc = &config.resources[0];
+        assert_eq!(fc.id, "fc");
+        assert_eq!(fc.provider, "copper_board_px4::Px4Bundle");
+        assert_eq!(fc.missions.as_deref(), Some(&["m1".to_string()][..]));
+        let baud: u32 = fc
+            .config
+            .as_ref()
+            .expect("missing config")
+            .get::<u32>("baud")
+            .expect("baud lookup failed")
+            .expect("missing baud");
+        assert_eq!(baud, 921_600);
+        let misc = &config.resources[1];
+        assert_eq!(misc.id, "misc");
+        assert_eq!(misc.provider, "cu29_runtime::StdClockBundle");
+        assert!(misc.config.is_none());
+    }
+
+    #[test]
+    fn test_resource_roundtrip() {
+        let mut config = CuConfig::default();
+        let mut bundle_cfg = ComponentConfig::default();
+        bundle_cfg.set("path", "/dev/ttyACM0".to_string());
+        config.resources.push(ResourceBundleConfig {
+            id: "fc".to_string(),
+            provider: "copper_board_px4::Px4Bundle".to_string(),
+            config: Some(bundle_cfg),
+            missions: Some(vec!["m1".to_string()]),
+        });
+
+        let serialized = config.serialize_ron().unwrap();
+        let deserialized = CuConfig::deserialize_ron(&serialized).unwrap();
+        assert_eq!(deserialized.resources.len(), 1);
+        let res = &deserialized.resources[0];
+        assert_eq!(res.id, "fc");
+        assert_eq!(res.provider, "copper_board_px4::Px4Bundle");
+        assert_eq!(res.missions.as_deref(), Some(&["m1".to_string()][..]));
+        let path: String = res
+            .config
+            .as_ref()
+            .expect("missing config")
+            .get::<String>("path")
+            .expect("path lookup failed")
+            .expect("missing path");
+        assert_eq!(path, "/dev/ttyACM0");
     }
 
     #[test]
@@ -2254,13 +2695,16 @@ mod tests {
         )
         "#;
 
-        let config = CuConfig::deserialize_ron(txt);
+        let config = CuConfig::deserialize_ron(txt).unwrap();
         let bridge = &config.bridges[0];
         match &bridge.channels[0] {
             BridgeChannelConfigRepresentation::Rx {
                 config: Some(cfg), ..
             } => {
-                let val: String = cfg.get("filter").expect("filter missing");
+                let val = cfg
+                    .get::<String>("filter")
+                    .expect("filter lookup failed")
+                    .expect("filter missing");
                 assert_eq!(val, "fast");
             }
             _ => panic!("expected Rx channel with config"),
@@ -2269,7 +2713,10 @@ mod tests {
             BridgeChannelConfigRepresentation::Tx {
                 config: Some(cfg), ..
             } => {
-                let rate: i32 = cfg.get("rate").expect("rate missing");
+                let rate = cfg
+                    .get::<i32>("rate")
+                    .expect("rate lookup failed")
+                    .expect("rate missing");
                 assert_eq!(rate, 100);
             }
             _ => panic!("expected Tx channel with config"),
@@ -2277,7 +2724,141 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "channel 'motor' is Tx and cannot act as a source")]
+    fn test_task_resources_roundtrip() {
+        let txt = r#"
+        (
+            tasks: [
+                (
+                    id: "imu",
+                    type: "tasks::ImuDriver",
+                    resources: { "bus": "fc.spi_1", "irq": "fc.gpio_imu" },
+                ),
+            ],
+            cnx: [],
+        )
+        "#;
+
+        let config = CuConfig::deserialize_ron(txt).unwrap();
+        let graph = config.graphs.get_graph(None).unwrap();
+        let node = graph.get_node(0).expect("missing task node");
+        let resources = node.get_resources().expect("missing resources map");
+        assert_eq!(resources.get("bus").map(String::as_str), Some("fc.spi_1"));
+        assert_eq!(
+            resources.get("irq").map(String::as_str),
+            Some("fc.gpio_imu")
+        );
+
+        let serialized = config.serialize_ron().unwrap();
+        let deserialized = CuConfig::deserialize_ron(&serialized).unwrap();
+        let graph = deserialized.graphs.get_graph(None).unwrap();
+        let node = graph.get_node(0).expect("missing task node");
+        let resources = node
+            .get_resources()
+            .expect("missing resources map after roundtrip");
+        assert_eq!(resources.get("bus").map(String::as_str), Some("fc.spi_1"));
+        assert_eq!(
+            resources.get("irq").map(String::as_str),
+            Some("fc.gpio_imu")
+        );
+    }
+
+    #[test]
+    fn test_bridge_resources_preserved() {
+        let mut config = CuConfig::default();
+        config.resources.push(ResourceBundleConfig {
+            id: "fc".to_string(),
+            provider: "board::Bundle".to_string(),
+            config: None,
+            missions: None,
+        });
+        let bridge_resources = HashMap::from([("serial".to_string(), "fc.serial0".to_string())]);
+        config.bridges.push(BridgeConfig {
+            id: "radio".to_string(),
+            type_: "tasks::SerialBridge".to_string(),
+            config: None,
+            resources: Some(bridge_resources),
+            missions: None,
+            channels: vec![BridgeChannelConfigRepresentation::Tx {
+                id: "uplink".to_string(),
+                route: None,
+                config: None,
+            }],
+        });
+
+        let serialized = config.serialize_ron().unwrap();
+        let deserialized = CuConfig::deserialize_ron(&serialized).unwrap();
+        let graph = deserialized.graphs.get_graph(None).expect("missing graph");
+        let bridge_id = graph
+            .get_node_id_by_name("radio")
+            .expect("bridge node missing");
+        let node = graph.get_node(bridge_id).expect("missing bridge node");
+        let resources = node
+            .get_resources()
+            .expect("bridge resources were not preserved");
+        assert_eq!(
+            resources.get("serial").map(String::as_str),
+            Some("fc.serial0")
+        );
+    }
+
+    #[test]
+    fn test_demo_config_parses() {
+        let txt = r#"(
+    resources: [
+        (
+            id: "fc",
+            provider: "crate::resources::RadioBundle",
+        ),
+    ],
+    tasks: [
+        (id: "thr", type: "tasks::ThrottleControl"),
+        (id: "tele0", type: "tasks::TelemetrySink0"),
+        (id: "tele1", type: "tasks::TelemetrySink1"),
+        (id: "tele2", type: "tasks::TelemetrySink2"),
+        (id: "tele3", type: "tasks::TelemetrySink3"),
+    ],
+    bridges: [
+        (  id: "crsf",
+           type: "cu_crsf::CrsfBridge<SerialResource, SerialPortError>",
+           resources: { "serial": "fc.serial" },
+           channels: [
+                Rx ( id: "rc_rx" ),  // receiving RC Channels
+                Tx ( id: "lq_tx" ),  // Sending LineQuality back
+            ],
+        ),
+        (
+            id: "bdshot",
+            type: "cu_bdshot::RpBdshotBridge",
+            channels: [
+                Tx ( id: "esc0_tx" ),
+                Tx ( id: "esc1_tx" ),
+                Tx ( id: "esc2_tx" ),
+                Tx ( id: "esc3_tx" ),
+                Rx ( id: "esc0_rx" ),
+                Rx ( id: "esc1_rx" ),
+                Rx ( id: "esc2_rx" ),
+                Rx ( id: "esc3_rx" ),
+            ],
+        ),
+    ],
+    cnx: [
+        (src: "crsf/rc_rx", dst: "thr", msg: "cu_crsf::messages::RcChannelsPayload"),
+        (src: "thr", dst: "bdshot/esc0_tx", msg: "cu_bdshot::EscCommand"),
+        (src: "thr", dst: "bdshot/esc1_tx", msg: "cu_bdshot::EscCommand"),
+        (src: "thr", dst: "bdshot/esc2_tx", msg: "cu_bdshot::EscCommand"),
+        (src: "thr", dst: "bdshot/esc3_tx", msg: "cu_bdshot::EscCommand"),
+        (src: "bdshot/esc0_rx", dst: "tele0", msg: "cu_bdshot::EscTelemetry"),
+        (src: "bdshot/esc1_rx", dst: "tele1", msg: "cu_bdshot::EscTelemetry"),
+        (src: "bdshot/esc2_rx", dst: "tele2", msg: "cu_bdshot::EscTelemetry"),
+        (src: "bdshot/esc3_rx", dst: "tele3", msg: "cu_bdshot::EscTelemetry"),
+    ],
+)"#;
+        let config = CuConfig::deserialize_ron(txt).unwrap();
+        assert_eq!(config.resources.len(), 1);
+        assert_eq!(config.bridges.len(), 2);
+    }
+
+    #[test]
     fn test_bridge_tx_cannot_be_source() {
         let txt = r#"
         (
@@ -2299,11 +2880,14 @@ mod tests {
         )
         "#;
 
-        CuConfig::deserialize_ron(txt);
+        let err = CuConfig::deserialize_ron(txt).expect_err("expected bridge source error");
+        assert!(
+            err.to_string()
+                .contains("channel 'motor' is Tx and cannot act as a source")
+        );
     }
 
     #[test]
-    #[should_panic(expected = "channel 'status' is Rx and cannot act as a destination")]
     fn test_bridge_rx_cannot_be_destination() {
         let txt = r#"
         (
@@ -2325,7 +2909,11 @@ mod tests {
         )
         "#;
 
-        CuConfig::deserialize_ron(txt);
+        let err = CuConfig::deserialize_ron(txt).expect_err("expected bridge destination error");
+        assert!(
+            err.to_string()
+                .contains("channel 'status' is Rx and cannot act as a destination")
+        );
     }
 
     #[test]
@@ -2333,13 +2921,13 @@ mod tests {
         // Test with valid logging configuration
         let txt =
             r#"( tasks: [], cnx: [], logging: ( slab_size_mib: 1024, section_size_mib: 100 ) )"#;
-        let config = CuConfig::deserialize_ron(txt);
+        let config = CuConfig::deserialize_ron(txt).unwrap();
         assert!(config.validate_logging_config().is_ok());
 
         // Test with invalid logging configuration
         let txt =
             r#"( tasks: [], cnx: [], logging: ( slab_size_mib: 100, section_size_mib: 1024 ) )"#;
-        let config = CuConfig::deserialize_ron(txt);
+        let config = CuConfig::deserialize_ron(txt).unwrap();
         assert!(config.validate_logging_config().is_err());
     }
 
@@ -2352,7 +2940,7 @@ mod tests {
             tasks: [(id: "src1", type: "a"), (id: "src2", type: "b"), (id: "sink", type: "c")],
             cnx: [(src: "src2", dst: "sink", msg: "msg1"), (src: "src1", dst: "sink", msg: "msg2")]
         )"#;
-        let config = CuConfig::deserialize_ron(txt);
+        let config = CuConfig::deserialize_ron(txt).unwrap();
         let graph = config.graphs.get_graph(None).unwrap();
         assert!(config.validate_logging_config().is_ok());
 
@@ -2388,7 +2976,7 @@ mod tests {
               )
               "#;
 
-        let config = CuConfig::deserialize_ron(txt);
+        let config = CuConfig::deserialize_ron(txt).unwrap();
         let m1_graph = config.graphs.get_graph(Some("m1")).unwrap();
         assert_eq!(m1_graph.edge_count(), 1);
         assert_eq!(m1_graph.node_count(), 2);
@@ -2428,9 +3016,9 @@ mod tests {
               )
               "#;
 
-        let config = CuConfig::deserialize_ron(txt);
-        let serialized = config.serialize_ron();
-        let deserialized = CuConfig::deserialize_ron(&serialized);
+        let config = CuConfig::deserialize_ron(txt).unwrap();
+        let serialized = config.serialize_ron().unwrap();
+        let deserialized = CuConfig::deserialize_ron(&serialized).unwrap();
         let m1_graph = deserialized.graphs.get_graph(Some("m1")).unwrap();
         assert_eq!(m1_graph.edge_count(), 1);
         assert_eq!(m1_graph.node_count(), 2);
@@ -2451,7 +3039,7 @@ mod tests {
             cnx: [(src: "src2", dst: "sink", msg: "msg1"), (src: "src1", dst: "sink", msg: "msg2")],
             logging: ( keyframe_interval: 314 )
         )"#;
-        let config = CuConfig::deserialize_ron(txt);
+        let config = CuConfig::deserialize_ron(txt).unwrap();
         let logging_config = config.logging.unwrap();
         assert_eq!(logging_config.keyframe_interval.unwrap(), 314);
     }
@@ -2465,7 +3053,7 @@ mod tests {
             cnx: [(src: "src2", dst: "sink", msg: "msg1"), (src: "src1", dst: "sink", msg: "msg2")],
             logging: ( slab_size_mib: 200, section_size_mib: 1024, )
         )"#;
-        let config = CuConfig::deserialize_ron(txt);
+        let config = CuConfig::deserialize_ron(txt).unwrap();
         let logging_config = config.logging.unwrap();
         assert_eq!(logging_config.keyframe_interval.unwrap(), 100);
     }

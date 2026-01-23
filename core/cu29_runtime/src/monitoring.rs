@@ -2,13 +2,12 @@
 //!
 
 use crate::config::CuConfig;
-use crate::config::{BridgeChannelConfigRepresentation, BridgeConfig, Flavor};
+use crate::config::{BridgeChannelConfigRepresentation, BridgeConfig, CuGraph, Flavor, NodeId};
 use crate::cutask::CuMsgMetadata;
 use cu29_clock::{CuDuration, RobotClock};
 #[allow(unused_imports)]
 use cu29_log::CuLogLevel;
 use cu29_traits::{CuError, CuResult};
-use petgraph::visit::IntoEdgeReferences;
 use serde_derive::{Deserialize, Serialize};
 
 #[cfg(not(feature = "std"))]
@@ -92,10 +91,87 @@ pub struct MonitorTopology {
     pub connections: Vec<MonitorConnection>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CopperListInfo {
+    pub size_bytes: usize,
+    pub count: usize,
+}
+
+impl CopperListInfo {
+    pub const fn new(size_bytes: usize, count: usize) -> Self {
+        Self { size_bytes, count }
+    }
+}
+
+/// Reported data about CopperList IO for a single iteration.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CopperListIoStats {
+    /// CopperList struct size in RAM (excluding dynamic payloads/handles)
+    pub raw_culist_bytes: u64,
+    /// Bytes held by payloads that will be serialized (currently: pooled handles, vecs, slices)
+    pub handle_bytes: u64,
+    /// Bytes produced by bincode serialization of the CopperList
+    pub encoded_culist_bytes: u64,
+    /// Bytes produced by bincode serialization of the KeyFrame (0 if none)
+    pub keyframe_bytes: u64,
+    /// Cumulative bytes written to the structured log stream so far
+    pub structured_log_bytes_total: u64,
+    /// CopperList identifier for reference in monitors
+    pub culistid: u32,
+}
+
+/// Lightweight trait to estimate the amount of data a payload will contribute when serialized.
+/// Default implementations return the stack size; specific types override to report dynamic data.
+pub trait CuPayloadSize {
+    /// Total bytes represented by the payload in memory (stack + heap backing).
+    fn raw_bytes(&self) -> usize {
+        core::mem::size_of_val(self)
+    }
+
+    /// Bytes that correspond to reusable/pooled handles (used for IO budgeting).
+    fn handle_bytes(&self) -> usize {
+        0
+    }
+}
+
+impl<T> CuPayloadSize for T
+where
+    T: crate::cutask::CuMsgPayload,
+{
+    fn raw_bytes(&self) -> usize {
+        core::mem::size_of::<T>()
+    }
+}
+
 #[derive(Default, Debug, Clone, Copy)]
 struct NodeIoUsage {
     has_incoming: bool,
     has_outgoing: bool,
+}
+
+fn collect_output_ports(graph: &CuGraph, node_id: NodeId) -> Vec<(String, String)> {
+    let mut edge_ids = graph.get_src_edges(node_id).unwrap_or_default();
+    edge_ids.sort();
+
+    let mut outputs = Vec::new();
+    let mut seen = Vec::new();
+    let mut port_idx = 0usize;
+    for edge_id in edge_ids {
+        let Some(edge) = graph.edge(edge_id) else {
+            continue;
+        };
+        if seen.iter().any(|msg| msg == &edge.msg) {
+            continue;
+        }
+        seen.push(edge.msg.clone());
+        let mut port_label = String::from("out");
+        port_label.push_str(&port_idx.to_string());
+        port_label.push_str(": ");
+        port_label.push_str(edge.msg.as_str());
+        outputs.push((edge.msg.clone(), port_label));
+        port_idx += 1;
+    }
+    outputs
 }
 
 /// Derive a monitor-friendly topology from the runtime configuration.
@@ -106,14 +182,14 @@ pub fn build_monitor_topology(
     let graph = config.get_graph(mission)?;
     let mut nodes: Map<String, MonitorNode> = Map::new();
     let mut io_usage: Map<String, NodeIoUsage> = Map::new();
+    let mut output_port_lookup: Map<String, Map<String, String>> = Map::new();
 
     let mut bridge_lookup: Map<&str, &BridgeConfig> = Map::new();
     for bridge in &config.bridges {
         bridge_lookup.insert(bridge.id.as_str(), bridge);
     }
 
-    for edge in graph.0.edge_references() {
-        let cnx = edge.weight();
+    for cnx in graph.edges() {
         io_usage.entry(cnx.src.clone()).or_default().has_outgoing = true;
         io_usage.entry(cnx.dst.clone()).or_default().has_incoming = true;
     }
@@ -143,7 +219,17 @@ pub fn build_monitor_topology(
             if usage.has_incoming || !usage.has_outgoing {
                 inputs.push("in".to_string());
             }
-            if usage.has_outgoing || !usage.has_incoming {
+            if usage.has_outgoing {
+                if let Some(node_idx) = graph.get_node_id_by_name(node_id.as_str()) {
+                    let ports = collect_output_ports(graph, node_idx);
+                    let mut port_map: Map<String, String> = Map::new();
+                    for (msg_type, label) in ports {
+                        port_map.insert(msg_type, label.clone());
+                        outputs.push(label);
+                    }
+                    output_port_lookup.insert(node_id.clone(), port_map);
+                }
+            } else if !usage.has_incoming {
                 outputs.push("out".to_string());
             }
         }
@@ -161,15 +247,19 @@ pub fn build_monitor_topology(
     }
 
     let mut connections = Vec::new();
-    for edge in graph.0.edge_references() {
-        let cnx = edge.weight();
+    for cnx in graph.edges() {
         let src = cnx.src.clone();
         let dst = cnx.dst.clone();
 
         let src_port = cnx.src_channel.clone().or_else(|| {
-            nodes
+            output_port_lookup
                 .get(&src)
-                .and_then(|node| node.outputs.first().cloned())
+                .and_then(|ports| ports.get(&cnx.msg).cloned())
+                .or_else(|| {
+                    nodes
+                        .get(&src)
+                        .and_then(|node| node.outputs.first().cloned())
+                })
         });
         let dst_port = cnx.dst_channel.clone().or_else(|| {
             nodes
@@ -200,12 +290,17 @@ pub trait CuMonitor: Sized {
 
     fn set_topology(&mut self, _topology: MonitorTopology) {}
 
+    fn set_copperlist_info(&mut self, _info: CopperListInfo) {}
+
     fn start(&mut self, _clock: &RobotClock) -> CuResult<()> {
         Ok(())
     }
 
     /// Callback that will be trigger at the end of every copperlist (before, on or after the serialization).
     fn process_copperlist(&self, msgs: &[&CuMsgMetadata]) -> CuResult<()>;
+
+    /// Called when the runtime finishes serializing a CopperList, giving IO accounting data.
+    fn observe_copperlist_io(&self, _stats: CopperListIoStats) {}
 
     /// Callbacked when a Task errored out. The runtime requires an immediate decision.
     fn process_error(&self, taskid: usize, step: CuTaskState, error: &CuError) -> Decision;
@@ -265,17 +360,22 @@ impl<A: GlobalAlloc> CountingAlloc<A> {
     }
 }
 
+// SAFETY: Delegates allocation/deallocation to the inner allocator while tracking sizes.
 unsafe impl<A: GlobalAlloc> GlobalAlloc for CountingAlloc<A> {
+    // SAFETY: Callers uphold the GlobalAlloc contract; we delegate to the inner allocator.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let p = self.inner.alloc(layout);
+        // SAFETY: Forwarding to the inner allocator preserves GlobalAlloc invariants.
+        let p = unsafe { self.inner.alloc(layout) };
         if !p.is_null() {
             self.allocated.fetch_add(layout.size(), Ordering::SeqCst);
         }
         p
     }
 
+    // SAFETY: Callers uphold the GlobalAlloc contract; we delegate to the inner allocator.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        self.inner.dealloc(ptr, layout);
+        // SAFETY: Forwarding to the inner allocator preserves GlobalAlloc invariants.
+        unsafe { self.inner.dealloc(ptr, layout) }
         self.deallocated.fetch_add(layout.size(), Ordering::SeqCst);
     }
 }
@@ -350,7 +450,10 @@ impl Drop for ScopedAllocCounter {
     }
 }
 
+#[cfg(feature = "std")]
 const BUCKET_COUNT: usize = 1024;
+#[cfg(not(feature = "std"))]
+const BUCKET_COUNT: usize = 256;
 
 /// Accumulative stat object that can give your some real time statistics.
 /// Uses a fixed-size bucketed histogram for accurate percentile calculations.
@@ -408,11 +511,7 @@ impl LiveStatistics {
 
     #[inline]
     pub fn min(&self) -> u64 {
-        if self.count == 0 {
-            0
-        } else {
-            self.min_val
-        }
+        if self.count == 0 { 0 } else { self.min_val }
     }
 
     #[inline]

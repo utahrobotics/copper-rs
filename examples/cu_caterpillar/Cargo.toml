@@ -15,11 +15,11 @@ repository.workspace = true
 publish = false
 [package.metadata.cargo-machete]
 ignored = [
-    "cu29-log",
-    "cu29-log-runtime",
-    "cu29-unifiedlog",
-    "cu-consolemon",
-    "copper-traits",
+  "cu29-log",
+  "cu29-log-runtime",
+  "cu29-unifiedlog",
+  "cu-consolemon",
+  "copper-traits",
 ] # proc macro and console
 
 [[bin]]
@@ -39,13 +39,14 @@ path = "src/resim.rs"
 # cu29 = { workspace = true, features = ["macro_debug"] } # NEEDED FOR CUBUILD
 cu29 = { workspace = true }
 cu29-helpers = { workspace = true }
-cu29-export = { workspace = true, features = ["python"] }
+cu29-export = { workspace = true, features = ["python", "mcap"] }
 serde = { workspace = true }
 
-cu-consolemon = { path = "../../components/monitors/cu_consolemon", version = "0.11.0" } # needed
-cu-rp-gpio = { path = "../../components/sinks/cu_rp_gpio", version = "0.11.0" }
+cu-consolemon = { path = "../../components/monitors/cu_consolemon", version = "0.12.0" } # needed
+cu-rp-gpio = { path = "../../components/sinks/cu_rp_gpio", version = "0.12.0" }
 
 
 [features]
 default = ["mock"]
 mock = ["cu-rp-gpio/mock"]
+rtsan = ["cu29/rtsan"]

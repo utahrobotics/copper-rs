@@ -1,15 +1,16 @@
+use crate::FrameIdString;
 use crate::error::{TransformError, TransformResult};
 use crate::transform::{StampedTransform, TransformStore};
 use crate::transform_payload::StampedFrameTransform;
 use crate::velocity::VelocityTransform;
 use crate::velocity_cache::VelocityTransformCache;
-use crate::FrameIdString;
-use cu29::clock::{CuTime, RobotClock, Tov};
 use cu_spatial_payloads::Transform3D;
+use cu29::clock::{CuTime, RobotClock, Tov};
 use dashmap::DashMap;
 use petgraph::algo::dijkstra;
 use petgraph::graph::{DiGraph, NodeIndex};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::ops::Neg;
@@ -239,7 +240,8 @@ impl One for u64 {
 
 // We need to limit T to types where Transform3D<T> has Clone and inverse method
 // and now we also require T to implement One
-impl<T: Copy + Debug + Default + One + Serialize + 'static + Neg<Output = T>> TransformTree<T>
+impl<T: Copy + Debug + Default + One + Serialize + DeserializeOwned + 'static + Neg<Output = T>>
+    TransformTree<T>
 where
     Transform3D<T>: Clone + HasInverse<T> + std::ops::Mul<Output = Transform3D<T>>,
     T: std::ops::Add<Output = T>
@@ -330,7 +332,7 @@ where
             _ => {
                 return Err(TransformError::Unknown(
                     "Invalid Time of Validity".to_string(),
-                ))
+                ));
             }
         };
 
@@ -657,7 +659,7 @@ where
             // Apply the proper velocity transformation
             // We need the current position for proper velocity transformation
             let position = [T::default(); 3]; // Assume transformation at origin for simplicity
-                                              // A more accurate implementation would track the position
+            // A more accurate implementation would track the position
 
             // Apply velocity transformation
             if *inverse {
@@ -726,8 +728,8 @@ where
     }
 }
 
-impl<T: Copy + Debug + Default + One + Serialize + 'static + Neg<Output = T>> Default
-    for TransformTree<T>
+impl<T: Copy + Debug + Default + One + Serialize + DeserializeOwned + 'static + Neg<Output = T>>
+    Default for TransformTree<T>
 where
     Transform3D<T>: Clone + HasInverse<T> + std::ops::Mul<Output = Transform3D<T>>,
     T: std::ops::Add<Output = T>
@@ -748,7 +750,7 @@ where
 mod tests {
     use super::*;
     use crate::test_utils::get_translation;
-    use crate::{frame_id, FrameTransform};
+    use crate::{FrameTransform, frame_id};
     use cu29::clock::{CuDuration, RobotClock};
 
     // Helper function to replace assert_relative_eq

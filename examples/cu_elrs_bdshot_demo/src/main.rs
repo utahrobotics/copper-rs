@@ -8,17 +8,17 @@ use alloc::vec;
 use alloc::vec::Vec;
 use buddy_system_allocator::LockedHeap as Heap;
 use cortex_m_rt::entry;
+use cu_bdshot::{Rp2350Board, Rp2350BoardConfig, Rp2350BoardResources, register_rp2350_board};
+use cu_sdlogger::{EMMCLogger, EMMCSectionStorage, ForceSyncSend, find_copper_partition};
 use cu29::cubridge::CuBridge;
 use cu29::prelude::*;
-use cu_bdshot::{register_rp2350_board, Rp2350Board, Rp2350BoardConfig, Rp2350BoardResources};
-use cu_sdlogger::{find_copper_partition, EMMCLogger, EMMCSectionStorage, ForceSyncSend};
 use embedded_hal::spi::MODE_0;
 use embedded_hal_bus::spi::ExclusiveDevice;
 use embedded_sdmmc::SdCard;
 use rp235x_hal as hal;
 use rp235x_hal::clocks::Clock;
 use rp235x_hal::fugit::RateExtU32;
-use rp235x_hal::gpio::bank0::{Gpio15, Gpio16, Gpio17, Gpio18, Gpio19, Gpio2, Gpio3};
+use rp235x_hal::gpio::bank0::{Gpio2, Gpio3, Gpio15, Gpio16, Gpio17, Gpio18, Gpio19};
 use rp235x_hal::gpio::{
     Function, FunctionPio0, FunctionSio, FunctionSpi, FunctionUartAux, FunctionXipCs1, Pin, PinId,
     PullDown, PullNone, PullType, PullUp, SioInput, SioOutput, ValidFunction,
@@ -28,7 +28,7 @@ use rp235x_hal::pio::PIOExt;
 use rp235x_hal::spi::{Enabled, FrameFormat};
 use rp235x_hal::timer::{CopyableTimer0, CopyableTimer1};
 use rp235x_hal::uart::{DataBits, StopBits, UartConfig, UartPeripheral};
-use rp235x_hal::{clocks::init_clocks_and_plls, pac, sio::Sio, watchdog::Watchdog, Spi, Timer};
+use rp235x_hal::{Spi, Timer, clocks::init_clocks_and_plls, pac, sio::Sio, watchdog::Watchdog};
 use spin::Mutex;
 
 #[allow(unused_imports)]
@@ -36,11 +36,13 @@ use defmt_rtt as _;
 #[allow(unused_imports)]
 use panic_probe as _;
 
+mod resources;
 mod tasks;
 
 #[copper_runtime(config = "copperconfig.ron")]
 struct BdshotDemoApp {}
 
+// SAFETY: The RP2350 boot ROM expects the image definition in .start_block.
 #[unsafe(link_section = ".start_block")]
 #[used]
 static IMAGE_DEF: hal::block::ImageDef = hal::block::ImageDef::secure_exe();
@@ -72,6 +74,8 @@ type ElrsTx = Pin<Gpio2, FunctionUartAux, PullDown>;
 type ElrsRx = Pin<Gpio3, FunctionUartAux, PullUp>;
 type SerialPort = UartPeripheral<rp235x_hal::uart::Enabled, UART0, (ElrsTx, ElrsRx)>;
 type SerialPortError = rp235x_hal::uart::ReadErrorType;
+type SerialResourceInner = SerialPort;
+type SerialResource = cu_crsf::LockedSerial<SerialResourceInner>;
 
 #[entry]
 fn main() -> ! {
@@ -169,8 +173,7 @@ fn main() -> ! {
         .enable(csrf_uart_cfg, clocks.peripheral_clock.freq())
         .expect("Could not create UART peripheral");
 
-    cu_embedded_registry::register(0, csrf_uart)
-        .expect("Failed to register UART as CRSF serial port");
+    resources::stash_crsf_serial(csrf_uart);
 
     info!("Setting up Copper...");
 
@@ -228,6 +231,7 @@ where
     F: Function,
     P: PullType,
 {
+    // SAFETY: These linker symbols delimit a valid PSRAM heap region.
     unsafe extern "C" {
         static mut __psram_heap_start__: u8;
         static mut __psram_heap_end__: u8;
@@ -235,6 +239,7 @@ where
 
     let _ = cs1.into_function::<FunctionXipCs1>();
 
+    // SAFETY: We only touch the XIP control block and initialize the heap once.
     unsafe {
         let xip = &*pac::XIP_CTRL::ptr();
         xip.ctrl().modify(|_, w| w.writable_m1().set_bit());
@@ -261,8 +266,9 @@ fn quick_memory_test() {
 }
 
 fn mem_stats() {
-    let current = ALLOC.lock().stats_alloc_actual();
-    let total = ALLOC.lock().stats_total_bytes();
+    let heap = ALLOC.lock();
+    let current = heap.stats_alloc_actual();
+    let total = heap.stats_total_bytes();
     info!("heap: current={}", current);
     info!("heap: total={}", total);
 }

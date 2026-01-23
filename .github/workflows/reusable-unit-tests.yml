@@ -1,0 +1,263 @@
+name: Reusable Unit Tests
+
+on:
+  workflow_call:
+    inputs:
+      toolchain:
+        required: true
+        type: string
+      cargo_target_dir:
+        required: false
+        type: string
+        default: ""
+      linux_cargo_paths:
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  unit:
+    name: Unit Checks / ${{ matrix.task }} (${{ matrix.os }}, ${{ matrix.mode }})
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      CARGO_TERM_COLOR: always
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
+      BASE_FEATURES: mock,image,kornia,gst,faer,nalgebra,glam,debug_pane,bincode,log-level-debug
+      WORKSPACE_SCOPE: ${{ matrix.os == 'windows-latest' && 'core' || 'workspace' }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
+        mode: [ debug, cuda-debug ]
+        task: [ clippy, build, test ]
+        exclude:
+          - os: macos-latest
+            mode: cuda-debug
+          - os: windows-latest
+            mode: cuda-debug
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/rust-ci-setup
+        with:
+          toolchain: ${{ inputs.toolchain }}
+          cargo_target_dir: ${{ inputs.cargo_target_dir }}
+          linux_cargo_paths: ${{ inputs.linux_cargo_paths }}
+          cache_prefix: ${{ matrix.mode }}
+          cache_shared_key: rust-${{ matrix.os }}
+          install_nextest: ${{ matrix.task == 'test' }}
+
+      - name: Install CUDA
+        uses: Jimver/cuda-toolkit@v0.2.30
+        if: runner.os != 'macOS' && matrix.mode == 'cuda-debug'
+        with:
+          cuda: 12.6.1
+          log-file-suffix: '${{ matrix.os }}-${{ matrix.mode }}-${{ matrix.task }}-cuda.txt'
+          use-github-cache: false
+          use-local-cache: false
+      - name: Set CUDA compute capability (CI)
+        if: runner.os == 'Linux' && matrix.mode == 'cuda-debug'
+        shell: bash
+        run: |
+          if command -v nvcc >/dev/null 2>&1; then
+            CAP=$(nvcc --list-gpu-code | awk -F_ '/sm_/ {print $2}' | sort -n | tail -1)
+            if [[ -n "$CAP" ]]; then
+              echo "CUDA_COMPUTE_CAP=$CAP" >> $GITHUB_ENV
+            else
+              echo "CUDA_COMPUTE_CAP=86" >> $GITHUB_ENV
+            fi
+          else
+            echo "CUDA_COMPUTE_CAP=86" >> $GITHUB_ENV
+          fi
+
+      - name: Set features (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          if [[ '${{ matrix.mode }}' == 'cuda-debug' ]]; then
+            echo "FEATURES_FLAG=--features $BASE_FEATURES,python,cuda" >> $GITHUB_ENV
+          else
+            echo "FEATURES_FLAG=--features $BASE_FEATURES,python" >> $GITHUB_ENV
+          fi
+
+      - name: Set features (MacOS)
+        if: runner.os == 'macOS'
+        run: |
+          if [[ '${{ matrix.mode }}' == 'cuda-debug' ]]; then
+            echo "FEATURES_FLAG=--features $BASE_FEATURES,cuda" >> $GITHUB_ENV
+          else
+            echo "FEATURES_FLAG=--features $BASE_FEATURES" >> $GITHUB_ENV
+          fi
+
+      - name: Set features (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          echo "FEATURES_FLAG=" >> $GITHUB_ENV
+
+      - name: Detect embedded-only crates
+        if: env.WORKSPACE_SCOPE == 'workspace'
+        run: |
+          EXCLUDES=$(python3 support/ci/embedded_crates.py excludes)
+          echo "EMBEDDED_EXCLUDES=$EXCLUDES" >> $GITHUB_ENV
+
+      - name: Run clippy on (${{ matrix.os }} | ${{ matrix.mode }})
+        if: matrix.task == 'clippy'
+        run: cargo +${{ inputs.toolchain }} clippy $RELEASE_FLAG $WORKSPACE_FLAG --all-targets $EMBEDDED_EXCLUDES -- --deny warnings
+      - name: Run clippy with all features on (${{ matrix.os }} | ${{ matrix.mode }})
+        if: matrix.task == 'clippy'
+        run: cargo +${{ inputs.toolchain }} clippy $RELEASE_FLAG $WORKSPACE_FLAG --all-targets $FEATURES_FLAG $EMBEDDED_EXCLUDES -- --deny warnings
+      - name: Run build with all features on (${{ matrix.os }} | ${{ matrix.mode }})
+        if: matrix.task == 'build'
+        run: cargo +${{ inputs.toolchain }} build $RELEASE_FLAG $WORKSPACE_FLAG --all-targets $FEATURES_FLAG $EMBEDDED_EXCLUDES
+      - name: Run doctests on (${{ matrix.os }} | debug)
+        if: matrix.task == 'test' && matrix.mode == 'debug'
+        run: cargo +${{ inputs.toolchain }} test --doc $WORKSPACE_FLAG $EMBEDDED_EXCLUDES --quiet
+      - name: Run Unit Tests on (${{ matrix.os }} | ${{ matrix.mode }})
+        if: matrix.task == 'test'
+        run: cargo +${{ inputs.toolchain }} nextest run $RELEASE_FLAG --all-targets $WORKSPACE_FLAG $EMBEDDED_EXCLUDES
+
+  tests-features:
+    name: Unit Tests (all features)
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      CARGO_TERM_COLOR: always
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
+      BASE_FEATURES: mock,image,kornia,gst,faer,nalgebra,glam,debug_pane,bincode,log-level-debug
+      WORKSPACE_SCOPE: ${{ matrix.os == 'windows-latest' && 'core' || 'workspace' }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest, windows-latest ]
+        mode: [ debug, cuda-debug ]
+        exclude:
+          - os: macos-latest
+            mode: cuda-debug
+          - os: windows-latest
+            mode: cuda-debug
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/rust-ci-setup
+        with:
+          toolchain: ${{ inputs.toolchain }}
+          cargo_target_dir: ${{ inputs.cargo_target_dir }}
+          linux_cargo_paths: ${{ inputs.linux_cargo_paths }}
+          cache_prefix: ${{ matrix.mode }}
+          cache_shared_key: rust-${{ matrix.os }}
+          install_nextest: "true"
+
+      - name: Install CUDA
+        uses: Jimver/cuda-toolkit@v0.2.30
+        if: runner.os != 'macOS' && matrix.mode == 'cuda-debug'
+        with:
+          cuda: 12.6.1
+          log-file-suffix: '${{ matrix.os }}-${{ matrix.mode }}-tests-features-cuda.txt'
+          use-github-cache: false
+          use-local-cache: false
+      - name: Set CUDA compute capability (CI)
+        if: runner.os == 'Linux' && matrix.mode == 'cuda-debug'
+        shell: bash
+        run: |
+          if command -v nvcc >/dev/null 2>&1; then
+            CAP=$(nvcc --list-gpu-code | awk -F_ '/sm_/ {print $2}' | sort -n | tail -1)
+            if [[ -n "$CAP" ]]; then
+              echo "CUDA_COMPUTE_CAP=$CAP" >> $GITHUB_ENV
+            else
+              echo "CUDA_COMPUTE_CAP=86" >> $GITHUB_ENV
+            fi
+          else
+            echo "CUDA_COMPUTE_CAP=86" >> $GITHUB_ENV
+          fi
+
+      - name: Set features (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          if [[ '${{ matrix.mode }}' == 'cuda-debug' ]]; then
+            echo "FEATURES_FLAG=--features $BASE_FEATURES,python,cuda" >> $GITHUB_ENV
+          else
+            echo "FEATURES_FLAG=--features $BASE_FEATURES,python" >> $GITHUB_ENV
+          fi
+
+      - name: Set features (MacOS)
+        if: runner.os == 'macOS'
+        run: |
+          if [[ '${{ matrix.mode }}' == 'cuda-debug' ]]; then
+            echo "FEATURES_FLAG=--features $BASE_FEATURES,cuda" >> $GITHUB_ENV
+          else
+            echo "FEATURES_FLAG=--features $BASE_FEATURES" >> $GITHUB_ENV
+          fi
+
+      - name: Set features (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          echo "FEATURES_FLAG=" >> $GITHUB_ENV
+
+      - name: Detect embedded-only crates
+        if: env.WORKSPACE_SCOPE == 'workspace'
+        run: |
+          EXCLUDES=$(python3 support/ci/embedded_crates.py excludes)
+          echo "EMBEDDED_EXCLUDES=$EXCLUDES" >> $GITHUB_ENV
+
+      - name: Run Unit Tests with all features on (${{ matrix.os }} | ${{ matrix.mode }})
+        run: cargo +${{ inputs.toolchain }} nextest run $RELEASE_FLAG --all-targets $WORKSPACE_FLAG $FEATURES_FLAG $EMBEDDED_EXCLUDES
+
+  templates:
+    name: Templates (debug)
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      CARGO_TERM_COLOR: always
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
+      BASE_FEATURES: mock,image,kornia,gst,faer,nalgebra,glam,debug_pane,bincode,log-level-debug
+      WORKSPACE_SCOPE: workspace
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest ]
+        mode: [ debug ]
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/rust-ci-setup
+        with:
+          toolchain: ${{ inputs.toolchain }}
+          cargo_target_dir: ${{ inputs.cargo_target_dir }}
+          linux_cargo_paths: ${{ inputs.linux_cargo_paths }}
+          cache_prefix: ${{ matrix.mode }}
+          cache_shared_key: rust-${{ matrix.os }}
+          install_nextest: "false"
+
+      - name: Install cargo-generate on (${{ matrix.os }} | debug)
+        run: cargo +${{ inputs.toolchain }} install cargo-generate
+
+      - name: Generate new templates on (${{ matrix.os }} | debug)
+        run: |
+          cd templates
+          rm -rf test_project test_workspace
+          cargo +${{ inputs.toolchain }} generate -p cu_project --name test_project --destination . -d copper_source=local -d copper_root_path=../.. --silent
+          cargo +${{ inputs.toolchain }} generate -p cu_full --name test_workspace --destination . -d copper_source=local -d copper_root_path=../.. --silent
+      - name: Build generated templates on (${{ matrix.os }} | debug)
+        run: |
+          cd templates/test_project
+          cargo +${{ inputs.toolchain }} build
+          cd ../test_workspace
+          cargo +${{ inputs.toolchain }} build

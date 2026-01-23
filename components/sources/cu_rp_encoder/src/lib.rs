@@ -2,15 +2,15 @@
 mod mock;
 
 use bincode::{Decode, Encode};
-use cu29::prelude::*;
 use cu29::CuResult;
+use cu29::prelude::*;
 use std::sync::{Arc, Mutex};
 
 #[allow(unused_imports)]
 use cu29_traits::CuError;
 
 #[cfg(mock)]
-use mock::{get_pin, InputPin};
+use mock::{InputPin, get_pin};
 #[cfg(hardware)]
 use rppal::gpio::{Gpio, InputPin, Level, Trigger};
 use serde::Deserialize;
@@ -55,20 +55,20 @@ impl Freezable for Encoder {
 }
 
 impl CuSrcTask for Encoder {
+    type Resources<'r> = ();
     type Output<'m> = output_msg!(EncoderPayload);
 
-    fn new(config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {
-        let ComponentConfig(config) =
-            config.ok_or("Encoder needs a config with clk_pin and dat_pin.")?;
-
-        let clk_pin_nb_value = config.get("clk_pin").ok_or("Encoder needs a clk_pin")?;
-        let clk_pin: u8 = clk_pin_nb_value.clone().into();
-
-        let dat_pin_nb_value = config.get("dat_pin").ok_or("Encoder needs a dat_pin")?;
-        let dat_pin: u8 = dat_pin_nb_value.clone().into();
+        let config = config.ok_or("Encoder needs a config with clk_pin and dat_pin.")?;
+        let clk_pin = config
+            .get::<u8>("clk_pin")?
+            .ok_or("Encoder needs a clk_pin")?;
+        let dat_pin = config
+            .get::<u8>("dat_pin")?
+            .ok_or("Encoder needs a dat_pin")?;
 
         let clk_pin: InputPin = get_pin(clk_pin)?;
         let dat_pin: InputPin = get_pin(dat_pin)?;

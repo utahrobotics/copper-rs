@@ -9,6 +9,7 @@ use iceoryx2::service::port_factory::publish_subscribe::PortFactory;
 #[derive(Clone, Debug, Default, Decode, Encode)]
 pub struct IceorixCuMsg<P: CuMsgPayload>(CuMsg<P>);
 
+// SAFETY: IceorixCuMsg is a transparent wrapper over CuMsg with no extra invariants.
 unsafe impl<P: CuMsgPayload> ZeroCopySend for IceorixCuMsg<P> {}
 /// This is a sink task that sends messages to an iceoryx2 service.
 /// P is the payload type of the messages.
@@ -29,14 +30,15 @@ impl<P> CuSinkTask for IceoryxSink<P>
 where
     P: CuMsgPayload + 'static,
 {
+    type Resources<'r> = ();
     type Input<'m> = input_msg!(P);
 
-    fn new(config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {
         let config = config.ok_or_else(|| CuError::from("IceoryxSink: Missing configuration."))?;
-        let service_name_str = config.get::<String>("service").ok_or_else(|| {
+        let service_name_str = config.get::<String>("service")?.ok_or_else(|| {
             CuError::from("IceoryxSink: Configuration requires 'service' key (string).")
         })?;
 

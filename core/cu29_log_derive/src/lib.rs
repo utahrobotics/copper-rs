@@ -3,12 +3,17 @@ extern crate proc_macro;
 use cu29_intern_strs::intern_string;
 use cu29_log::CuLogLevel;
 use proc_macro::TokenStream;
+#[cfg(feature = "textlogs")]
+use proc_macro_crate::{FoundCrate, crate_name};
+#[cfg(feature = "textlogs")]
+use proc_macro2::Span;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::parse::Parser;
-use syn::spanned::Spanned;
 #[allow(unused)]
 use syn::Token;
+use syn::parse::Parser;
+#[cfg(any(feature = "textlogs", debug_assertions))]
+use syn::spanned::Spanned;
 use syn::{Expr, ExprLit, Lit};
 
 /// Create reference of unused_variables to avoid warnings
@@ -57,7 +62,10 @@ fn create_log_entry(input: TokenStream, level: CuLogLevel) -> TokenStream {
     use syn::{Expr, ExprAssign, ExprLit, Lit, Token};
 
     let parser = syn::punctuated::Punctuated::<Expr, Token![,]>::parse_terminated;
-    let exprs = parser.parse(input).expect("Failed to parse input");
+    let exprs = match parser.parse(input) {
+        Ok(exprs) => exprs,
+        Err(err) => return err.to_compile_error().into(),
+    };
     let mut exprs_iter = exprs.iter();
 
     #[cfg(not(feature = "std"))]
@@ -65,16 +73,38 @@ fn create_log_entry(input: TokenStream, level: CuLogLevel) -> TokenStream {
     #[cfg(feature = "std")]
     const STD: bool = true;
 
-    let msg_expr = exprs_iter.next().expect("Expected at least one expression");
+    let msg_expr = match exprs_iter.next() {
+        Some(expr) => expr,
+        None => {
+            return syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "Expected at least one expression",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
     let (index, msg_str) = if let Expr::Lit(ExprLit {
         lit: Lit::Str(msg), ..
     }) = msg_expr
     {
         let s = msg.value();
-        let index = intern_string(&s).expect("Failed to insert log string.");
+        let index = match intern_string(&s) {
+            Some(index) => index,
+            None => {
+                return syn::Error::new_spanned(msg_expr, "Failed to intern log string.")
+                    .to_compile_error()
+                    .into();
+            }
+        };
         (index, s)
     } else {
-        panic!("The first parameter of the argument needs to be a string literal.");
+        return syn::Error::new_spanned(
+            msg_expr,
+            "The first parameter of the argument needs to be a string literal.",
+        )
+        .to_compile_error()
+        .into();
     };
 
     let level_ident = match level {
@@ -105,41 +135,90 @@ fn create_log_entry(input: TokenStream, level: CuLogLevel) -> TokenStream {
         }
     });
 
-    let named_prints = named_params.iter().map(|(name, value)| {
-        let idx = intern_string(quote!(#name).to_string().as_str())
-            .expect("Failed to insert log string.");
-        quote! {
+    let mut named_prints = Vec::with_capacity(named_params.len());
+    for (name, value) in &named_params {
+        let name_str = quote!(#name).to_string();
+        let idx = match intern_string(&name_str) {
+            Some(idx) => idx,
+            None => {
+                return syn::Error::new_spanned(name, "Failed to intern log parameter name.")
+                    .to_compile_error()
+                    .into();
+            }
+        };
+        named_prints.push(quote! {
             let param = to_value(#value).expect("Failed to convert a parameter to a Value");
             log_entry.add_param(#idx, param);
-        }
-    });
+        });
+    }
 
     // ---------- For baremetal: build a defmt format literal and arg list ----------
     // defmt line: "<msg> | a={:?}, b={:?}, arg0={:?} ..."
-    let defmt_fmt_lit = {
-        let mut s = msg_str.clone();
-        if !unnamed_params.is_empty() || !named_params.is_empty() {
-            s.push_str(" |");
-        }
-        for (i, _) in unnamed_params.iter().enumerate() {
-            use std::fmt::Write as _;
-            let _ = write!(&mut s, " arg{}={:?}", i, ());
-        }
-        for (name, _) in named_params.iter() {
-            let name_str = quote!(#name).to_string();
-            s.push(' ');
-            s.push_str(&name_str);
-            s.push_str("={:?}");
-        }
-        syn::LitStr::new(&s, msg_expr.span())
+    #[cfg(feature = "textlogs")]
+    let (defmt_fmt_lit, defmt_args_unnamed_ts, defmt_args_named_ts, defmt_available) = {
+        let defmt_fmt_lit = {
+            let mut s = msg_str.clone();
+            if !named_params.is_empty() {
+                s.push_str(" |");
+            }
+            for (name, _) in named_params.iter() {
+                let name_str = quote!(#name).to_string();
+                s.push(' ');
+                s.push_str(&name_str);
+                s.push_str("={:?}");
+            }
+            syn::LitStr::new(&s, msg_expr.span())
+        };
+
+        let defmt_args_unnamed_ts: Vec<TokenStream2> =
+            unnamed_params.iter().map(|e| quote! { #e }).collect();
+        let defmt_args_named_ts: Vec<TokenStream2> = named_params
+            .iter()
+            .map(|(_, rhs)| quote! { #rhs })
+            .collect();
+
+        let defmt_available = crate_name("defmt").is_ok();
+
+        (
+            defmt_fmt_lit,
+            defmt_args_unnamed_ts,
+            defmt_args_named_ts,
+            defmt_available,
+        )
     };
 
-    let defmt_args_unnamed_ts: Vec<TokenStream2> =
-        unnamed_params.iter().map(|e| quote! { #e }).collect();
-    let defmt_args_named_ts: Vec<TokenStream2> = named_params
-        .iter()
-        .map(|(_, rhs)| quote! { #rhs })
-        .collect();
+    #[cfg(feature = "textlogs")]
+    fn defmt_macro_path(level: CuLogLevel) -> TokenStream2 {
+        let macro_ident = match level {
+            CuLogLevel::Debug => quote! { defmt_debug },
+            CuLogLevel::Info => quote! { defmt_info },
+            CuLogLevel::Warning => quote! { defmt_warn },
+            CuLogLevel::Error => quote! { defmt_error },
+            CuLogLevel::Critical => quote! { defmt_error },
+        };
+
+        let (base, use_prelude) = match crate_name("cu29") {
+            Ok(FoundCrate::Name(name)) => {
+                let ident = proc_macro2::Ident::new(&name, Span::call_site());
+                (quote! { ::#ident }, true)
+            }
+            Ok(FoundCrate::Itself) => (quote! { crate }, true),
+            Err(_) => match crate_name("cu29-log") {
+                Ok(FoundCrate::Name(name)) => {
+                    let ident = proc_macro2::Ident::new(&name, Span::call_site());
+                    (quote! { ::#ident }, false)
+                }
+                Ok(FoundCrate::Itself) => (quote! { crate }, false),
+                Err(_) => (quote! { ::cu29_log }, false),
+            },
+        };
+
+        if use_prelude {
+            quote! { #base::prelude::#macro_ident }
+        } else {
+            quote! { #base::#macro_ident }
+        }
+    }
 
     // Runtime logging path (unchanged)
     #[cfg(not(debug_assertions))]
@@ -159,41 +238,26 @@ fn create_log_entry(input: TokenStream, level: CuLogLevel) -> TokenStream {
         }
     };
 
-    let error_handling: Option<TokenStream2> = if STD {
-        Some(quote! {
-            if let Err(e) = r {
-                eprintln!("Warning: Failed to log: {}", e);
-                let backtrace = std::backtrace::Backtrace::capture();
-                eprintln!("{:?}", backtrace);
-            }
-        })
-    } else {
-        None
-    };
+    let error_handling: Option<TokenStream2> = Some(quote! {
+        if let Err(_e) = r {
+            let _ = &_e;
+        }
+    });
 
-    #[cfg(debug_assertions)]
-    let defmt_macro: TokenStream2 = match level {
-        CuLogLevel::Debug => quote! { ::cu29::prelude::__cu29_defmt_debug },
-        CuLogLevel::Info => quote! { ::cu29::prelude::__cu29_defmt_info  },
-        CuLogLevel::Warning => quote! { ::cu29::prelude::__cu29_defmt_warn  },
-        CuLogLevel::Error => quote! { ::cu29::prelude::__cu29_defmt_error },
-        CuLogLevel::Critical => quote! { ::cu29::prelude::__cu29_defmt_error },
-    };
+    #[cfg(feature = "textlogs")]
+    let defmt_macro: TokenStream2 = defmt_macro_path(level);
 
-    #[cfg(debug_assertions)]
-    let maybe_inject_defmt: Option<TokenStream2> = if STD {
-        None // defmt never exist in std mode ...
+    #[cfg(feature = "textlogs")]
+    let maybe_inject_defmt: Option<TokenStream2> = if STD || !defmt_available {
+        None // defmt is only emitted in no-std builds.
     } else {
         Some(quote! {
-             #[cfg(debug_assertions)]
-             {
-                 #defmt_macro!(#defmt_fmt_lit, #(#defmt_args_unnamed_ts,)* #(#defmt_args_named_ts,)*);
-             }
+            #defmt_macro!(#defmt_fmt_lit, #(#defmt_args_unnamed_ts,)* #(#defmt_args_named_ts,)*);
         })
     };
 
-    #[cfg(not(debug_assertions))]
-    let maybe_inject_defmt: Option<TokenStream2> = None; // ... neither in release mode
+    #[cfg(not(feature = "textlogs"))]
+    let maybe_inject_defmt: Option<TokenStream2> = None; // defmt emission disabled
 
     // Emit both: defmt (conditionally) + Copper structured logging
     quote! {{
@@ -354,16 +418,30 @@ pub fn critical(input: TokenStream) -> TokenStream {
 /// will store "my string" in the interned string db at compile time and return the index of the string.
 #[proc_macro]
 pub fn intern(input: TokenStream) -> TokenStream {
-    let expr = syn::parse::<Expr>(input).expect("Failed to parse input as expression");
-    let (index, _msg) = if let Expr::Lit(ExprLit {
+    let expr = match syn::parse::<Expr>(input) {
+        Ok(expr) => expr,
+        Err(err) => return err.to_compile_error().into(),
+    };
+    let index = if let Expr::Lit(ExprLit {
         lit: Lit::Str(msg), ..
-    }) = expr
+    }) = &expr
     {
         let msg = msg.value();
-        let index = intern_string(&msg).expect("Failed to insert log string.");
-        (index, msg)
+        match intern_string(&msg) {
+            Some(index) => index,
+            None => {
+                return syn::Error::new_spanned(&expr, "Failed to intern log string.")
+                    .to_compile_error()
+                    .into();
+            }
+        }
     } else {
-        panic!("The first parameter of the argument needs to be a string literal.");
+        return syn::Error::new_spanned(
+            &expr,
+            "The first parameter of the argument needs to be a string literal.",
+        )
+        .to_compile_error()
+        .into();
     };
     quote! { #index }.into()
 }

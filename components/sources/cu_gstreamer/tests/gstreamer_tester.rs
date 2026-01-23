@@ -1,8 +1,8 @@
 #[cfg(feature = "gst")]
 mod tests {
+    use cu_gstreamer::CuGstBuffer;
     use cu29::prelude::*;
     use cu29_helpers::basic_copper_setup;
-    use cu_gstreamer::CuGstBuffer;
     use rerun::{ChannelDatatype, ColorModel, Image, RecordingStream, RecordingStreamBuilder};
     use std::thread::sleep;
     use std::time::Duration;
@@ -14,9 +14,10 @@ mod tests {
     impl Freezable for GStreamerTester {}
 
     impl CuSinkTask for GStreamerTester {
+        type Resources<'r> = ();
         type Input<'m> = input_msg!(CuGstBuffer);
 
-        fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+        fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
         where
             Self: Sized,
         {

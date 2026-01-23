@@ -6,37 +6,32 @@ use bincode::de::{Decode, Decoder};
 use bincode::enc::{Encode, Encoder};
 use bincode::error::{DecodeError, EncodeError};
 use compact_str::{CompactString, ToCompactString};
-use core::any::{type_name, TypeId};
+use core::any::{TypeId, type_name};
 use cu29_clock::{PartialCuTimeRange, RobotClock, Tov};
 use cu29_traits::{
-    CuCompactString, CuError, CuMsgMetadataTrait, CuResult, ErasedCuStampedData, Metadata,
-    COMPACT_STRING_CAPACITY,
+    COMPACT_STRING_CAPACITY, CuCompactString, CuError, CuMsgMetadataTrait, CuResult,
+    ErasedCuStampedData, Metadata,
 };
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-#[cfg(not(feature = "std"))]
-mod imp {
-    pub use alloc::fmt::Result as FmtResult;
-    pub use alloc::fmt::{Debug, Display, Formatter};
-    pub use alloc::format;
-}
-
-#[cfg(feature = "std")]
-mod imp {
-    pub use std::fmt::Result as FmtResult;
-    pub use std::fmt::{Debug, Display, Formatter};
-}
-
-use imp::*;
+use alloc::format;
+use core::fmt::{Debug, Display, Formatter, Result as FmtResult};
 
 /// The state of a task.
 // Everything that is stateful in copper for zero copy constraints need to be restricted to this trait.
-pub trait CuMsgPayload: Default + Debug + Clone + Encode + Decode<()> + Serialize + Sized {}
+pub trait CuMsgPayload:
+    Default + Debug + Clone + Encode + Decode<()> + Serialize + DeserializeOwned + Sized
+{
+}
 
 pub trait CuMsgPack {}
 
 // Also anything that follows this contract can be a payload (blanket implementation)
-impl<T: Default + Debug + Clone + Encode + Decode<()> + Serialize + Sized> CuMsgPayload for T {}
+impl<T> CuMsgPayload for T where
+    T: Default + Debug + Clone + Encode + Decode<()> + Serialize + DeserializeOwned + Sized
+{
+}
 
 macro_rules! impl_cu_msg_pack {
     ($($name:ident),+) => {
@@ -76,6 +71,12 @@ macro_rules! input_msg {
 // A convenience macro to get from a payload to a proper CuMsg used as output.
 #[macro_export]
 macro_rules! output_msg {
+    ($lt:lifetime, $first:ty, $($rest:ty),+) => {
+        ( CuMsg<$first>, $( CuMsg<$rest> ),+ )
+    };
+    ($first:ty, $($rest:ty),+) => {
+        ( CuMsg<$first>, $( CuMsg<$rest> ),+ )
+    };
     ($ty:ty) => {
         CuMsg<$ty>
     };
@@ -123,7 +124,11 @@ impl Display for CuMsgMetadata {
 }
 
 /// CuMsg is the envelope holding the msg payload and the metadata between tasks.
-#[derive(Default, Debug, Clone, bincode::Encode, bincode::Decode, Serialize)]
+#[derive(Default, Debug, Clone, bincode::Encode, bincode::Decode, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "T: Serialize, M: Serialize",
+    deserialize = "T: DeserializeOwned, M: DeserializeOwned"
+))]
 pub struct CuStampedData<T, M>
 where
     T: CuMsgPayload,
@@ -210,7 +215,8 @@ impl<T: CuMsgPayload> CuStampedData<T, CuMsgMetadata> {
     /// The caller must guarantee that the message really contains a payload of type `U`. Failing
     /// to do so is undefined behaviour.
     pub unsafe fn assume_payload<U: CuMsgPayload>(&self) -> &CuMsg<U> {
-        &*(self as *const CuMsg<T> as *const CuMsg<U>)
+        // SAFETY: Caller guarantees that the underlying payload is of type U.
+        unsafe { &*(self as *const CuMsg<T> as *const CuMsg<U>) }
     }
 
     /// Mutable variant of [`assume_payload`](Self::assume_payload).
@@ -220,7 +226,8 @@ impl<T: CuMsgPayload> CuStampedData<T, CuMsgMetadata> {
     /// The caller must guarantee that mutating the returned message is sound for the actual
     /// payload type stored in the buffer.
     pub unsafe fn assume_payload_mut<U: CuMsgPayload>(&mut self) -> &mut CuMsg<U> {
-        &mut *(self as *mut CuMsg<T> as *mut CuMsg<U>)
+        // SAFETY: Caller guarantees that the underlying payload is of type U.
+        unsafe { &mut *(self as *mut CuMsg<T> as *mut CuMsg<U>) }
     }
 }
 
@@ -236,7 +243,7 @@ impl<T: CuMsgPayload + 'static> CuStampedData<T, CuMsgMetadata> {
     /// Attempts to view this message as carrying payload `U`.
     pub fn downcast_ref<U: CuMsgPayload + 'static>(&self) -> CuResult<&CuMsg<U>> {
         if TypeId::of::<T>() == TypeId::of::<U>() {
-            // Safety: we just proved that T == U.
+            // SAFETY: We just proved that T == U.
             Ok(unsafe { self.assume_payload::<U>() })
         } else {
             Err(Self::downcast_err::<U>())
@@ -246,6 +253,7 @@ impl<T: CuMsgPayload + 'static> CuStampedData<T, CuMsgMetadata> {
     /// Mutable variant of [`downcast_ref`](Self::downcast_ref).
     pub fn downcast_mut<U: CuMsgPayload + 'static>(&mut self) -> CuResult<&mut CuMsg<U>> {
         if TypeId::of::<T>() == TypeId::of::<U>() {
+            // SAFETY: We just proved that T == U.
             Ok(unsafe { self.assume_payload_mut::<U>() })
         } else {
             Err(Self::downcast_err::<U>())
@@ -286,10 +294,12 @@ impl<'a, T: Freezable + ?Sized> Encode for BincodeAdapter<'a, T> {
 /// Note: A source has the privilege to have a clock passed to it vs a frozen clock.
 pub trait CuSrcTask: Freezable {
     type Output<'m>: CuMsgPayload;
+    /// Resources required by the task.
+    type Resources<'r>;
 
     /// Here you need to initialize everything your task will need for the duration of its lifetime.
     /// The config allows you to access the configuration of the task.
-    fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized;
 
@@ -327,10 +337,12 @@ pub trait CuSrcTask: Freezable {
 pub trait CuTask: Freezable {
     type Input<'m>: CuMsgPack;
     type Output<'m>: CuMsgPayload;
+    /// Resources required by the task.
+    type Resources<'r>;
 
     /// Here you need to initialize everything your task will need for the duration of its lifetime.
     /// The config allows you to access the configuration of the task.
-    fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized;
 
@@ -372,10 +384,12 @@ pub trait CuTask: Freezable {
 /// A Sink Task is a task that only consumes messages. For example drivers for actuators are Sink Tasks.
 pub trait CuSinkTask: Freezable {
     type Input<'m>: CuMsgPack;
+    /// Resources required by the task.
+    type Resources<'r>;
 
     /// Here you need to initialize everything your task will need for the duration of its lifetime.
     /// The config allows you to access the configuration of the task.
-    fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized;
 

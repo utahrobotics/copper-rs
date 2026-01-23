@@ -1,6 +1,6 @@
 use cu29::prelude::*;
 use cu29_helpers::basic_copper_setup;
-use iceoryx2_bb_log::{set_log_level, LogLevel};
+use iceoryx2_bb_log::{LogLevel, set_log_level};
 
 #[copper_runtime(config = "downstream.ron")]
 struct DownstreamApplication {}
@@ -19,11 +19,7 @@ fn main() {
         .build()
         .expect("Failed to create application.");
 
-    let outcome = application.run();
-    match outcome {
-        Ok(_result) => {}
-        Err(error) => {
-            debug!("Application Ended: {}", error)
-        }
+    if let Err(error) = application.run() {
+        debug!("Application Ended: {}", error)
     }
 }

@@ -41,7 +41,7 @@ where
     P: CuMsgPayload,
 {
     pub fn new() -> Self {
-        TimeboundCircularBuffer {
+        Self {
             // It is assumed to be sorted by time with non overlapping ranges if they are Tov::Range
             inner: CircularBuffer::<S, CuStampedData<P, CuMsgMetadata>>::new(),
         }
@@ -80,17 +80,14 @@ where
 
     /// Get the most recent time of the messages in the buffer.
     pub fn most_recent_time(&self) -> CuResult<Option<CuTime>> {
-        self.inner
-            .iter()
-            .map(|msg| extract_tov_time_right(&msg.tov))
-            .try_fold(None, |acc, time| {
-                let time = time.ok_or_else(|| {
-                    CuError::from("Trying to align temporal data with no time information")
-                })?;
-                Ok(Some(
-                    acc.map_or(time, |current_max: CuTime| current_max.max(time)),
-                ))
-            })
+        let mut latest: Option<CuTime> = None;
+        for msg in self.inner.iter() {
+            let time = extract_tov_time_right(&msg.tov).ok_or_else(|| {
+                CuError::from("Trying to align temporal data with no time information")
+            })?;
+            latest = Some(latest.map_or(time, |current_max| current_max.max(time)));
+        }
+        Ok(latest)
     }
 
     /// Push a message into the buffer.
@@ -120,7 +117,8 @@ macro_rules! alignment_buffers {
             /// Call this to be sure we discard the old/ non relevant data
             #[allow(dead_code)]
             pub fn purge(&mut self, now: cu29::clock::CuTime) {
-                let horizon_time = now - self.stale_data_horizon;
+                use cu29::prelude::SaturatingSub;
+                let horizon_time = now.saturating_sub(self.stale_data_horizon);
                 // purge all the stale data from the TimeboundCircularBuffers first
                 $(self.$name.purge(horizon_time);)*
             }
@@ -130,21 +128,18 @@ macro_rules! alignment_buffers {
             pub fn get_latest_aligned_data(
                 &mut self,
             ) -> Option<($(impl Iterator<Item = &cu29::cutask::CuStampedData<$payload, CuMsgMetadata>>),*)> {
+                use cu29::prelude::SaturatingSub;
                 // Now find the min of the max of the last time for all buffers
                 // meaning the most recent time at which all buffers have data
                 let most_recent_time = [
                     $(self.$name.most_recent_time().unwrap_or(None)),*
                 ]
-                .iter()
-                .filter_map(|&time| time)
-                .min();
+                .into_iter()
+                .flatten()
+                .min()?;
 
-                // If there is no data in any of the buffers, return early
-                most_recent_time?;
-
-                let most_recent_time = most_recent_time.unwrap();
-
-                let time_to_get_complete_window = most_recent_time - self.target_alignment_window;
+                let time_to_get_complete_window =
+                    most_recent_time.saturating_sub(self.target_alignment_window);
                 Some(($(self.$name.iter_window(time_to_get_complete_window, most_recent_time)),*))
             }
         }

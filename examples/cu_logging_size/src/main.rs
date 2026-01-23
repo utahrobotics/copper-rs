@@ -10,9 +10,10 @@ pub mod tasks {
     impl Freezable for ExampleSrc {}
 
     impl CuSrcTask for ExampleSrc {
+        type Resources<'r> = ();
         type Output<'m> = output_msg!(i32);
 
-        fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+        fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
         where
             Self: Sized,
         {
@@ -30,10 +31,11 @@ pub mod tasks {
     impl Freezable for ExampleTask {}
 
     impl CuTask for ExampleTask {
+        type Resources<'r> = ();
         type Input<'m> = input_msg!(i32);
         type Output<'m> = output_msg!(i32);
 
-        fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+        fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
         where
             Self: Sized,
         {
@@ -56,9 +58,10 @@ pub mod tasks {
     impl Freezable for ExampleSink {}
 
     impl CuSinkTask for ExampleSink {
+        type Resources<'r> = ();
         type Input<'m> = input_msg!(i32);
 
-        fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+        fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
         where
             Self: Sized,
         {
@@ -74,7 +77,9 @@ pub mod tasks {
 #[copper_runtime(config = "copperconfig.ron")]
 struct App {}
 
-const SLAB_SIZE: Option<usize> = Some(150 * 1024 * 1024);
+const SLAB_SIZE_BYTES: usize = 150 * 1024 * 1024;
+const SLAB_SIZE: Option<usize> = Some(SLAB_SIZE_BYTES);
+const MIN_USED_BYTES: usize = 100 * 1024 * 1024;
 fn main() {
     let tmp_dir = tempfile::TempDir::new().expect("Could not create temporary directory");
     let logger_path = tmp_dir.path().join("logger.copper");
@@ -104,7 +109,7 @@ fn main() {
     match metadata(&logger_first_path) {
         Ok(meta) => {
             let file_size = meta.len();
-            assert!(file_size >= SLAB_SIZE.unwrap() as u64);
+            assert!(file_size >= SLAB_SIZE_BYTES as u64);
         }
         Err(e) => {
             eprintln!("Failed to get file metadata: {e}");
@@ -112,5 +117,5 @@ fn main() {
     }
     let (current_slab_used, _current_slab_offsets, _back_slab_in_flight) =
         copper_ctx.unified_logger.lock().unwrap().stats();
-    assert!(current_slab_used > 100 * 1024 * 1024); // in the ron file we said:  section_size_mib: 100 so at least that amount should be used before it the logger is closed and trimmed
+    assert!(current_slab_used > MIN_USED_BYTES); // in the ron file we said:  section_size_mib: 100 so at least that amount should be used before it the logger is closed and trimmed
 }

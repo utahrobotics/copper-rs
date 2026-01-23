@@ -6,9 +6,9 @@ use bincode::enc::Encoder;
 use bincode::error::{DecodeError, EncodeError};
 use bincode::{Decode, Encode};
 use circular_buffer::CircularBuffer;
-use gstreamer::{parse, Buffer, BufferRef, Caps, FlowSuccess, Pipeline};
+use gstreamer::{Buffer, BufferRef, Caps, FlowSuccess, Pipeline, parse};
 use gstreamer_app::{AppSink, AppSinkCallbacks};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::ops::{Deref, DerefMut};
 use std::str::FromStr;
@@ -27,6 +27,16 @@ impl Serialize for CuGstBuffer {
             .map_readable()
             .map_err(|_| serde::ser::Error::custom("Could not map readable"))?
             .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CuGstBuffer {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let data = Vec::<u8>::deserialize(deserializer)?;
+        Ok(CuGstBuffer(Buffer::from_slice(data)))
     }
 }
 
@@ -75,9 +85,10 @@ pub struct CuGStreamer<const N: usize> {
 impl<const N: usize> Freezable for CuGStreamer<N> {}
 
 impl<const N: usize> CuSrcTask for CuGStreamer<N> {
+    type Resources<'r> = ();
     type Output<'m> = output_msg!(CuGstBuffer);
 
-    fn new(config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {
@@ -90,7 +101,7 @@ impl<const N: usize> CuSrcTask for CuGStreamer<N> {
 
         let config = config.ok_or_else(|| CuError::from("No config provided."))?;
 
-        let pipeline = if let Some(pipeline_str) = config.get::<String>("pipeline") {
+        let pipeline = if let Some(pipeline_str) = config.get::<String>("pipeline")? {
             debug!("Creating with pipeline: {}", &pipeline_str);
             let pipeline = parse::launch(pipeline_str.as_str())
                 .map_err(|e| CuError::new_with_cause("Failed to parse pipeline.", e))?;
@@ -98,7 +109,7 @@ impl<const N: usize> CuSrcTask for CuGStreamer<N> {
         } else {
             Err(CuError::from("No pipeline provided."))
         }?;
-        let caps_str = if let Some(caps_str) = config.get::<String>("caps") {
+        let caps_str = if let Some(caps_str) = config.get::<String>("caps")? {
             debug!("Creating with caps: {}", &caps_str);
             Ok(caps_str)
         } else {

@@ -1,8 +1,8 @@
 use velodyne_lidar::{Config, Config16};
 use velodyne_lidar::{DataPacket, Packet};
 
-use cu29::prelude::*;
 use cu_sensor_payloads::{PointCloud, PointCloudSoa};
+use cu29::prelude::*;
 use std::net::UdpSocket;
 use std::time::Duration;
 use velodyne_lidar::iter::try_packet_to_frame_xyz;
@@ -19,18 +19,24 @@ pub struct Vlp16 {
 impl Freezable for Vlp16 {}
 
 impl CuSrcTask for Vlp16 {
+    type Resources<'r> = ();
     type Output<'m> = output_msg!(PointCloudSoa<10000>);
 
-    fn new(config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {
-        let config: &ComponentConfig = config.expect("Vlp16 requires a config");
+        let config: &ComponentConfig =
+            config.ok_or_else(|| CuError::from("Vlp16 requires a config"))?;
         let listen_addr: String = config
-            .get("listen_addr")
+            .get::<String>("listen_addr")?
             .unwrap_or("0.0.0.0:2368".to_string());
-        let return_type: String = config.get("return_type").unwrap_or("last".to_string());
-        let test_mode: String = config.get("test_mode").unwrap_or("false".to_string());
+        let return_type: String = config
+            .get::<String>("return_type")?
+            .unwrap_or("last".to_string());
+        let test_mode: String = config
+            .get::<String>("test_mode")?
+            .unwrap_or("false".to_string());
         let velo_config = match return_type.as_str() {
             "strongest" => Config16::new_vlp_16_strongest(),
             "last" => Config16::new_vlp_16_last(),
@@ -100,7 +106,7 @@ mod tests {
     fn vlp16_end_2_end_test() {
         let clk = RobotClock::new();
         let cfg = ComponentConfig::new();
-        let mut drv = Vlp16::new(Some(&cfg)).unwrap();
+        let mut drv = Vlp16::new(Some(&cfg), ()).unwrap();
 
         let mut streamer = PcapStreamer::new("test/VLP_16_Single.pcap", "127.0.0.1:2368");
 

@@ -3,7 +3,7 @@ use bincode::enc::Encoder;
 use bincode::error::{DecodeError, EncodeError};
 use bincode::{Decode, Encode};
 use crsf::{LinkStatistics, RcChannels};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Copper-friendly wrapper for CRSF RC channel data.
 #[derive(Clone, Debug)]
@@ -41,7 +41,7 @@ impl Default for RcChannelsPayload {
 
 impl PartialEq for RcChannelsPayload {
     fn eq(&self, other: &Self) -> bool {
-        self.0 .0 == other.0 .0
+        self.0.0 == other.0.0
     }
 }
 
@@ -49,7 +49,7 @@ impl Eq for RcChannelsPayload {}
 
 impl Encode for RcChannelsPayload {
     fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
-        for value in self.0 .0.iter() {
+        for value in self.0.0.iter() {
             value.encode(encoder)?;
         }
         Ok(())
@@ -72,6 +72,16 @@ impl Serialize for RcChannelsPayload {
         S: serde::Serializer,
     {
         self.inner().0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RcChannelsPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let channels = <[u16; 16]>::deserialize(deserializer)?;
+        Ok(Self(RcChannels(channels)))
     }
 }
 
@@ -188,6 +198,38 @@ impl Serialize for LinkStatisticsPayload {
     }
 }
 
+impl<'de> Deserialize<'de> for LinkStatisticsPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let (
+            uplink_rssi_1,
+            uplink_rssi_2,
+            uplink_link_quality,
+            uplink_snr,
+            active_antenna,
+            rf_mode,
+            uplink_tx_power,
+            downlink_rssi,
+            downlink_link_quality,
+            downlink_snr,
+        ) = <(u8, u8, u8, i8, u8, u8, u8, u8, u8, i8)>::deserialize(deserializer)?;
+        Ok(Self(LinkStatistics {
+            uplink_rssi_1,
+            uplink_rssi_2,
+            uplink_link_quality,
+            uplink_snr,
+            active_antenna,
+            rf_mode,
+            uplink_tx_power,
+            downlink_rssi,
+            downlink_link_quality,
+            downlink_snr,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,7 +250,7 @@ mod tests {
 
         assert_eq!(consumed, encoded.len());
         assert_eq!(payload, decoded);
-        assert_eq!(decoded.0 .0, channels);
+        assert_eq!(decoded.0.0, channels);
     }
 
     #[test]

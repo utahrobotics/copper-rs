@@ -1,15 +1,15 @@
 use core::fmt::Debug;
 
 use cu29::prelude::*;
-use embedded_hal as eh1;
-use embedded_hal_02::blocking::delay::DelayMs as Eh0DelayMs;
-use embedded_hal_02::blocking::spi::{Transfer as Eh0Transfer, Write as Eh0Write};
-use embedded_hal_02::digital::v2::OutputPin as Eh0OutputPin;
+use embedded_hal::blocking::delay::DelayMs as Eh0DelayMs;
+use embedded_hal::blocking::spi::{Transfer as Eh0Transfer, Write as Eh0Write};
+use embedded_hal::digital::v2::OutputPin as Eh0OutputPin;
+use embedded_hal_1 as eh1;
 use mpu9250::{Marg, Mpu9250};
 use uom::si::angular_velocity::radian_per_second;
 use uom::si::f32::AngularVelocity as UomAngVel;
 
-use crate::{map_debug_error, ImuPayload, Mpu9250Device, WhoAmI};
+use crate::{ImuPayload, Mpu9250Device, WhoAmI, map_debug_error};
 
 pub const DEFAULT_GYRO_CAL_MS: u32 = 0;
 pub const DEFAULT_GYRO_SAMPLE_DELAY_MS: u32 = 10;
@@ -18,11 +18,13 @@ static mut GYRO_BIAS: [f32; 3] = [0.0; 3];
 
 /// Override the gyro bias that gets subtracted from every sample.
 pub fn set_gyro_bias(bias: [f32; 3]) {
+    // SAFETY: This module owns GYRO_BIAS and is used in a single-threaded context.
     unsafe { GYRO_BIAS = bias };
 }
 
 /// Read the current gyro bias that will be subtracted from measurements.
 pub fn gyro_bias() -> [f32; 3] {
+    // SAFETY: This module owns GYRO_BIAS and is used in a single-threaded context.
     unsafe { GYRO_BIAS }
 }
 
@@ -34,18 +36,24 @@ pub struct EmbeddedHalSettings {
 }
 
 impl EmbeddedHalSettings {
-    pub fn from_config(config: Option<&ComponentConfig>) -> Self {
-        let gyro_cal_ms = config
-            .and_then(|cfg| cfg.get("gyro_cal_ms"))
-            .unwrap_or(DEFAULT_GYRO_CAL_MS);
-        let gyro_sample_delay_ms = config
-            .and_then(|cfg| cfg.get("gyro_sample_delay_ms"))
-            .unwrap_or(DEFAULT_GYRO_SAMPLE_DELAY_MS);
+    pub fn from_config(config: Option<&ComponentConfig>) -> CuResult<Self> {
+        let gyro_cal_ms = match config {
+            Some(cfg) => cfg
+                .get::<u32>("gyro_cal_ms")?
+                .unwrap_or(DEFAULT_GYRO_CAL_MS),
+            None => DEFAULT_GYRO_CAL_MS,
+        };
+        let gyro_sample_delay_ms = match config {
+            Some(cfg) => cfg
+                .get::<u32>("gyro_sample_delay_ms")?
+                .unwrap_or(DEFAULT_GYRO_SAMPLE_DELAY_MS),
+            None => DEFAULT_GYRO_SAMPLE_DELAY_MS,
+        };
 
-        Self {
+        Ok(Self {
             gyro_cal_ms,
             gyro_sample_delay_ms,
-        }
+        })
     }
 }
 
@@ -61,7 +69,13 @@ enum Mpu<SPI, CS> {
     Imu(Mpu9250<SpiDev<SPI, CS>, mpu9250::Imu>),
 }
 
-impl<SPI, CS> Mpu<SPI, CS> {
+impl<SPI, CS> Mpu<SPI, CS>
+where
+    SPI: eh1::spi::SpiBus<u8>,
+    SPI::Error: Debug,
+    CS: eh1::digital::OutputPin,
+    CS::Error: Debug,
+{
     fn who_am_i(&mut self) -> Result<WhoAmI, MpuError<SPI, CS>> {
         let id = match self {
             Mpu::Marg(m) => m.who_am_i()?,
@@ -101,15 +115,19 @@ impl<SPI, CS> EmbeddedHalDriver<SPI, CS> {
     }
 }
 
-impl<SPI, CS, D> EmbeddedHalDriver<SPI, CS>
+impl<SPI, CS> EmbeddedHalDriver<SPI, CS>
 where
     SPI: eh1::spi::SpiBus<u8> + Send + 'static,
     SPI::Error: Debug,
     CS: eh1::digital::OutputPin + Send + 'static,
     CS::Error: Debug,
-    D: eh1::delay::DelayNs,
 {
-    pub fn new(spi: SPI, cs: CS, delay: D, settings: EmbeddedHalSettings) -> CuResult<Self> {
+    pub fn new<D: eh1::delay::DelayNs>(
+        spi: SPI,
+        cs: CS,
+        delay: D,
+        settings: EmbeddedHalSettings,
+    ) -> CuResult<Self> {
         let mut delay = Eh0Delay::new(delay);
         let spi = Eh0SpiBus::new(spi);
         let cs = Eh0Cs::new(cs);

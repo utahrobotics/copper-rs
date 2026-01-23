@@ -40,31 +40,24 @@ impl From<RPGpioPayload> for bool {
 
 impl From<RPGpioPayload> for u8 {
     fn from(msg: RPGpioPayload) -> Self {
-        if msg.on {
-            1
-        } else {
-            0
-        }
+        if msg.on { 1 } else { 0 }
     }
 }
 
 #[cfg(hardware)]
 impl From<RPGpioPayload> for Level {
     fn from(msg: RPGpioPayload) -> Self {
-        if msg.on {
-            Level::Low
-        } else {
-            Level::High
-        }
+        if msg.on { Level::Low } else { Level::High }
     }
 }
 
 impl Freezable for RPGpio {}
 
 impl CuSinkTask for RPGpio {
+    type Resources<'r> = ();
     type Input<'m> = input_msg!(RPGpioPayload);
 
-    fn new(config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {

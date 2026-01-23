@@ -1,27 +1,23 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![doc = include_str!("../README.md")]
 
+extern crate alloc;
 use bincode::{Decode, Encode};
-use cu29::prelude::*;
 use cu_sensor_payloads::ImuPayload;
+use cu29::prelude::*;
 use dcmimu::DCMIMU;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uom::si::acceleration::meter_per_second_squared;
 use uom::si::angular_velocity::radian_per_second;
 
 #[cfg(not(feature = "std"))]
-extern crate alloc;
-
-#[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-#[cfg(feature = "std")]
-use std::vec::Vec;
 
 use core::mem::size_of;
 use core::ptr;
 
 /// Pose expressed as Euler angles (radians) using the aerospace body frame.
-#[derive(Debug, Clone, Copy, Default, Encode, Decode, Serialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Encode, Decode, Serialize, Deserialize, PartialEq)]
 pub struct AhrsPose {
     pub roll: f32,
     pub pitch: f32,
@@ -106,10 +102,11 @@ pub mod sinks {
     impl Freezable for RpyPrinter {}
 
     impl CuTask for RpyPrinter {
+        type Resources<'r> = ();
         type Input<'m> = input_msg!(AhrsPose);
         type Output<'m> = output_msg!(AhrsPose);
 
-        fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+        fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
         where
             Self: Sized,
         {
@@ -124,7 +121,7 @@ pub mod sinks {
         ) -> CuResult<()> {
             if let Some(pose) = input.payload() {
                 info!(
-                    "AHRS RPY [rad]: roll={:.3} pitch={:.3} yaw={:.3}",
+                    "AHRS RPY [rad]: roll={} pitch={} yaw={}",
                     pose.roll, pose.pitch, pose.yaw
                 );
                 output.set_payload(*pose);
@@ -141,7 +138,7 @@ impl Freezable for CuAhrs {
         &self,
         encoder: &mut E,
     ) -> Result<(), bincode::error::EncodeError> {
-        // Safety: DCMIMU is a plain-old-data struct of floats; we snapshot its bytes to preserve filter state.
+        // SAFETY: DCMIMU is a plain-old-data struct of floats; we snapshot its bytes to preserve state.
         let bytes = unsafe {
             core::slice::from_raw_parts(
                 (&self.dcm as *const DCMIMU) as *const u8,
@@ -161,7 +158,7 @@ impl Freezable for CuAhrs {
         let raw: Vec<u8> = Decode::decode(decoder)?;
         let expected = size_of::<DCMIMU>();
         if raw.len() == expected {
-            // Safety: we created the vector ourselves from a previous freeze; copy bytes back.
+            // SAFETY: We created the vector ourselves from a previous freeze; copy bytes back.
             unsafe {
                 let ptr = (&mut self.dcm as *mut DCMIMU) as *mut u8;
                 ptr::copy_nonoverlapping(raw.as_ptr(), ptr, expected);
@@ -177,10 +174,11 @@ impl Freezable for CuAhrs {
 }
 
 impl CuTask for CuAhrs {
+    type Resources<'r> = ();
     type Input<'m> = input_msg!(ImuPayload);
     type Output<'m> = output_msg!(AhrsPose);
 
-    fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {
@@ -193,6 +191,7 @@ impl CuTask for CuAhrs {
         input: &Self::Input<'_>,
         output: &mut Self::Output<'_>,
     ) -> CuResult<()> {
+        output.tov = input.tov;
         let Some(payload) = input.payload() else {
             output.clear_payload();
             return Ok(());

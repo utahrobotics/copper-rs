@@ -14,10 +14,12 @@ repository.workspace = true
 [dependencies]
 bincode = { workspace = true }
 serde = { workspace = true }
-portable-atomic = { version = "1.11", default-features = false, features = ["fallback"] }
+portable-atomic = { version = "1.11", default-features = false, features = [
+  "fallback",
+] }
 
 [target.'cfg(all(target_arch = "arm", target_os = "none"))'.dependencies]
-cortex-m = { version = "0.7", features = ["critical-section"] }
+cortex-m = { version = "0.7" }
 
 [dev-dependencies]
 approx = "0.5"

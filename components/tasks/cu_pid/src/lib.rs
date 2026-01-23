@@ -9,13 +9,13 @@ use bincode::error::{DecodeError, EncodeError};
 use bincode::{Decode, Encode};
 use core::marker::PhantomData;
 use cu29::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[cfg(not(feature = "std"))]
 use alloc::format;
 
 /// Output of the PID controller.
-#[derive(Debug, Default, Clone, Encode, Decode, Serialize)]
+#[derive(Debug, Default, Clone, Encode, Decode, Serialize, Deserialize)]
 pub struct PIDControlOutputPayload {
     /// Proportional term
     pub p: f32,
@@ -81,6 +81,10 @@ impl PIDController {
         self.last_error = 0.0f32;
     }
 
+    pub fn reset_integral(&mut self) {
+        self.integral = 0.0f32;
+    }
+
     pub fn init_measurement(&mut self, measurement: f32) {
         self.last_error = self.setpoint - measurement;
         self.elapsed = self.sampling; // force the computation on the first next_control_output
@@ -101,6 +105,9 @@ impl PIDController {
         let error = self.setpoint - measurement;
         let CuDuration(elapsed) = self.elapsed;
         let dt = elapsed as f32 / 1_000_000f32; // the unit is kind of arbitrary.
+        if dt == 0.0 {
+            return self.last_output.clone();
+        }
 
         // Proportional term
         let p_unbounded = self.kp * error;
@@ -149,42 +156,42 @@ where
     f32: for<'a> From<&'a I>,
     I: CuMsgPayload,
 {
+    type Resources<'r> = ();
     type Input<'m> = input_msg!(I);
     type Output<'m> = output_msg!(PIDControlOutputPayload);
 
-    fn new(config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {
         match config {
             Some(config) => {
-                debug!("PIDTask config: {}", config);
+                debug!("PIDTask config loaded");
                 let setpoint: f32 = config
-                    .get::<f64>("setpoint")
+                    .get::<f64>("setpoint")?
                     .ok_or("'setpoint' not found in config")?
                     as f32;
 
-                let cutoff: f32 = config.get::<f64>("cutoff").ok_or(
+                let cutoff: f32 = config.get::<f64>("cutoff")?.ok_or(
                     "'cutoff' not found in config, please set an operating +/- limit on the input.",
                 )? as f32;
 
                 // p is mandatory
-                let kp = if let Some(kp) = config.get::<f64>("kp") {
-                    Ok(kp as f32)
-                } else {
-                    Err(CuError::from(
+                let kp = match config.get::<f64>("kp")? {
+                    Some(kp) => Ok(kp as f32),
+                    None => Err(CuError::from(
                         "'kp' not found in the config. We need at least 'kp' to make the PID algorithm work.",
-                    ))
+                    )),
                 }?;
 
-                let p_limit = getcfg(config, "pl", 2.0f32);
-                let ki = getcfg(config, "ki", 0.0f32);
-                let i_limit = getcfg(config, "il", 1.0f32);
-                let kd = getcfg(config, "kd", 0.0f32);
-                let d_limit = getcfg(config, "dl", 2.0f32);
-                let output_limit = getcfg(config, "ol", 1.0f32);
+                let p_limit = getcfg(config, "pl", 2.0f32)?;
+                let ki = getcfg(config, "ki", 0.0f32)?;
+                let i_limit = getcfg(config, "il", 1.0f32)?;
+                let kd = getcfg(config, "kd", 0.0f32)?;
+                let d_limit = getcfg(config, "dl", 2.0f32)?;
+                let output_limit = getcfg(config, "ol", 1.0f32)?;
 
-                let sampling = if let Some(value) = config.get::<u32>("sampling_ms") {
+                let sampling = if let Some(value) = config.get::<u32>("sampling_ms")? {
                     CuDuration::from(value as u64 * 1_000_000u64)
                 } else {
                     CuDuration::default()
@@ -221,6 +228,7 @@ where
         input: &Self::Input<'_>,
         output: &mut Self::Output<'_>,
     ) -> CuResult<()> {
+        output.tov = input.tov;
         match input.payload() {
             Some(payload) => {
                 let tov = match input.tov {
@@ -243,15 +251,13 @@ where
                 // update the status of the pid.
                 let state = self.pid.next_control_output(measure, dt);
                 // But safety check if the input is within operational margins and cut power if it is not.
-                if measure > self.setpoint + self.cutoff {
-                    return Err(
-                        format!("{} > {} (cutoff)", measure, self.setpoint + self.cutoff).into(),
-                    );
+                let upper_limit = self.setpoint + self.cutoff;
+                let lower_limit = self.setpoint - self.cutoff;
+                if measure > upper_limit {
+                    return Err(format!("{} > {} (cutoff)", measure, upper_limit).into());
                 }
-                if measure < self.setpoint - self.cutoff {
-                    return Err(
-                        format!("{} < {} (cutoff)", measure, self.setpoint - self.cutoff).into(),
-                    );
+                if measure < lower_limit {
+                    return Err(format!("{} < {} (cutoff)", measure, lower_limit).into());
                 }
                 output.metadata.set_status(format!(
                     "{:>5.2} {:>5.2} {:>5.2} {:>5.2}",
@@ -294,10 +300,9 @@ where
 }
 
 // Small helper befause we do this again and again
-fn getcfg(config: &ComponentConfig, key: &str, default: f32) -> f32 {
-    if let Some(value) = config.get::<f64>(key) {
-        value as f32
-    } else {
-        default
-    }
+fn getcfg(config: &ComponentConfig, key: &str, default: f32) -> Result<f32, ConfigError> {
+    Ok(config
+        .get::<f64>(key)?
+        .map(|value| value as f32)
+        .unwrap_or(default))
 }

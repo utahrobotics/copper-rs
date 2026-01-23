@@ -1,9 +1,9 @@
 use cu29::clock::RobotClock;
 use cu29::{bincode, prelude::*};
 
-use zenoh::key_expr::KeyExpr;
 use zenoh::Config;
 use zenoh::Error as ZenohError;
+use zenoh::key_expr::KeyExpr;
 
 use std::marker::PhantomData;
 
@@ -30,7 +30,7 @@ pub struct ZenohContext {
 }
 
 fn cu_error(msg: &str, error: ZenohError) -> CuError {
-    CuError::new_with_cause(msg, error.as_ref())
+    CuError::from(msg).add_cause(&error.to_string())
 }
 
 fn cu_error_map(msg: &str) -> impl FnOnce(ZenohError) -> CuError + '_ {
@@ -43,25 +43,25 @@ impl<P> CuSinkTask for ZenohSink<P>
 where
     P: CuMsgPayload + 'static,
 {
+    type Resources<'r> = ();
     type Input<'m> = input_msg!(P);
 
-    fn new(config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {
         let config = config.ok_or(CuError::from("ZenohSink: Missing configuration"))?;
 
         // Get json zenoh config
-        let session_config = config.get::<String>("zenoh_config_file").map_or(
-            // Or default zenoh config otherwise
-            Ok(Config::default()),
-            |s| -> CuResult<Config> {
-                Config::from_file(&s)
-                    .map_err(cu_error_map("ZenohSink: Failed to create zenoh config"))
-            },
-        )?;
+        let session_config = match config.get::<String>("zenoh_config_file")? {
+            Some(path) => Config::from_file(&path)
+                .map_err(cu_error_map("ZenohSink: Failed to create zenoh config"))?,
+            None => Config::default(),
+        };
 
-        let topic = config.get::<String>("topic").unwrap_or("copper".to_owned());
+        let topic = config
+            .get::<String>("topic")?
+            .unwrap_or("copper".to_owned());
 
         Ok(Self {
             _marker: Default::default(),

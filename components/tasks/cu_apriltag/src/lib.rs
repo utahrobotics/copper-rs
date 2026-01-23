@@ -175,8 +175,9 @@ fn image_from_cuimage<A>(cu_image: &CuImage<A>) -> ManuallyDrop<Image>
 where
     A: ArrayLike<Element = u8>,
 {
+    // SAFETY: We hand AprilTag a view into CuImage's buffer and prevent it from freeing memory.
     unsafe {
-        // Try to emulate what the C code is doing on the heap to avoid double free
+        // Try to emulate what the C code is doing on the heap to avoid double free.
         let buffer_ptr = cu_image.buffer_handle.with_inner(|inner| inner.as_ptr());
         let low_level_img = Box::new(image_u8_t {
             buf: buffer_ptr as *mut u8,
@@ -258,10 +259,11 @@ impl Freezable for AprilTags {}
 
 #[cfg(any(feature = "sim", feature = "resim"))]
 impl CuTask for AprilTags {
+    type Resources<'r> = ();
     type Input<'m> = input_msg!(CuImage<Vec<u8>>);
     type Output<'m> = output_msg!(AprilTagDetections);
 
-    fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {
@@ -280,21 +282,25 @@ impl CuTask for AprilTags {
 
 #[cfg(feature = "hardware")]
 impl CuTask for AprilTags {
+    type Resources<'r> = ();
     type Input<'m> = input_msg!(CuImage<Vec<u8>>);
     type Output<'m> = output_msg!(AprilTagDetections);
 
-    fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {
         if let Some(config) = _config {
-            let family_cfg: String = config.get("family").unwrap_or(FAMILY.to_string());
-            let bits_corrected: u32 = config.get("bits_corrected").unwrap_or(1);
-            let tagsize = config.get("tag_size").unwrap_or(TAG_SIZE);
-            let fx = config.get("fx").unwrap_or(FX);
-            let fy = config.get("fy").unwrap_or(FY);
-            let cx = config.get("cx").unwrap_or(CX);
-            let cy = config.get("cy").unwrap_or(CY);
+            let family_cfg = config
+                .get::<String>("family")?
+                .unwrap_or(FAMILY.to_string());
+            let family: Family = family_cfg.parse().unwrap();
+            let bits_corrected: u32 = config.get::<u32>("bits_corrected")?.unwrap_or(1);
+            let tagsize = config.get::<f64>("tag_size")?.unwrap_or(TAG_SIZE);
+            let fx = config.get::<f64>("fx")?.unwrap_or(FX);
+            let fy = config.get::<f64>("fy")?.unwrap_or(FY);
+            let cx = config.get::<f64>("cx")?.unwrap_or(CX);
+            let cy = config.get::<f64>("cy")?.unwrap_or(CY);
             let tag_params = TagParams {
                 fx,
                 fy,
@@ -397,7 +403,7 @@ mod tests {
     #[test]
     #[cfg(feature = "hardware")]
     fn test_end2end_apriltag() -> Result<()> {
-        let img = process_image("tests/data/simple.jpg")?;
+        let img = process_image("tests/data/simple.png")?;
         let format = CuImageBufferFormat {
             width: img.width(),
             height: img.height(),
@@ -415,7 +421,7 @@ mod tests {
         config.set("cy", 520.0);
         config.set("family", "tag16h5".to_string());
 
-        let mut task = AprilTags::new(Some(&config))?;
+        let mut task = AprilTags::new(Some(&config), ())?;
         let input = CuMsg::<CuImage<Vec<u8>>>::new(Some(cuimage));
         let mut output = CuMsg::<AprilTagDetections>::default();
 

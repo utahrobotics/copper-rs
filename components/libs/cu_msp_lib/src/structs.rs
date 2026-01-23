@@ -3,32 +3,16 @@
 use packed_struct::derive::{PackedStruct, PrimitiveEnum};
 use serde::{Deserialize, Serialize};
 
-use crate::commands::MspCommandCode;
 use crate::MspPacketDirection::{FromFlightController, ToFlightController};
-use crate::{MspPacket, MspPacketData};
+use crate::commands::MspCommandCode;
+use crate::{MSP_MAX_PAYLOAD_LEN, MspPacket, MspPacketData, MspPacketDataBuffer};
 
-// std implementation
-#[cfg(feature = "std")]
-mod std_impl {
-    pub use std::{string::String, vec::Vec};
-}
-
-// no-std implementation
-#[cfg(not(feature = "std"))]
-mod no_std_impl {
-    pub use alloc::{borrow::ToOwned, string::String, vec::Vec};
-}
-
-#[cfg(not(feature = "std"))]
-use no_std_impl::*;
-#[cfg(feature = "std")]
-use std_impl::*;
+use alloc::{borrow::ToOwned, string::String, vec::Vec};
 
 #[cfg(feature = "bincode")]
 use bincode::{Decode, Encode};
 use packed_struct::types::bits::ByteArray;
 use packed_struct::{PackedStruct, PackingError, PrimitiveEnum};
-use smallvec::SmallVec;
 
 #[cfg_attr(feature = "bincode", derive(Decode, Encode))]
 #[derive(PackedStruct, Serialize, Deserialize, Debug, Copy, Clone, Default)]
@@ -92,33 +76,294 @@ pub struct MspAvailableSensors {
 }
 
 #[cfg_attr(feature = "bincode", derive(Decode, Encode))]
-#[derive(PackedStruct, Serialize, Deserialize, Debug, Copy, Clone, Default)]
-#[packed_struct(endian = "lsb")]
-pub struct MspStatus {
-    pub cycle_time: u16,
-    pub i2c_errors: u16,
-    #[packed_field(size_bits = "8")]
-    pub sensors: MspAvailableSensors,
-    pub null1: u8,
-    pub flight_mode: u32,
-    pub profile: u8,
-    pub system_load: u16,
+#[derive(Serialize, Deserialize, Debug, Copy, Clone, Default, PartialEq, Eq)]
+pub struct MspStatusSensors {
+    pub acc: bool,
+    pub baro: bool,
+    pub mag: bool,
+    pub gps: bool,
+    pub rangefinder: bool,
+    pub gyro: bool,
+    pub optical_flow: bool,
+}
+
+impl MspStatusSensors {
+    pub fn from_bits(bits: u16) -> Self {
+        Self {
+            acc: bits & (1 << 0) != 0,
+            baro: bits & (1 << 1) != 0,
+            mag: bits & (1 << 2) != 0,
+            gps: bits & (1 << 3) != 0,
+            rangefinder: bits & (1 << 4) != 0,
+            gyro: bits & (1 << 5) != 0,
+            optical_flow: bits & (1 << 6) != 0,
+        }
+    }
+
+    pub fn to_bits(self) -> u16 {
+        (self.acc as u16)
+            | (self.baro as u16) << 1
+            | (self.mag as u16) << 2
+            | (self.gps as u16) << 3
+            | (self.rangefinder as u16) << 4
+            | (self.gyro as u16) << 5
+            | (self.optical_flow as u16) << 6
+    }
+}
+
+impl From<u16> for MspStatusSensors {
+    fn from(bits: u16) -> Self {
+        Self::from_bits(bits)
+    }
+}
+
+impl From<MspStatusSensors> for u16 {
+    fn from(value: MspStatusSensors) -> Self {
+        value.to_bits()
+    }
 }
 
 #[cfg_attr(feature = "bincode", derive(Decode, Encode))]
-#[derive(PackedStruct, Serialize, Deserialize, Debug, Copy, Clone, Default)]
-#[packed_struct(endian = "lsb")]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct MspStatus {
+    pub cycle_time: u16,
+    pub i2c_errors: u16,
+    pub sensors: MspStatusSensors,
+    pub flight_mode_flags: u32,
+    pub current_pid_profile_index: u8,
+    pub average_system_load_percent: u16,
+    pub gyro_cycle_time: u16,
+    pub extra_flight_mode_flags: Vec<u8>,
+    pub arming_disable_flags_count: u8,
+    pub arming_disable_flags: u32,
+    pub config_state_flags: u8,
+    pub core_temp_celsius: u16,
+    pub control_rate_profile_count: u8,
+}
+
+#[cfg_attr(feature = "bincode", derive(Decode, Encode))]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct MspStatusEx {
     pub cycle_time: u16,
     pub i2c_errors: u16,
-    #[packed_field(size_bits = "8")]
-    pub sensors: MspAvailableSensors,
-    pub null1: u8,
-    pub flight_mode: u32,
+    pub sensors: MspStatusSensors,
+    pub flight_mode_flags: u32,
     pub current_pid_profile_index: u8,
     pub average_system_load_percent: u16,
     pub max_profile_count: u8,
     pub current_control_rate_profile_index: u8,
+    pub extra_flight_mode_flags: Vec<u8>,
+    pub arming_disable_flags_count: u8,
+    pub arming_disable_flags: u32,
+    pub config_state_flags: u8,
+    pub core_temp_celsius: u16,
+    pub control_rate_profile_count: u8,
+}
+
+impl MspStatus {
+    pub fn from_bytes(data: &[u8]) -> Result<Self, PackingError> {
+        let mut offset = 0;
+        let cycle_time = read_u16(data, &mut offset)?;
+        let i2c_errors = read_u16(data, &mut offset)?;
+        let sensors = MspStatusSensors::from(read_u16(data, &mut offset)?);
+        let flight_mode_flags = read_u32(data, &mut offset)?;
+        let current_pid_profile_index = read_u8(data, &mut offset)?;
+        let average_system_load_percent = read_u16(data, &mut offset)?;
+        let gyro_cycle_time = read_u16(data, &mut offset)?;
+        let extra_flight_mode_flags_len = read_u8(data, &mut offset)? as usize;
+        let extra_flight_mode_flags = read_bytes(data, &mut offset, extra_flight_mode_flags_len)?;
+        let arming_disable_flags_count = read_u8(data, &mut offset)?;
+        let arming_disable_flags = read_u32(data, &mut offset)?;
+        let config_state_flags = read_u8(data, &mut offset)?;
+        let core_temp_celsius = read_u16(data, &mut offset)?;
+        let control_rate_profile_count = read_u8(data, &mut offset)?;
+
+        Ok(Self {
+            cycle_time,
+            i2c_errors,
+            sensors,
+            flight_mode_flags,
+            current_pid_profile_index,
+            average_system_load_percent,
+            gyro_cycle_time,
+            extra_flight_mode_flags,
+            arming_disable_flags_count,
+            arming_disable_flags,
+            config_state_flags,
+            core_temp_celsius,
+            control_rate_profile_count,
+        })
+    }
+
+    pub fn to_packet_data(&self) -> Result<MspPacketData, PackingError> {
+        if self.extra_flight_mode_flags.len() > 15 {
+            return Err(PackingError::InvalidValue);
+        }
+        let mut data = MspPacketDataBuffer::new();
+        extend_payload(&mut data, &self.cycle_time.to_le_bytes())?;
+        extend_payload(&mut data, &self.i2c_errors.to_le_bytes())?;
+        extend_payload(&mut data, &u16::from(self.sensors).to_le_bytes())?;
+        extend_payload(&mut data, &self.flight_mode_flags.to_le_bytes())?;
+        push_payload(&mut data, self.current_pid_profile_index)?;
+        extend_payload(&mut data, &self.average_system_load_percent.to_le_bytes())?;
+        extend_payload(&mut data, &self.gyro_cycle_time.to_le_bytes())?;
+        push_payload(&mut data, self.extra_flight_mode_flags.len() as u8)?;
+        extend_payload(&mut data, &self.extra_flight_mode_flags)?;
+        push_payload(&mut data, self.arming_disable_flags_count)?;
+        extend_payload(&mut data, &self.arming_disable_flags.to_le_bytes())?;
+        push_payload(&mut data, self.config_state_flags)?;
+        extend_payload(&mut data, &self.core_temp_celsius.to_le_bytes())?;
+        push_payload(&mut data, self.control_rate_profile_count)?;
+
+        Ok(MspPacketData(data))
+    }
+}
+
+impl MspStatusEx {
+    pub fn from_bytes(data: &[u8]) -> Result<Self, PackingError> {
+        let mut offset = 0;
+        let cycle_time = read_u16(data, &mut offset)?;
+        let i2c_errors = read_u16(data, &mut offset)?;
+        let sensors = MspStatusSensors::from(read_u16(data, &mut offset)?);
+        let flight_mode_flags = read_u32(data, &mut offset)?;
+        let current_pid_profile_index = read_u8(data, &mut offset)?;
+        let average_system_load_percent = read_u16(data, &mut offset)?;
+        let max_profile_count = read_u8(data, &mut offset)?;
+        let current_control_rate_profile_index = read_u8(data, &mut offset)?;
+        let extra_flight_mode_flags_len = read_u8(data, &mut offset)? as usize;
+        let extra_flight_mode_flags = read_bytes(data, &mut offset, extra_flight_mode_flags_len)?;
+        let arming_disable_flags_count = read_u8(data, &mut offset)?;
+        let arming_disable_flags = read_u32(data, &mut offset)?;
+        let config_state_flags = read_u8(data, &mut offset)?;
+        let core_temp_celsius = read_u16(data, &mut offset)?;
+        let control_rate_profile_count = read_u8(data, &mut offset)?;
+
+        Ok(Self {
+            cycle_time,
+            i2c_errors,
+            sensors,
+            flight_mode_flags,
+            current_pid_profile_index,
+            average_system_load_percent,
+            max_profile_count,
+            current_control_rate_profile_index,
+            extra_flight_mode_flags,
+            arming_disable_flags_count,
+            arming_disable_flags,
+            config_state_flags,
+            core_temp_celsius,
+            control_rate_profile_count,
+        })
+    }
+
+    pub fn to_packet_data(&self) -> Result<MspPacketData, PackingError> {
+        if self.extra_flight_mode_flags.len() > 15 {
+            return Err(PackingError::InvalidValue);
+        }
+        let mut data = MspPacketDataBuffer::new();
+        extend_payload(&mut data, &self.cycle_time.to_le_bytes())?;
+        extend_payload(&mut data, &self.i2c_errors.to_le_bytes())?;
+        extend_payload(&mut data, &u16::from(self.sensors).to_le_bytes())?;
+        extend_payload(&mut data, &self.flight_mode_flags.to_le_bytes())?;
+        push_payload(&mut data, self.current_pid_profile_index)?;
+        extend_payload(&mut data, &self.average_system_load_percent.to_le_bytes())?;
+        push_payload(&mut data, self.max_profile_count)?;
+        push_payload(&mut data, self.current_control_rate_profile_index)?;
+        push_payload(&mut data, self.extra_flight_mode_flags.len() as u8)?;
+        extend_payload(&mut data, &self.extra_flight_mode_flags)?;
+        push_payload(&mut data, self.arming_disable_flags_count)?;
+        extend_payload(&mut data, &self.arming_disable_flags.to_le_bytes())?;
+        push_payload(&mut data, self.config_state_flags)?;
+        extend_payload(&mut data, &self.core_temp_celsius.to_le_bytes())?;
+        push_payload(&mut data, self.control_rate_profile_count)?;
+
+        Ok(MspPacketData(data))
+    }
+}
+
+fn push_payload(data: &mut MspPacketDataBuffer, value: u8) -> Result<(), PackingError> {
+    let next_len = data.len() + 1;
+    if next_len > MSP_MAX_PAYLOAD_LEN {
+        return Err(PackingError::BufferSizeMismatch {
+            expected: MSP_MAX_PAYLOAD_LEN,
+            actual: next_len,
+        });
+    }
+    data.push(value)
+        .map_err(|_| PackingError::BufferSizeMismatch {
+            expected: MSP_MAX_PAYLOAD_LEN,
+            actual: next_len,
+        })?;
+    Ok(())
+}
+
+fn extend_payload(data: &mut MspPacketDataBuffer, bytes: &[u8]) -> Result<(), PackingError> {
+    let next_len = data.len() + bytes.len();
+    if next_len > MSP_MAX_PAYLOAD_LEN {
+        return Err(PackingError::BufferSizeMismatch {
+            expected: MSP_MAX_PAYLOAD_LEN,
+            actual: next_len,
+        });
+    }
+    data.extend_from_slice(bytes)
+        .map_err(|_| PackingError::BufferSizeMismatch {
+            expected: MSP_MAX_PAYLOAD_LEN,
+            actual: next_len,
+        })?;
+    Ok(())
+}
+
+fn read_u8(data: &[u8], offset: &mut usize) -> Result<u8, PackingError> {
+    if *offset + 1 > data.len() {
+        return Err(PackingError::BufferSizeMismatch {
+            expected: *offset + 1,
+            actual: data.len(),
+        });
+    }
+    let value = data[*offset];
+    *offset += 1;
+    Ok(value)
+}
+
+fn read_u16(data: &[u8], offset: &mut usize) -> Result<u16, PackingError> {
+    if *offset + 2 > data.len() {
+        return Err(PackingError::BufferSizeMismatch {
+            expected: *offset + 2,
+            actual: data.len(),
+        });
+    }
+    let value = u16::from_le_bytes([data[*offset], data[*offset + 1]]);
+    *offset += 2;
+    Ok(value)
+}
+
+fn read_u32(data: &[u8], offset: &mut usize) -> Result<u32, PackingError> {
+    if *offset + 4 > data.len() {
+        return Err(PackingError::BufferSizeMismatch {
+            expected: *offset + 4,
+            actual: data.len(),
+        });
+    }
+    let value = u32::from_le_bytes([
+        data[*offset],
+        data[*offset + 1],
+        data[*offset + 2],
+        data[*offset + 3],
+    ]);
+    *offset += 4;
+    Ok(value)
+}
+
+fn read_bytes(data: &[u8], offset: &mut usize, len: usize) -> Result<Vec<u8>, PackingError> {
+    if *offset + len > data.len() {
+        return Err(PackingError::BufferSizeMismatch {
+            expected: *offset + len,
+            actual: data.len(),
+        });
+    }
+    let bytes = data[*offset..*offset + len].to_vec();
+    *offset += len;
+    Ok(bytes)
 }
 
 #[cfg_attr(feature = "bincode", derive(Decode, Encode))]
@@ -240,6 +485,23 @@ pub struct MspAltitude {
 #[cfg_attr(feature = "bincode", derive(Decode, Encode))]
 #[derive(PackedStruct, Serialize, Deserialize, Debug, Copy, Clone, Default)]
 #[packed_struct(endian = "lsb")]
+pub struct MspSensorRangefinder {
+    pub quality: u8,
+    pub distance_mm: i32,
+}
+
+#[cfg_attr(feature = "bincode", derive(Decode, Encode))]
+#[derive(PackedStruct, Serialize, Deserialize, Debug, Copy, Clone, Default)]
+#[packed_struct(endian = "lsb")]
+pub struct MspSensorOpticFlow {
+    pub quality: u8,
+    pub motion_x: i32,
+    pub motion_y: i32,
+}
+
+#[cfg_attr(feature = "bincode", derive(Decode, Encode))]
+#[derive(PackedStruct, Serialize, Deserialize, Debug, Copy, Clone, Default)]
+#[packed_struct(endian = "lsb")]
 pub struct MspBatteryConfig {
     pub vbat_min_cell_voltage: u8,
     pub vbat_max_cell_voltage: u8,
@@ -247,6 +509,22 @@ pub struct MspBatteryConfig {
     pub battery_capacity: u16,
     pub voltage_meter_source: u8,
     pub current_meter_source: u8,
+    pub vbat_min_cell_voltage_mv: u16,
+    pub vbat_max_cell_voltage_mv: u16,
+    pub vbat_warning_cell_voltage_mv: u16,
+}
+
+#[cfg_attr(feature = "bincode", derive(Decode, Encode))]
+#[derive(PackedStruct, Serialize, Deserialize, Debug, Copy, Clone, Default)]
+#[packed_struct(endian = "lsb")]
+pub struct MspVoltageMeterConfig {
+    pub sensor_count: u8,
+    pub subframe_len: u8,
+    pub id: u8,
+    pub sensor_type: u8,
+    pub vbat_scale: u8,
+    pub vbat_res_div_val: u8,
+    pub vbat_res_div_mult: u8,
 }
 
 #[cfg_attr(feature = "bincode", derive(Decode, Encode))]
@@ -258,6 +536,8 @@ pub struct MspAnalog {
     pub rssi: u16,
     /// Current in 0.01A steps, range is -320A to 320A
     pub amperage: i16,
+    /// Battery voltage in 0.01V steps
+    pub battery_voltage_mv: u16,
 }
 
 #[cfg_attr(feature = "bincode", derive(Decode, Encode))]
@@ -298,6 +578,8 @@ pub struct MspBatteryState {
     pub amperage: i16,
 
     pub alerts: u8,
+    /// Battery voltage in 0.01V steps
+    pub battery_voltage_mv: u16,
 }
 
 impl MspBatteryState {
@@ -588,6 +870,71 @@ pub struct MspSetMotorMixer {
     pub index: u8,
     #[packed_field(size_bytes = "8")]
     pub motor_mixer: MspMotorMixer,
+}
+
+pub const MSP_DP_HEARTBEAT: u8 = 0;
+pub const MSP_DP_RELEASE: u8 = 1;
+pub const MSP_DP_CLEAR_SCREEN: u8 = 2;
+pub const MSP_DP_WRITE_STRING: u8 = 3;
+pub const MSP_DP_DRAW_SCREEN: u8 = 4;
+pub const MSP_DP_OPTIONS: u8 = 5;
+pub const MSP_DP_SYS: u8 = 6;
+pub const MSP_DP_FONTCHAR_WRITE: u8 = 7;
+
+#[cfg_attr(feature = "bincode", derive(Decode, Encode))]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+pub struct MspDisplayPort {
+    pub payload: Vec<u8>,
+}
+
+impl MspDisplayPort {
+    pub fn new(payload: Vec<u8>) -> Self {
+        Self { payload }
+    }
+
+    pub fn heartbeat() -> Self {
+        Self {
+            payload: Vec::from([MSP_DP_HEARTBEAT]),
+        }
+    }
+
+    pub fn release() -> Self {
+        Self {
+            payload: Vec::from([MSP_DP_RELEASE]),
+        }
+    }
+
+    pub fn clear_screen() -> Self {
+        Self {
+            payload: Vec::from([MSP_DP_CLEAR_SCREEN]),
+        }
+    }
+
+    pub fn draw_screen() -> Self {
+        Self {
+            payload: Vec::from([MSP_DP_DRAW_SCREEN]),
+        }
+    }
+
+    pub fn write_string(row: u8, col: u8, attr: u8, text: &str) -> Self {
+        let mut payload = Vec::with_capacity(4 + text.len());
+        payload.push(MSP_DP_WRITE_STRING);
+        payload.push(row);
+        payload.push(col);
+        payload.push(attr);
+        payload.extend_from_slice(text.as_bytes());
+        Self { payload }
+    }
+
+    pub fn sys(row: u8, col: u8, element: u8) -> Self {
+        Self {
+            payload: Vec::from([MSP_DP_SYS, row, col, element]),
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.payload
+    }
 }
 
 #[cfg_attr(feature = "bincode", derive(Decode, Encode))]
@@ -966,20 +1313,93 @@ impl MspRc {
 pub enum MspRequest {
     #[default]
     Unknown,
-    MspBatteryState,
+    MspApiVersionRequest,
+    MspApiVersion(MspApiVersion),
+    MspFcVersionRequest,
+    MspFlightControllerVersion(MspFlightControllerVersion),
+    MspBatteryConfigRequest,
+    MspBatteryConfig(MspBatteryConfig),
+    MspBatteryStateRequest,
+    MspBatteryState(MspBatteryState),
+    MspAnalogRequest,
+    MspAnalog(MspAnalog),
+    MspVoltageMeterConfigRequest,
+    MspVoltageMeterConfig(MspVoltageMeterConfig),
+    MspVoltageMetersRequest,
+    MspVoltageMeter(MspVoltageMeter),
     MspRc,
     MspSetRawRc(MspRc),
     MspRawImu,
+    MspStatus(MspStatus),
+    MspStatusEx(MspStatusEx),
+    MspDisplayPort(MspDisplayPort),
+    MspSensorRangefinder(MspSensorRangefinder),
+    MspSensorOpticFlow(MspSensorOpticFlow),
 }
 
 impl MspRequest {
     pub fn command_code(&self) -> MspCommandCode {
         match self {
-            MspRequest::MspBatteryState => MspCommandCode::MSP_BATTERY_STATE,
+            MspRequest::MspApiVersionRequest => MspCommandCode::MSP_API_VERSION,
+            MspRequest::MspApiVersion(_) => MspCommandCode::MSP_API_VERSION,
+            MspRequest::MspFcVersionRequest => MspCommandCode::MSP_FC_VERSION,
+            MspRequest::MspFlightControllerVersion(_) => MspCommandCode::MSP_FC_VERSION,
+            MspRequest::MspBatteryConfigRequest => MspCommandCode::MSP_BATTERY_CONFIG,
+            MspRequest::MspBatteryConfig(_) => MspCommandCode::MSP_BATTERY_CONFIG,
+            MspRequest::MspBatteryStateRequest => MspCommandCode::MSP_BATTERY_STATE,
+            MspRequest::MspBatteryState(_) => MspCommandCode::MSP_BATTERY_STATE,
+            MspRequest::MspAnalogRequest => MspCommandCode::MSP_ANALOG,
+            MspRequest::MspAnalog(_) => MspCommandCode::MSP_ANALOG,
+            MspRequest::MspVoltageMeterConfigRequest => MspCommandCode::MSP_VOLTAGE_METER_CONFIG,
+            MspRequest::MspVoltageMeterConfig(_) => MspCommandCode::MSP_VOLTAGE_METER_CONFIG,
+            MspRequest::MspVoltageMetersRequest => MspCommandCode::MSP_VOLTAGE_METERS,
+            MspRequest::MspVoltageMeter(_) => MspCommandCode::MSP_VOLTAGE_METERS,
             MspRequest::MspRc => MspCommandCode::MSP_RC,
             MspRequest::MspSetRawRc(_) => MspCommandCode::MSP_SET_RAW_RC,
             MspRequest::MspRawImu => MspCommandCode::MSP_RAW_IMU,
+            MspRequest::MspStatus(_) => MspCommandCode::MSP_STATUS,
+            MspRequest::MspStatusEx(_) => MspCommandCode::MSP_STATUS_EX,
+            MspRequest::MspDisplayPort(_) => MspCommandCode::MSP_DISPLAYPORT,
+            MspRequest::MspSensorRangefinder(_) => MspCommandCode::MSP2_SENSOR_RANGEFINDER,
+            MspRequest::MspSensorOpticFlow(_) => MspCommandCode::MSP2_SENSOR_OPTIC_FLOW,
             _ => MspCommandCode::MSP_API_VERSION,
+        }
+    }
+
+    pub fn from_command_code(cmd: MspCommandCode) -> Option<Self> {
+        match cmd {
+            MspCommandCode::MSP_API_VERSION => Some(MspRequest::MspApiVersionRequest),
+            MspCommandCode::MSP_FC_VERSION => Some(MspRequest::MspFcVersionRequest),
+            MspCommandCode::MSP_BATTERY_CONFIG => Some(MspRequest::MspBatteryConfigRequest),
+            MspCommandCode::MSP_BATTERY_STATE => Some(MspRequest::MspBatteryStateRequest),
+            MspCommandCode::MSP_ANALOG => Some(MspRequest::MspAnalogRequest),
+            MspCommandCode::MSP_VOLTAGE_METER_CONFIG => {
+                Some(MspRequest::MspVoltageMeterConfigRequest)
+            }
+            MspCommandCode::MSP_VOLTAGE_METERS => Some(MspRequest::MspVoltageMetersRequest),
+            MspCommandCode::MSP_RC => Some(MspRequest::MspRc),
+            MspCommandCode::MSP_RAW_IMU => Some(MspRequest::MspRawImu),
+            _ => None,
+        }
+    }
+
+    pub fn from_command_id(cmd: u16) -> Option<Self> {
+        let cmd = MspCommandCode::from_primitive(cmd)?;
+        Self::from_command_code(cmd)
+    }
+
+    pub fn from_packet(packet: &MspPacket) -> Option<Self> {
+        let cmd = MspCommandCode::from_primitive(packet.cmd)?;
+        match cmd {
+            MspCommandCode::MSP2_SENSOR_RANGEFINDER => packet
+                .decode_as::<MspSensorRangefinder>()
+                .ok()
+                .map(MspRequest::MspSensorRangefinder),
+            MspCommandCode::MSP2_SENSOR_OPTIC_FLOW => packet
+                .decode_as::<MspSensorOpticFlow>()
+                .ok()
+                .map(MspRequest::MspSensorOpticFlow),
+            _ => Self::from_command_code(cmd),
         }
     }
 }
@@ -987,10 +1407,96 @@ impl MspRequest {
 impl From<MspRequest> for MspPacket {
     fn from(request: MspRequest) -> Self {
         match request {
-            MspRequest::MspBatteryState => MspPacket {
+            MspRequest::MspApiVersionRequest => MspPacket {
+                cmd: MspCommandCode::MSP_API_VERSION.to_primitive(),
+                direction: ToFlightController,
+                data: MspPacketData::new(),
+            },
+            MspRequest::MspApiVersion(version) => MspPacket {
+                cmd: MspCommandCode::MSP_API_VERSION.to_primitive(),
+                direction: FromFlightController,
+                data: version.pack().map_or_else(
+                    |_| MspPacketData::new(),
+                    |data| MspPacketData::from(data.as_slice()),
+                ),
+            },
+            MspRequest::MspFcVersionRequest => MspPacket {
+                cmd: MspCommandCode::MSP_FC_VERSION.to_primitive(),
+                direction: ToFlightController,
+                data: MspPacketData::new(),
+            },
+            MspRequest::MspFlightControllerVersion(version) => MspPacket {
+                cmd: MspCommandCode::MSP_FC_VERSION.to_primitive(),
+                direction: FromFlightController,
+                data: version.pack().map_or_else(
+                    |_| MspPacketData::new(),
+                    |data| MspPacketData::from(data.as_slice()),
+                ),
+            },
+            MspRequest::MspBatteryConfigRequest => MspPacket {
+                cmd: MspCommandCode::MSP_BATTERY_CONFIG.to_primitive(),
+                direction: ToFlightController,
+                data: MspPacketData::new(),
+            },
+            MspRequest::MspBatteryConfig(config) => MspPacket {
+                cmd: MspCommandCode::MSP_BATTERY_CONFIG.to_primitive(),
+                direction: FromFlightController,
+                data: config.pack().map_or_else(
+                    |_| MspPacketData::new(),
+                    |data| MspPacketData::from(data.as_slice()),
+                ),
+            },
+            MspRequest::MspBatteryStateRequest => MspPacket {
                 cmd: MspCommandCode::MSP_BATTERY_STATE.to_primitive(),
                 direction: ToFlightController,
                 data: MspPacketData::new(), // empty
+            },
+            MspRequest::MspBatteryState(state) => MspPacket {
+                cmd: MspCommandCode::MSP_BATTERY_STATE.to_primitive(),
+                direction: FromFlightController,
+                data: state.pack().map_or_else(
+                    |_| MspPacketData::new(),
+                    |data| MspPacketData::from(data.as_slice()),
+                ),
+            },
+            MspRequest::MspAnalogRequest => MspPacket {
+                cmd: MspCommandCode::MSP_ANALOG.to_primitive(),
+                direction: ToFlightController,
+                data: MspPacketData::new(), // empty
+            },
+            MspRequest::MspAnalog(analog) => MspPacket {
+                cmd: MspCommandCode::MSP_ANALOG.to_primitive(),
+                direction: FromFlightController,
+                data: analog.pack().map_or_else(
+                    |_| MspPacketData::new(),
+                    |data| MspPacketData::from(data.as_slice()),
+                ),
+            },
+            MspRequest::MspVoltageMeterConfigRequest => MspPacket {
+                cmd: MspCommandCode::MSP_VOLTAGE_METER_CONFIG.to_primitive(),
+                direction: ToFlightController,
+                data: MspPacketData::new(),
+            },
+            MspRequest::MspVoltageMeterConfig(config) => MspPacket {
+                cmd: MspCommandCode::MSP_VOLTAGE_METER_CONFIG.to_primitive(),
+                direction: FromFlightController,
+                data: config.pack().map_or_else(
+                    |_| MspPacketData::new(),
+                    |data| MspPacketData::from(data.as_slice()),
+                ),
+            },
+            MspRequest::MspVoltageMetersRequest => MspPacket {
+                cmd: MspCommandCode::MSP_VOLTAGE_METERS.to_primitive(),
+                direction: ToFlightController,
+                data: MspPacketData::new(), // empty
+            },
+            MspRequest::MspVoltageMeter(meter) => MspPacket {
+                cmd: MspCommandCode::MSP_VOLTAGE_METERS.to_primitive(),
+                direction: FromFlightController,
+                data: meter.pack().map_or_else(
+                    |_| MspPacketData::new(),
+                    |data| MspPacketData::from(data.as_slice()),
+                ),
             },
             MspRequest::MspRc => MspPacket {
                 cmd: MspCommandCode::MSP_RC.to_primitive(),
@@ -1002,13 +1508,44 @@ impl From<MspRequest> for MspPacket {
                 MspPacket {
                     cmd: MspCommandCode::MSP_SET_RAW_RC.to_primitive(),
                     direction: ToFlightController,
-                    data: MspPacketData(SmallVec::from_slice(data.as_slice())),
+                    data: MspPacketData::from(data.as_slice()),
                 }
             }
             MspRequest::MspRawImu => MspPacket {
                 cmd: MspCommandCode::MSP_RAW_IMU.to_primitive(),
                 direction: ToFlightController,
                 data: MspPacketData::new(), // empty
+            },
+            MspRequest::MspStatus(status) => MspPacket {
+                cmd: MspCommandCode::MSP_STATUS.to_primitive(),
+                direction: FromFlightController,
+                data: status.to_packet_data().unwrap(),
+            },
+            MspRequest::MspStatusEx(status) => MspPacket {
+                cmd: MspCommandCode::MSP_STATUS_EX.to_primitive(),
+                direction: FromFlightController,
+                data: status.to_packet_data().unwrap(),
+            },
+            MspRequest::MspDisplayPort(displayport) => MspPacket {
+                cmd: MspCommandCode::MSP_DISPLAYPORT.to_primitive(),
+                direction: FromFlightController,
+                data: MspPacketData::from(displayport.as_bytes()),
+            },
+            MspRequest::MspSensorRangefinder(data) => MspPacket {
+                cmd: MspCommandCode::MSP2_SENSOR_RANGEFINDER.to_primitive(),
+                direction: ToFlightController,
+                data: data.pack().map_or_else(
+                    |_| MspPacketData::new(),
+                    |packed| MspPacketData::from(packed.as_slice()),
+                ),
+            },
+            MspRequest::MspSensorOpticFlow(data) => MspPacket {
+                cmd: MspCommandCode::MSP2_SENSOR_OPTIC_FLOW.to_primitive(),
+                direction: ToFlightController,
+                data: data.pack().map_or_else(
+                    |_| MspPacketData::new(),
+                    |packed| MspPacketData::from(packed.as_slice()),
+                ),
             },
             _ => MspPacket {
                 cmd: MspCommandCode::MSP_API_VERSION.to_primitive(),
@@ -1022,10 +1559,96 @@ impl From<MspRequest> for MspPacket {
 impl From<&MspRequest> for MspPacket {
     fn from(request: &MspRequest) -> Self {
         match request {
-            MspRequest::MspBatteryState => MspPacket {
+            MspRequest::MspApiVersionRequest => MspPacket {
+                cmd: MspCommandCode::MSP_API_VERSION.to_primitive(),
+                direction: ToFlightController,
+                data: MspPacketData::new(),
+            },
+            MspRequest::MspApiVersion(version) => MspPacket {
+                cmd: MspCommandCode::MSP_API_VERSION.to_primitive(),
+                direction: FromFlightController,
+                data: version.pack().map_or_else(
+                    |_| MspPacketData::new(),
+                    |data| MspPacketData::from(data.as_slice()),
+                ),
+            },
+            MspRequest::MspFcVersionRequest => MspPacket {
+                cmd: MspCommandCode::MSP_FC_VERSION.to_primitive(),
+                direction: ToFlightController,
+                data: MspPacketData::new(),
+            },
+            MspRequest::MspFlightControllerVersion(version) => MspPacket {
+                cmd: MspCommandCode::MSP_FC_VERSION.to_primitive(),
+                direction: FromFlightController,
+                data: version.pack().map_or_else(
+                    |_| MspPacketData::new(),
+                    |data| MspPacketData::from(data.as_slice()),
+                ),
+            },
+            MspRequest::MspBatteryConfigRequest => MspPacket {
+                cmd: MspCommandCode::MSP_BATTERY_CONFIG.to_primitive(),
+                direction: ToFlightController,
+                data: MspPacketData::new(),
+            },
+            MspRequest::MspBatteryConfig(config) => MspPacket {
+                cmd: MspCommandCode::MSP_BATTERY_CONFIG.to_primitive(),
+                direction: FromFlightController,
+                data: config.pack().map_or_else(
+                    |_| MspPacketData::new(),
+                    |data| MspPacketData::from(data.as_slice()),
+                ),
+            },
+            MspRequest::MspBatteryStateRequest => MspPacket {
                 cmd: MspCommandCode::MSP_BATTERY_STATE.to_primitive(),
                 direction: ToFlightController,
                 data: MspPacketData::new(), // empty
+            },
+            MspRequest::MspBatteryState(state) => MspPacket {
+                cmd: MspCommandCode::MSP_BATTERY_STATE.to_primitive(),
+                direction: FromFlightController,
+                data: state.pack().map_or_else(
+                    |_| MspPacketData::new(),
+                    |data| MspPacketData::from(data.as_slice()),
+                ),
+            },
+            MspRequest::MspAnalogRequest => MspPacket {
+                cmd: MspCommandCode::MSP_ANALOG.to_primitive(),
+                direction: ToFlightController,
+                data: MspPacketData::new(), // empty
+            },
+            MspRequest::MspAnalog(analog) => MspPacket {
+                cmd: MspCommandCode::MSP_ANALOG.to_primitive(),
+                direction: FromFlightController,
+                data: analog.pack().map_or_else(
+                    |_| MspPacketData::new(),
+                    |data| MspPacketData::from(data.as_slice()),
+                ),
+            },
+            MspRequest::MspVoltageMeterConfigRequest => MspPacket {
+                cmd: MspCommandCode::MSP_VOLTAGE_METER_CONFIG.to_primitive(),
+                direction: ToFlightController,
+                data: MspPacketData::new(),
+            },
+            MspRequest::MspVoltageMeterConfig(config) => MspPacket {
+                cmd: MspCommandCode::MSP_VOLTAGE_METER_CONFIG.to_primitive(),
+                direction: FromFlightController,
+                data: config.pack().map_or_else(
+                    |_| MspPacketData::new(),
+                    |data| MspPacketData::from(data.as_slice()),
+                ),
+            },
+            MspRequest::MspVoltageMetersRequest => MspPacket {
+                cmd: MspCommandCode::MSP_VOLTAGE_METERS.to_primitive(),
+                direction: ToFlightController,
+                data: MspPacketData::new(), // empty
+            },
+            MspRequest::MspVoltageMeter(meter) => MspPacket {
+                cmd: MspCommandCode::MSP_VOLTAGE_METERS.to_primitive(),
+                direction: FromFlightController,
+                data: meter.pack().map_or_else(
+                    |_| MspPacketData::new(),
+                    |data| MspPacketData::from(data.as_slice()),
+                ),
             },
             MspRequest::MspRc => MspPacket {
                 cmd: MspCommandCode::MSP_RC.to_primitive(),
@@ -1041,6 +1664,37 @@ impl From<&MspRequest> for MspPacket {
                 cmd: MspCommandCode::MSP_RAW_IMU.to_primitive(),
                 direction: ToFlightController,
                 data: MspPacketData::new(), // empty
+            },
+            MspRequest::MspStatus(status) => MspPacket {
+                cmd: MspCommandCode::MSP_STATUS.to_primitive(),
+                direction: FromFlightController,
+                data: status.to_packet_data().unwrap(),
+            },
+            MspRequest::MspStatusEx(status) => MspPacket {
+                cmd: MspCommandCode::MSP_STATUS_EX.to_primitive(),
+                direction: FromFlightController,
+                data: status.to_packet_data().unwrap(),
+            },
+            MspRequest::MspDisplayPort(displayport) => MspPacket {
+                cmd: MspCommandCode::MSP_DISPLAYPORT.to_primitive(),
+                direction: FromFlightController,
+                data: MspPacketData::from(displayport.as_bytes()),
+            },
+            MspRequest::MspSensorRangefinder(data) => MspPacket {
+                cmd: MspCommandCode::MSP2_SENSOR_RANGEFINDER.to_primitive(),
+                direction: ToFlightController,
+                data: data.pack().map_or_else(
+                    |_| MspPacketData::new(),
+                    |packed| MspPacketData::from(packed.as_slice()),
+                ),
+            },
+            MspRequest::MspSensorOpticFlow(data) => MspPacket {
+                cmd: MspCommandCode::MSP2_SENSOR_OPTIC_FLOW.to_primitive(),
+                direction: ToFlightController,
+                data: data.pack().map_or_else(
+                    |_| MspPacketData::new(),
+                    |packed| MspPacketData::from(packed.as_slice()),
+                ),
             },
             _ => MspPacket {
                 cmd: MspCommandCode::MSP_API_VERSION.to_primitive(),
@@ -1072,6 +1726,7 @@ pub enum MspResponse {
     MspAttitude(MspAttitude),
     MspAltitude(MspAltitude),
     MspBatteryConfig(MspBatteryConfig),
+    MspVoltageMeterConfig(MspVoltageMeterConfig),
     MspAnalog(MspAnalog),
     MspRssiConfig(MspRssiConfig),
     MspVoltageMeter(MspVoltageMeter),
@@ -1125,6 +1780,7 @@ impl MspResponse {
             MspResponse::MspAttitude(_) => MspCommandCode::MSP_ATTITUDE,
             MspResponse::MspAltitude(_) => MspCommandCode::MSP_ALTITUDE,
             MspResponse::MspBatteryConfig(_) => MspCommandCode::MSP_BATTERY_CONFIG,
+            MspResponse::MspVoltageMeterConfig(_) => MspCommandCode::MSP_VOLTAGE_METER_CONFIG,
             MspResponse::MspAnalog(_) => MspCommandCode::MSP_ANALOG,
             MspResponse::MspRssiConfig(_) => MspCommandCode::MSP_RSSI_CONFIG,
             MspResponse::MspVoltageMeter(_) => MspCommandCode::MSP_VOLTAGE_METERS,
@@ -1166,14 +1822,14 @@ impl MspResponse {
             value: &T,
         ) -> Result<MspPacketData, PackingError> {
             let packed = value.pack()?;
-            Ok(MspPacketData(SmallVec::from_slice(packed.as_bytes_slice())))
+            Ok(MspPacketData::from(packed.as_bytes_slice()))
         }
 
         match self {
             MspResponse::MspApiVersion(data) => pack_into_packet_data(data),
             MspResponse::MspFlightControllerVariant(data) => pack_into_packet_data(data),
-            MspResponse::MspStatus(data) => pack_into_packet_data(data),
-            MspResponse::MspStatusEx(data) => pack_into_packet_data(data),
+            MspResponse::MspStatus(data) => data.to_packet_data(),
+            MspResponse::MspStatusEx(data) => data.to_packet_data(),
             MspResponse::MspBfConfig(data) => pack_into_packet_data(data),
             MspResponse::MspRawImu(data) => pack_into_packet_data(data),
             MspResponse::MspDataFlashSummaryReply(data) => pack_into_packet_data(data),
@@ -1185,6 +1841,7 @@ impl MspResponse {
             MspResponse::MspAttitude(data) => pack_into_packet_data(data),
             MspResponse::MspAltitude(data) => pack_into_packet_data(data),
             MspResponse::MspBatteryConfig(data) => pack_into_packet_data(data),
+            MspResponse::MspVoltageMeterConfig(data) => pack_into_packet_data(data),
             MspResponse::MspAnalog(data) => pack_into_packet_data(data),
             MspResponse::MspRssiConfig(data) => pack_into_packet_data(data),
             MspResponse::MspVoltageMeter(data) => pack_into_packet_data(data),
@@ -1233,142 +1890,282 @@ impl From<MspResponse> for MspPacket {
 }
 impl From<MspPacket> for MspResponse {
     fn from(packet: MspPacket) -> Self {
-        match packet.cmd.into() {
-            MspCommandCode::MSP_API_VERSION => {
-                MspResponse::MspApiVersion(packet.decode_as::<MspApiVersion>().unwrap())
-            }
-            MspCommandCode::MSP_FC_VARIANT => MspResponse::MspFlightControllerVariant(
-                packet.decode_as::<MspFlightControllerVariant>().unwrap(),
-            ),
-            MspCommandCode::MSP_STATUS => {
-                MspResponse::MspStatus(packet.decode_as::<MspStatus>().unwrap())
-            }
-            MspCommandCode::MSP_STATUS_EX => {
-                MspResponse::MspStatusEx(packet.decode_as::<MspStatusEx>().unwrap())
-            }
-            MspCommandCode::MSP_BF_CONFIG => {
-                MspResponse::MspBfConfig(packet.decode_as::<MspBfConfig>().unwrap())
-            }
-            MspCommandCode::MSP_RAW_IMU => {
-                MspResponse::MspRawImu(packet.decode_as::<MspRawImu>().unwrap())
-            }
-            MspCommandCode::MSP_DATAFLASH_SUMMARY => MspResponse::MspDataFlashSummaryReply(
-                packet.decode_as::<MspDataFlashSummaryReply>().unwrap(),
-            ),
-            MspCommandCode::MSP_DATAFLASH_READ => {
-                MspResponse::MspDataFlashReply(packet.decode_as::<MspDataFlashReply>().unwrap())
-            }
-            MspCommandCode::MSP_ACC_TRIM => {
-                MspResponse::MspAccTrim(packet.decode_as::<MspAccTrim>().unwrap())
-            }
-            MspCommandCode::MSP_IDENT => {
-                MspResponse::MspIdent(packet.decode_as::<MspIdent>().unwrap())
-            }
-            MspCommandCode::MSP_MISC => {
-                MspResponse::MspMisc(packet.decode_as::<MspMisc>().unwrap())
-            }
-            MspCommandCode::MSP_ATTITUDE => {
-                MspResponse::MspAttitude(packet.decode_as::<MspAttitude>().unwrap())
-            }
-            MspCommandCode::MSP_ALTITUDE => {
-                MspResponse::MspAltitude(packet.decode_as::<MspAltitude>().unwrap())
-            }
-            MspCommandCode::MSP_BATTERY_CONFIG => {
-                MspResponse::MspBatteryConfig(packet.decode_as::<MspBatteryConfig>().unwrap())
-            }
-            MspCommandCode::MSP_ANALOG => {
-                MspResponse::MspAnalog(packet.decode_as::<MspAnalog>().unwrap())
-            }
-            MspCommandCode::MSP_RSSI_CONFIG => {
-                MspResponse::MspRssiConfig(packet.decode_as::<MspRssiConfig>().unwrap())
-            }
-            MspCommandCode::MSP_VOLTAGE_METERS => {
-                MspResponse::MspVoltageMeter(packet.decode_as::<MspVoltageMeter>().unwrap())
-            }
-            MspCommandCode::MSP_AMPERAGE_METER_CONFIG => {
-                MspResponse::MspCurrentMeter(packet.decode_as::<MspCurrentMeter>().unwrap())
-            }
-            MspCommandCode::MSP_BATTERY_STATE => {
-                MspResponse::MspBatteryState(packet.decode_as::<MspBatteryState>().unwrap())
-            }
-            MspCommandCode::MSP_RC_TUNING => {
-                MspResponse::MspRcTuning(packet.decode_as::<MspRcTuning>().unwrap())
-            }
-            MspCommandCode::MSP_RX_CONFIG => {
-                MspResponse::MspRxConfig(packet.decode_as::<MspRxConfig>().unwrap())
-            }
-            MspCommandCode::MSP_RX_MAP => {
-                MspResponse::MspRcChannelValue(packet.decode_as::<MspRcChannelValue>().unwrap())
-            }
-            MspCommandCode::MSP_SET_RX_MAP => {
-                MspResponse::MspRcMappedChannel(packet.decode_as::<MspRcMappedChannel>().unwrap())
-            }
-            MspCommandCode::MSP_FEATURE => {
-                MspResponse::MspFeatures(packet.decode_as::<MspFeatures>().unwrap())
-            }
-            MspCommandCode::MSP_MOTOR => {
-                MspResponse::MspMotor(packet.decode_as::<MspMotor>().unwrap())
-            }
-            MspCommandCode::MSP_MOTOR_3D_CONFIG => {
-                MspResponse::MspMotor3DConfig(packet.decode_as::<MspMotor3DConfig>().unwrap())
-            }
-            MspCommandCode::MSP_MOTOR_CONFIG => {
-                MspResponse::MspMotorConfig(packet.decode_as::<MspMotorConfig>().unwrap())
-            }
-            MspCommandCode::MSP_RC_DEADBAND => {
-                MspResponse::MspRcDeadband(packet.decode_as::<MspRcDeadband>().unwrap())
-            }
-            MspCommandCode::MSP_BOARD_ALIGNMENT => {
-                MspResponse::MspSensorAlignment(packet.decode_as::<MspSensorAlignment>().unwrap())
-            }
-            MspCommandCode::MSP_ADVANCED_CONFIG => {
-                MspResponse::MspAdvancedConfig(packet.decode_as::<MspAdvancedConfig>().unwrap())
-            }
-            MspCommandCode::MSP_FILTER_CONFIG => {
-                MspResponse::MspFilterConfig(packet.decode_as::<MspFilterConfig>().unwrap())
-            }
-            MspCommandCode::MSP_PID_ADVANCED => {
-                MspResponse::MspPidAdvanced(packet.decode_as::<MspPidAdvanced>().unwrap())
-            }
-            MspCommandCode::MSP_SENSOR_CONFIG => {
-                MspResponse::MspSensorConfig(packet.decode_as::<MspSensorConfig>().unwrap())
-            }
-            MspCommandCode::MSP_SERVO => {
-                MspResponse::MspServos(packet.decode_as::<MspServos>().unwrap())
-            }
-            MspCommandCode::MSP_MIXER => {
-                MspResponse::MspMixerConfig(packet.decode_as::<MspMixerConfig>().unwrap())
-            }
-            MspCommandCode::MSP_MODE_RANGES => {
-                MspResponse::MspModeRange(packet.decode_as::<MspModeRange>().unwrap())
-            }
-            MspCommandCode::MSP_SET_MODE_RANGE => {
-                MspResponse::MspSetModeRange(packet.decode_as::<MspSetModeRange>().unwrap())
-            }
-            MspCommandCode::MSP_OSD_CONFIG => {
-                MspResponse::MspOsdConfig(packet.decode_as::<MspOsdConfig>().unwrap())
-            }
-            MspCommandCode::MSP_OSD_LAYOUT_CONFIG => {
-                MspResponse::MspSetOsdLayout(packet.decode_as::<MspSetOsdLayout>().unwrap())
-            }
-            MspCommandCode::MSP2_INAV_OSD_SET_LAYOUT_ITEM => {
-                MspResponse::MspSetOsdLayoutItem(packet.decode_as::<MspSetOsdLayoutItem>().unwrap())
-            }
-            MspCommandCode::MSP2_INAV_OSD_LAYOUTS => {
-                MspResponse::MspOsdLayouts(packet.decode_as::<MspOsdLayouts>().unwrap())
-            }
-            MspCommandCode::MSP2_SET_SERIAL_CONFIG => {
-                MspResponse::MspSerialSetting(packet.decode_as::<MspSerialSetting>().unwrap())
-            }
-            MspCommandCode::MSP2_COMMON_SETTING => MspResponse::MspSettingInfoRequest(
-                packet.decode_as::<MspSettingInfoRequest>().unwrap(),
-            ),
-            MspCommandCode::MSP2_COMMON_SETTING_INFO => {
-                MspResponse::MspSettingInfo(packet.decode_as::<MspSettingInfo>().unwrap())
-            }
-            MspCommandCode::MSP_RC => MspResponse::MspRc(packet.decode_as::<MspRc>().unwrap()),
+        let cmd = match MspCommandCode::from_primitive(packet.cmd) {
+            Some(cmd) => cmd,
+            None => return MspResponse::Unknown,
+        };
+        match cmd {
+            MspCommandCode::MSP_API_VERSION => packet
+                .decode_as::<MspApiVersion>()
+                .map(MspResponse::MspApiVersion)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_FC_VARIANT => packet
+                .decode_as::<MspFlightControllerVariant>()
+                .map(MspResponse::MspFlightControllerVariant)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_STATUS => MspStatus::from_bytes(packet.data.as_slice())
+                .map(MspResponse::MspStatus)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_STATUS_EX => MspStatusEx::from_bytes(packet.data.as_slice())
+                .map(MspResponse::MspStatusEx)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_BF_CONFIG => packet
+                .decode_as::<MspBfConfig>()
+                .map(MspResponse::MspBfConfig)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_RAW_IMU => packet
+                .decode_as::<MspRawImu>()
+                .map(MspResponse::MspRawImu)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_DATAFLASH_SUMMARY => packet
+                .decode_as::<MspDataFlashSummaryReply>()
+                .map(MspResponse::MspDataFlashSummaryReply)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_DATAFLASH_READ => packet
+                .decode_as::<MspDataFlashReply>()
+                .map(MspResponse::MspDataFlashReply)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_ACC_TRIM => packet
+                .decode_as::<MspAccTrim>()
+                .map(MspResponse::MspAccTrim)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_IDENT => packet
+                .decode_as::<MspIdent>()
+                .map(MspResponse::MspIdent)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_MISC => packet
+                .decode_as::<MspMisc>()
+                .map(MspResponse::MspMisc)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_ATTITUDE => packet
+                .decode_as::<MspAttitude>()
+                .map(MspResponse::MspAttitude)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_ALTITUDE => packet
+                .decode_as::<MspAltitude>()
+                .map(MspResponse::MspAltitude)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_BATTERY_CONFIG => packet
+                .decode_as::<MspBatteryConfig>()
+                .map(MspResponse::MspBatteryConfig)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_VOLTAGE_METER_CONFIG => packet
+                .decode_as::<MspVoltageMeterConfig>()
+                .map(MspResponse::MspVoltageMeterConfig)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_ANALOG => packet
+                .decode_as::<MspAnalog>()
+                .map(MspResponse::MspAnalog)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_RSSI_CONFIG => packet
+                .decode_as::<MspRssiConfig>()
+                .map(MspResponse::MspRssiConfig)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_VOLTAGE_METERS => packet
+                .decode_as::<MspVoltageMeter>()
+                .map(MspResponse::MspVoltageMeter)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_AMPERAGE_METER_CONFIG => packet
+                .decode_as::<MspCurrentMeter>()
+                .map(MspResponse::MspCurrentMeter)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_BATTERY_STATE => packet
+                .decode_as::<MspBatteryState>()
+                .map(MspResponse::MspBatteryState)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_RC_TUNING => packet
+                .decode_as::<MspRcTuning>()
+                .map(MspResponse::MspRcTuning)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_RX_CONFIG => packet
+                .decode_as::<MspRxConfig>()
+                .map(MspResponse::MspRxConfig)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_RX_MAP => packet
+                .decode_as::<MspRcChannelValue>()
+                .map(MspResponse::MspRcChannelValue)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_SET_RX_MAP => packet
+                .decode_as::<MspRcMappedChannel>()
+                .map(MspResponse::MspRcMappedChannel)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_FEATURE => packet
+                .decode_as::<MspFeatures>()
+                .map(MspResponse::MspFeatures)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_MOTOR => packet
+                .decode_as::<MspMotor>()
+                .map(MspResponse::MspMotor)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_MOTOR_3D_CONFIG => packet
+                .decode_as::<MspMotor3DConfig>()
+                .map(MspResponse::MspMotor3DConfig)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_MOTOR_CONFIG => packet
+                .decode_as::<MspMotorConfig>()
+                .map(MspResponse::MspMotorConfig)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_RC_DEADBAND => packet
+                .decode_as::<MspRcDeadband>()
+                .map(MspResponse::MspRcDeadband)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_BOARD_ALIGNMENT => packet
+                .decode_as::<MspSensorAlignment>()
+                .map(MspResponse::MspSensorAlignment)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_ADVANCED_CONFIG => packet
+                .decode_as::<MspAdvancedConfig>()
+                .map(MspResponse::MspAdvancedConfig)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_FILTER_CONFIG => packet
+                .decode_as::<MspFilterConfig>()
+                .map(MspResponse::MspFilterConfig)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_PID_ADVANCED => packet
+                .decode_as::<MspPidAdvanced>()
+                .map(MspResponse::MspPidAdvanced)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_SENSOR_CONFIG => packet
+                .decode_as::<MspSensorConfig>()
+                .map(MspResponse::MspSensorConfig)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_SERVO => packet
+                .decode_as::<MspServos>()
+                .map(MspResponse::MspServos)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_MIXER => packet
+                .decode_as::<MspMixerConfig>()
+                .map(MspResponse::MspMixerConfig)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_MODE_RANGES => packet
+                .decode_as::<MspModeRange>()
+                .map(MspResponse::MspModeRange)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_SET_MODE_RANGE => packet
+                .decode_as::<MspSetModeRange>()
+                .map(MspResponse::MspSetModeRange)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_OSD_CONFIG => packet
+                .decode_as::<MspOsdConfig>()
+                .map(MspResponse::MspOsdConfig)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_OSD_LAYOUT_CONFIG => packet
+                .decode_as::<MspSetOsdLayout>()
+                .map(MspResponse::MspSetOsdLayout)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP2_INAV_OSD_SET_LAYOUT_ITEM => packet
+                .decode_as::<MspSetOsdLayoutItem>()
+                .map(MspResponse::MspSetOsdLayoutItem)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP2_INAV_OSD_LAYOUTS => packet
+                .decode_as::<MspOsdLayouts>()
+                .map(MspResponse::MspOsdLayouts)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP2_SET_SERIAL_CONFIG => packet
+                .decode_as::<MspSerialSetting>()
+                .map(MspResponse::MspSerialSetting)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP2_COMMON_SETTING => packet
+                .decode_as::<MspSettingInfoRequest>()
+                .map(MspResponse::MspSettingInfoRequest)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP2_COMMON_SETTING_INFO => packet
+                .decode_as::<MspSettingInfo>()
+                .map(MspResponse::MspSettingInfo)
+                .unwrap_or(MspResponse::Unknown),
+            MspCommandCode::MSP_RC => packet
+                .decode_as::<MspRc>()
+                .map(MspResponse::MspRc)
+                .unwrap_or(MspResponse::Unknown),
             _ => MspResponse::Unknown,
         }
+    }
+}
+
+#[cfg(test)]
+mod msp_status_tests {
+    use super::*;
+
+    #[test]
+    fn msp_status_serialization_roundtrip() {
+        let status = MspStatus {
+            cycle_time: 1234,
+            i2c_errors: 5,
+            sensors: MspStatusSensors {
+                acc: true,
+                baro: true,
+                mag: false,
+                gps: false,
+                rangefinder: false,
+                gyro: true,
+                optical_flow: false,
+            },
+            flight_mode_flags: 0x11223344,
+            current_pid_profile_index: 2,
+            average_system_load_percent: 100,
+            gyro_cycle_time: 250,
+            extra_flight_mode_flags: vec![0xAA, 0xBB],
+            arming_disable_flags_count: 29,
+            arming_disable_flags: 0xDEADBEEF,
+            config_state_flags: 1,
+            core_temp_celsius: 42,
+            control_rate_profile_count: 3,
+        };
+
+        let data = status.to_packet_data().expect("serialize MSP_STATUS");
+        let expected = vec![
+            0xD2, 0x04, // cycle_time
+            0x05, 0x00, // i2c_errors
+            0x23, 0x00, // sensors
+            0x44, 0x33, 0x22, 0x11, // flight_mode_flags
+            0x02, // current_pid_profile_index
+            0x64, 0x00, // average_system_load_percent
+            0xFA, 0x00, // gyro_cycle_time
+            0x02, // extra_flight_mode_flags_len
+            0xAA, 0xBB, // extra_flight_mode_flags
+            0x1D, // arming_disable_flags_count
+            0xEF, 0xBE, 0xAD, 0xDE, // arming_disable_flags
+            0x01, // config_state_flags
+            0x2A, 0x00, // core_temp_celsius
+            0x03, // control_rate_profile_count
+        ];
+
+        assert_eq!(data.as_slice(), expected.as_slice());
+
+        let decoded = MspStatus::from_bytes(data.as_slice()).expect("decode MSP_STATUS");
+        assert_eq!(decoded, status);
+    }
+
+    #[test]
+    fn msp_status_ex_serialization_roundtrip() {
+        let status = MspStatusEx {
+            cycle_time: 321,
+            i2c_errors: 1,
+            sensors: MspStatusSensors {
+                acc: true,
+                baro: false,
+                mag: true,
+                gps: false,
+                rangefinder: false,
+                gyro: true,
+                optical_flow: true,
+            },
+            flight_mode_flags: 0xAABBCCDD,
+            current_pid_profile_index: 1,
+            average_system_load_percent: 250,
+            max_profile_count: 3,
+            current_control_rate_profile_index: 2,
+            extra_flight_mode_flags: vec![],
+            arming_disable_flags_count: 29,
+            arming_disable_flags: 0,
+            config_state_flags: 0,
+            core_temp_celsius: 0,
+            control_rate_profile_count: 3,
+        };
+
+        let data = status.to_packet_data().expect("serialize MSP_STATUS_EX");
+        let decoded = MspStatusEx::from_bytes(data.as_slice()).expect("decode MSP_STATUS_EX");
+        assert_eq!(decoded, status);
     }
 }
 

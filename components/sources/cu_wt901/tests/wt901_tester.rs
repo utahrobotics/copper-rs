@@ -1,6 +1,6 @@
+use cu_wt901::PositionalReadingsPayload;
 use cu29::prelude::*;
 use cu29_helpers::basic_copper_setup;
-use cu_wt901::PositionalReadingsPayload;
 
 use std::thread::sleep;
 use std::time::Duration;
@@ -10,9 +10,10 @@ struct WT910TestSink {}
 impl Freezable for WT910TestSink {}
 
 impl CuSinkTask for WT910TestSink {
+    type Resources<'r> = ();
     type Input<'m> = input_msg!(PositionalReadingsPayload);
 
-    fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {

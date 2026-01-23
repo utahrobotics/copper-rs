@@ -4,17 +4,18 @@ mod v4lstream;
 // This allows this module to be used on simulation on Windows and MacOS
 #[cfg(not(target_os = "linux"))]
 mod empty_impl {
-    use cu29::prelude::*;
     use cu_sensor_payloads::CuImage;
+    use cu29::prelude::*;
 
     pub struct V4l {}
 
     impl Freezable for V4l {}
 
     impl CuSrcTask for V4l {
+        type Resources<'r> = ();
         type Output<'m> = output_msg!(CuImage<Vec<u8>>);
 
-        fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+        fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
         where
             Self: Sized,
         {
@@ -43,10 +44,10 @@ mod linux_impl {
     use v4l::video::Capture;
 
     use crate::v4lstream::CuV4LStream;
-    use cu29::prelude::*;
     use cu_sensor_payloads::{CuImage, CuImageBufferFormat};
+    use cu29::prelude::*;
 
-    use nix::time::{clock_gettime, ClockId};
+    use nix::time::{ClockId, clock_gettime};
 
     pub use v4l::buffer::Type;
     pub use v4l::framesize::FrameSizeEnum;
@@ -70,9 +71,10 @@ mod linux_impl {
     }
 
     impl CuSrcTask for V4l {
+        type Resources<'r> = ();
         type Output<'m> = output_msg!(CuImage<Vec<u8>>);
 
-        fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+        fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
         where
             Self: Sized,
         {
@@ -86,25 +88,25 @@ mod linux_impl {
             let mut req_timeout: Duration = Duration::from_millis(500); // 500ms tolerance to get a frame
 
             if let Some(config) = _config {
-                if let Some(device) = config.get::<u32>("device") {
+                if let Some(device) = config.get::<u32>("device")? {
                     v4l_device = device as usize;
                 }
-                if let Some(width) = config.get::<u32>("width") {
+                if let Some(width) = config.get::<u32>("width")? {
                     req_width = Some(width);
                 }
-                if let Some(height) = config.get::<u32>("height") {
+                if let Some(height) = config.get::<u32>("height")? {
                     req_height = Some(height);
                 }
-                if let Some(fps) = config.get::<u32>("fps") {
+                if let Some(fps) = config.get::<u32>("fps")? {
                     req_fps = Some(fps);
                 }
-                if let Some(fourcc) = config.get::<String>("fourcc") {
+                if let Some(fourcc) = config.get::<String>("fourcc")? {
                     req_fourcc = Some(fourcc);
                 }
-                if let Some(buffers) = config.get::<u32>("buffers") {
+                if let Some(buffers) = config.get::<u32>("buffers")? {
                     req_buffers = buffers;
                 }
-                if let Some(timeout) = config.get::<u32>("timeout_ms") {
+                if let Some(timeout) = config.get::<u32>("timeout_ms")? {
                     req_timeout = Duration::from_millis(timeout as u64);
                 }
             }
@@ -261,9 +263,9 @@ mod linux_impl {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use rerun::RecordingStreamBuilder;
         use rerun::components::ImageBuffer;
         use rerun::datatypes::{Blob, ImageFormat};
-        use rerun::RecordingStreamBuilder;
         use rerun::{Image, PixelFormat};
         use std::thread;
 
@@ -310,7 +312,7 @@ mod linux_impl {
             config.set("buffers", 4);
             config.set("timeout_ms", 500);
 
-            let mut v4l = V4l::new(Some(&config)).unwrap();
+            let mut v4l = V4l::new(Some(&config), ()).unwrap();
             v4l.start(&clock).unwrap();
 
             let mut msg = CuMsg::new(None);

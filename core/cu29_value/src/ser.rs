@@ -4,22 +4,11 @@ use core::fmt;
 use cu29_clock::CuTime;
 use serde::ser;
 
-#[cfg(not(feature = "std"))]
-mod imp {
-    pub use alloc::boxed::Box;
-    pub use alloc::collections::BTreeMap;
-    pub use alloc::string::String;
-    pub use alloc::string::ToString;
-    pub use alloc::vec;
-    pub use alloc::vec::Vec;
-}
-
-#[cfg(feature = "std")]
-mod imp {
-    pub use std::collections::BTreeMap;
-}
-
-use imp::*;
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 
 #[derive(Debug)]
 pub enum SerializerError {
@@ -389,7 +378,10 @@ impl ser::SerializeMap for SerializeMap {
         value: &T,
     ) -> Result<(), Self::Error> {
         let value = value.serialize(Serializer)?;
-        self.map.insert(self.key.take().unwrap(), value);
+        let key = self.key.take().ok_or_else(|| {
+            SerializerError::Custom("serialize_value called before serialize_key".to_string())
+        })?;
+        self.map.insert(key, value);
         Ok(())
     }
 

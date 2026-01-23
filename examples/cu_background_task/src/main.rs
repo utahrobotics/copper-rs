@@ -12,9 +12,10 @@ pub mod tasks {
     impl Freezable for ExampleSrc {}
 
     impl CuSrcTask for ExampleSrc {
+        type Resources<'r> = ();
         type Output<'m> = output_msg!(i32);
 
-        fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+        fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
         where
             Self: Sized,
         {
@@ -34,14 +35,18 @@ pub mod tasks {
     impl Freezable for ExampleTask {}
 
     impl CuTask for ExampleTask {
+        type Resources<'r> = ();
         type Input<'m> = input_msg!(i32);
         type Output<'m> = output_msg!(i32);
 
-        fn new(config: Option<&ComponentConfig>) -> CuResult<Self>
+        fn new(config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
         where
             Self: Sized,
         {
-            let sleep_duration_ms: u64 = config.unwrap().get("sleep_duration_ms").unwrap();
+            let config = config.ok_or_else(|| CuError::from("Missing config"))?;
+            let sleep_duration_ms = config
+                .get::<u64>("sleep_duration_ms")?
+                .ok_or_else(|| CuError::from("Missing sleep_duration_ms"))?;
             Ok(Self { sleep_duration_ms })
         }
 
@@ -71,9 +76,10 @@ pub mod tasks {
     impl Freezable for ExampleSink {}
 
     impl CuSinkTask for ExampleSink {
+        type Resources<'r> = ();
         type Input<'m> = input_msg!(i32);
 
-        fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+        fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
         where
             Self: Sized,
         {
@@ -92,10 +98,10 @@ struct App {}
 const SLAB_SIZE: Option<usize> = Some(150 * 1024 * 1024);
 fn main() {
     let logger_path = "logs/background.copper";
-    if let Some(parent) = Path::new(logger_path).parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent).expect("Failed to create logs directory");
-        }
+    if let Some(parent) = Path::new(logger_path).parent()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent).expect("Failed to create logs directory");
     }
     let copper_ctx = basic_copper_setup(&PathBuf::from(logger_path), SLAB_SIZE, true, None)
         .expect("Failed to setup logger.");

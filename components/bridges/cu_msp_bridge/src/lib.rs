@@ -23,10 +23,8 @@ mod std_impl {
 // no-std implementation
 #[cfg(not(feature = "std"))]
 mod no_std_impl {
-    pub use alloc::{format, vec::Vec};
+    pub use alloc::vec::Vec;
     pub use core::mem;
-
-    pub const SERIAL_INDEX_KEY: &str = "serial_port_index";
 }
 
 #[cfg(not(feature = "std"))]
@@ -38,87 +36,42 @@ use bincode::de::Decoder;
 use bincode::enc::Encoder;
 use bincode::error::{DecodeError, EncodeError};
 use bincode::{Decode, Encode};
+use cu_msp_lib::structs::{MspRequest, MspResponse};
+use cu_msp_lib::{MSP_MAX_PAYLOAD_LEN, MspPacket, MspPacketDirection, MspParser};
 use cu29::cubridge::{
     BridgeChannel, BridgeChannelConfig, BridgeChannelInfo, BridgeChannelSet, CuBridge,
 };
 use cu29::prelude::*;
-use cu_msp_lib::structs::{MspRequest, MspResponse};
-use cu_msp_lib::{MspPacket, MspParser};
-use embedded_io::{Read, Write};
+#[cfg(feature = "std")]
+use cu29::resource::ResourceBundle;
+use cu29::resource::{Owned, ResourceBindings, ResourceManager};
+use embedded_io::{ErrorType, Read, Write};
+use heapless::Vec as HeaplessVec;
 use serde::{Deserialize, Serialize};
-use smallvec::SmallVec;
+use spin::Mutex;
 
 const READ_BUFFER_SIZE: usize = 512;
 const MAX_REQUESTS_PER_BATCH: usize = 8;
 const MAX_RESPONSES_PER_BATCH: usize = 16;
-
-pub trait SerialFactory<E>: Write<Error = E> + Read<Error = E> + Send + 'static {
-    fn try_new(config: Option<&ComponentConfig>) -> CuResult<Self>
-    where
-        Self: Sized;
-}
-
-#[cfg(not(feature = "std"))]
-impl<S, E> SerialFactory<E> for S
-where
-    S: Write<Error = E> + Read<Error = E> + Send + 'static,
-{
-    fn try_new(config: Option<&ComponentConfig>) -> CuResult<Self> {
-        let slot = config
-            .and_then(|cfg| cfg.get::<u32>(SERIAL_INDEX_KEY))
-            .map(|v| v as usize)
-            .unwrap_or(0);
-
-        cu_embedded_registry::take(slot).ok_or_else(|| {
-            CuError::from(format!(
-                "MSP bridge missing serial for slot {slot} (max index {})",
-                cu_embedded_registry::MAX_SERIAL_SLOTS - 1
-            ))
-        })
-    }
-}
-
-#[cfg(feature = "std")]
-impl SerialFactory<std::io::Error> for std_serial::StdSerial {
-    fn try_new(config: Option<&ComponentConfig>) -> CuResult<Self> {
-        let device = config
-            .and_then(|cfg| cfg.get::<String>(DEVICE_KEY))
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| DEFAULT_DEVICE.to_string());
-
-        let baudrate = config
-            .and_then(|cfg| cfg.get::<u32>(BAUD_KEY))
-            .unwrap_or(DEFAULT_BAUDRATE);
-
-        let timeout_ms = config
-            .and_then(|cfg| cfg.get::<u64>(TIMEOUT_KEY))
-            .unwrap_or(DEFAULT_TIMEOUT_MS);
-
-        std_serial::open(&device, baudrate, timeout_ms).map_err(|err| {
-            CuError::from(format!(
-                "MSP bridge failed to open serial `{device}` at {baudrate} baud: {err}"
-            ))
-        })
-    }
-}
+const TX_BUFFER_CAPACITY: usize = MSP_MAX_PAYLOAD_LEN + 12;
 
 /// Batch of MSP requests transported over the bridge.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct MspRequestBatch(pub SmallVec<[MspRequest; MAX_REQUESTS_PER_BATCH]>);
+pub struct MspRequestBatch(pub HeaplessVec<MspRequest, MAX_REQUESTS_PER_BATCH>);
 
 impl MspRequestBatch {
     pub fn new() -> Self {
-        Self(SmallVec::new())
+        Self(HeaplessVec::new())
     }
 
-    pub fn push(&mut self, req: MspRequest) {
-        let Self(ref mut vec) = self;
-        vec.push(req);
+    pub fn push(&mut self, req: MspRequest) -> CuResult<()> {
+        self.0
+            .push(req)
+            .map_err(|_| CuError::from("MSP request batch overflow"))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &MspRequest> {
-        let Self(ref vec) = self;
-        vec.iter()
+        self.0.iter()
     }
 }
 
@@ -131,22 +84,40 @@ impl Encode for MspRequestBatch {
 impl Decode<()> for MspRequestBatch {
     fn decode<D: Decoder<Context = ()>>(decoder: &mut D) -> Result<Self, DecodeError> {
         let values = <Vec<MspRequest> as Decode<()>>::decode(decoder)?;
-        Ok(Self(values.into()))
+        let count = values.len();
+        if count > MAX_REQUESTS_PER_BATCH {
+            return Err(DecodeError::ArrayLengthMismatch {
+                required: MAX_REQUESTS_PER_BATCH,
+                found: count,
+            });
+        }
+        let mut batch = MspRequestBatch::new();
+        for value in values {
+            batch
+                .0
+                .push(value)
+                .map_err(|_| DecodeError::ArrayLengthMismatch {
+                    required: MAX_REQUESTS_PER_BATCH,
+                    found: count,
+                })?;
+        }
+        Ok(batch)
     }
 }
 
 /// Batch of MSP responses collected by the bridge.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct MspResponseBatch(pub SmallVec<[MspResponse; MAX_RESPONSES_PER_BATCH]>);
+pub struct MspResponseBatch(pub HeaplessVec<MspResponse, MAX_RESPONSES_PER_BATCH>);
 
 impl MspResponseBatch {
     pub fn new() -> Self {
-        Self(SmallVec::new())
+        Self(HeaplessVec::new())
     }
 
-    pub fn push(&mut self, resp: MspResponse) {
-        let Self(ref mut vec) = self;
-        vec.push(resp);
+    pub fn push(&mut self, resp: MspResponse) -> CuResult<()> {
+        self.0
+            .push(resp)
+            .map_err(|_| CuError::from("MSP response batch overflow"))
     }
 
     pub fn clear(&mut self) {
@@ -167,7 +138,24 @@ impl Encode for MspResponseBatch {
 impl Decode<()> for MspResponseBatch {
     fn decode<D: Decoder<Context = ()>>(decoder: &mut D) -> Result<Self, DecodeError> {
         let values = <Vec<MspResponse> as Decode<()>>::decode(decoder)?;
-        Ok(Self(values.into()))
+        let count = values.len();
+        if count > MAX_RESPONSES_PER_BATCH {
+            return Err(DecodeError::ArrayLengthMismatch {
+                required: MAX_RESPONSES_PER_BATCH,
+                found: count,
+            });
+        }
+        let mut batch = MspResponseBatch::new();
+        for value in values {
+            batch
+                .0
+                .push(value)
+                .map_err(|_| DecodeError::ArrayLengthMismatch {
+                    required: MAX_RESPONSES_PER_BATCH,
+                    found: count,
+                })?;
+        }
+        Ok(batch)
     }
 }
 
@@ -180,6 +168,7 @@ tx_channels! {
 rx_channels! {
     pub struct RxChannels : RxId {
         responses => MspResponseBatch,
+        incoming => MspRequestBatch,
     }
 }
 
@@ -192,7 +181,8 @@ where
     parser: MspParser,
     read_buffer: [u8; READ_BUFFER_SIZE],
     pending_responses: MspResponseBatch,
-    tx_buffer: SmallVec<[u8; 256]>,
+    pending_requests: MspRequestBatch,
+    tx_buffer: HeaplessVec<u8, TX_BUFFER_CAPACITY>,
 }
 
 impl<S, E> CuMspBridge<S, E>
@@ -205,67 +195,103 @@ where
             parser: MspParser::new(),
             read_buffer: [0; READ_BUFFER_SIZE],
             pending_responses: MspResponseBatch::new(),
-            tx_buffer: SmallVec::new(),
+            pending_requests: MspRequestBatch::new(),
+            tx_buffer: HeaplessVec::new(),
         }
     }
 
     fn send_request(&mut self, request: &MspRequest) -> CuResult<()> {
         let packet: MspPacket = request.into();
         let size = packet.packet_size_bytes();
-        self.tx_buffer.resize(size, 0);
-        packet.serialize(&mut self.tx_buffer).map_err(|err| {
-            CuError::new_with_cause("MSP bridge failed to serialize request", err)
-        })?;
+        self.tx_buffer
+            .resize(size, 0)
+            .map_err(|_| CuError::from("MSP bridge tx buffer too small"))?;
+        packet
+            .serialize(self.tx_buffer.as_mut_slice())
+            .map_err(|err| {
+                CuError::new_with_cause("MSP bridge failed to serialize request", err)
+            })?;
         self.serial
-            .write_all(&self.tx_buffer)
+            .write_all(self.tx_buffer.as_slice())
             .map_err(|_| CuError::from("MSP bridge failed to write serial"))
     }
 
     fn poll_serial(&mut self) -> CuResult<()> {
         loop {
-            match self.serial.read(&mut self.read_buffer) {
-                Ok(0) => break,
-                Ok(n) => {
-                    for &byte in &self.read_buffer[..n] {
-                        match self.parser.parse(byte) {
-                            Ok(Some(packet)) => {
-                                let response = MspResponse::from(packet);
-                                self.pending_responses.push(response);
-                                if self.pending_responses.0.len() >= MAX_RESPONSES_PER_BATCH {
-                                    break;
-                                }
-                            }
-                            Ok(None) => {}
-                            Err(err) => {
-                                error!("MSP bridge parser error: {}", err.to_string());
-                            }
+            if self.pending_responses.0.len() >= MAX_RESPONSES_PER_BATCH
+                || self.pending_requests.0.len() >= MAX_REQUESTS_PER_BATCH
+            {
+                break;
+            }
+            let Ok(n) = self.serial.read(&mut self.read_buffer) else {
+                break;
+            };
+            if n == 0 {
+                break;
+            }
+            for &byte in &self.read_buffer[..n] {
+                if self.pending_responses.0.len() >= MAX_RESPONSES_PER_BATCH
+                    || self.pending_requests.0.len() >= MAX_REQUESTS_PER_BATCH
+                {
+                    break;
+                }
+                if let Ok(Some(packet)) = self.parser.parse(byte) {
+                    if packet.direction == MspPacketDirection::ToFlightController {
+                        // This is an incoming request from the VTX
+                        if let Some(request) = MspRequest::from_packet(&packet) {
+                            self.pending_requests.push(request)?;
                         }
+                    } else {
+                        // This is a response from the VTX
+                        let response = MspResponse::from(packet);
+                        self.pending_responses.push(response)?;
                     }
                 }
-                Err(_) => break,
             }
         }
         Ok(())
     }
 }
 
-#[cfg(not(feature = "std"))]
-impl<S, E> CuMspBridge<S, E>
+impl<S, E> Freezable for CuMspBridge<S, E> where S: Write<Error = E> + Read<Error = E> {}
+
+pub struct MspResources<S> {
+    pub serial: Owned<S>,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Binding {
+    Serial,
+}
+
+impl<'r, S, E> ResourceBindings<'r> for MspResources<S>
 where
-    S: SerialFactory<E>,
+    S: Write<Error = E> + Read<Error = E> + Send + Sync + 'static,
 {
-    /// Register a serial port for use with MSP bridge in no-std environments
-    pub fn register_serial(slot: usize, serial_port: S) -> CuResult<()> {
-        cu_embedded_registry::register(slot, serial_port)
+    type Binding = Binding;
+
+    fn from_bindings(
+        manager: &'r mut ResourceManager,
+        mapping: Option<&cu29::resource::ResourceBindingMap<Self::Binding>>,
+    ) -> CuResult<Self> {
+        let mapping = mapping.ok_or_else(|| {
+            CuError::from("MSP bridge requires a `serial` resource mapping in copperconfig")
+        })?;
+        let path = mapping.get(Binding::Serial).ok_or_else(|| {
+            CuError::from("MSP bridge resources must include `serial: <bundle.resource>`")
+        })?;
+        let serial = manager
+            .take::<S>(path.typed())
+            .map_err(|e| e.add_cause("Failed to fetch MSP serial resource"))?;
+        Ok(Self { serial })
     }
 }
 
-impl<S, E> Freezable for CuMspBridge<S, E> where S: Write<Error = E> + Read<Error = E> {}
-
 impl<S, E> CuBridge for CuMspBridge<S, E>
 where
-    S: SerialFactory<E>,
+    S: Write<Error = E> + Read<Error = E> + Send + Sync + 'static,
 {
+    type Resources<'r> = MspResources<S>;
     type Tx = TxChannels;
     type Rx = RxChannels;
 
@@ -273,13 +299,16 @@ where
         config: Option<&ComponentConfig>,
         tx_channels: &[BridgeChannelConfig<<Self::Tx as BridgeChannelSet>::Id>],
         rx_channels: &[BridgeChannelConfig<<Self::Rx as BridgeChannelSet>::Id>],
+        resources: Self::Resources<'_>,
     ) -> CuResult<Self>
     where
         Self: Sized,
     {
         let _ = tx_channels;
         let _ = rx_channels;
-        Ok(Self::from_serial(S::try_new(config)?))
+        let _ = config;
+        let bridge = Self::from_serial(resources.serial.0);
+        Ok(bridge)
     }
 
     fn preprocess(&mut self, _clock: &RobotClock) -> CuResult<()> {
@@ -310,19 +339,26 @@ where
 
     fn receive<'a, Payload>(
         &mut self,
-        _clock: &RobotClock,
+        clock: &RobotClock,
         channel: &'static BridgeChannel<<Self::Rx as BridgeChannelSet>::Id, Payload>,
         msg: &mut CuMsg<Payload>,
     ) -> CuResult<()>
     where
         Payload: CuMsgPayload + 'a,
     {
+        msg.tov = Tov::Time(clock.now());
         match channel.id() {
             RxId::Responses => {
                 let response_msg: &mut CuMsg<MspResponseBatch> = msg.downcast_mut()?;
                 let mut batch = MspResponseBatch::new();
                 mem::swap(&mut batch, &mut self.pending_responses);
                 response_msg.set_payload(batch);
+            }
+            RxId::Incoming => {
+                let request_msg: &mut CuMsg<MspRequestBatch> = msg.downcast_mut()?;
+                let mut batch = MspRequestBatch::new();
+                mem::swap(&mut batch, &mut self.pending_requests);
+                request_msg.set_payload(batch);
             }
         }
         Ok(())
@@ -347,6 +383,73 @@ pub mod std_serial {
     }
 }
 
+#[cfg(feature = "std")]
+pub struct StdSerialBundle;
+
+#[cfg(feature = "std")]
+bundle_resources!(StdSerialBundle: Serial);
+
+#[cfg(feature = "std")]
+impl ResourceBundle for StdSerialBundle {
+    fn build(
+        bundle: cu29::resource::BundleContext<Self>,
+        config: Option<&ComponentConfig>,
+        manager: &mut ResourceManager,
+    ) -> CuResult<()> {
+        let cfg = config.ok_or_else(|| {
+            CuError::from(format!(
+                "MSP serial bundle `{}` requires configuration",
+                bundle.bundle_id()
+            ))
+        })?;
+        let device = cfg
+            .get::<String>(DEVICE_KEY)?
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_DEVICE.to_string());
+        let baudrate = cfg.get::<u32>(BAUD_KEY)?.unwrap_or(DEFAULT_BAUDRATE);
+        let timeout_ms = cfg.get::<u64>(TIMEOUT_KEY)?.unwrap_or(DEFAULT_TIMEOUT_MS);
+
+        let serial = std_serial::open(&device, baudrate, timeout_ms).map_err(|err| {
+            CuError::from(format!(
+                "MSP bridge failed to open serial `{device}` at {baudrate} baud: {err}"
+            ))
+        })?;
+        let key = bundle.key(StdSerialBundleId::Serial);
+        manager.add_owned(key, LockedSerial::new(serial))
+    }
+}
+
+pub struct LockedSerial<T>(pub Mutex<T>);
+
+impl<T> LockedSerial<T> {
+    pub fn new(inner: T) -> Self {
+        Self(Mutex::new(inner))
+    }
+}
+
+impl<T: ErrorType> ErrorType for LockedSerial<T> {
+    type Error = T::Error;
+}
+
+impl<T: Read> Read for LockedSerial<T> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        let mut guard = self.0.lock();
+        guard.read(buf)
+    }
+}
+
+impl<T: Write> Write for LockedSerial<T> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        let mut guard = self.0.lock();
+        guard.write(buf)
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        let mut guard = self.0.lock();
+        guard.flush()
+    }
+}
+
 /// Type alias for MSP bridge using standard I/O (for backward compatibility)
 #[cfg(feature = "std")]
-pub type CuMspBridgeStd = CuMspBridge<std_serial::StdSerial, std::io::Error>;
+pub type CuMspBridgeStd = CuMspBridge<LockedSerial<std_serial::StdSerial>, std::io::Error>;

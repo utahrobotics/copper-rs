@@ -3,7 +3,7 @@ use bincode::enc::Encoder;
 use bincode::error::{DecodeError, EncodeError};
 use bincode::{Decode, Encode};
 use cu29::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
 use std::io::{self, Read, Write};
 use std::time::Duration;
@@ -80,8 +80,8 @@ pub struct Lewansoul {
 impl Lewansoul {
     fn send_packet(&mut self, id: u8, command: u8, data: &[u8]) -> io::Result<()> {
         let mut packet = vec![0x55, 0x55, id, data.len() as u8 + 3, command];
-        packet.extend(data.iter());
-        let checksum = compute_checksum(packet[2..].iter().cloned());
+        packet.extend_from_slice(data);
+        let checksum = compute_checksum(packet[2..].iter().copied());
         packet.push(checksum);
 
         // println!("Packet: {:02x?}", packet);
@@ -132,9 +132,9 @@ impl Lewansoul {
     #[allow(dead_code)]
     fn ping(&mut self, id: u8) -> CuResult<()> {
         self.send_packet(id, servo::SERVO_ID_READ, &[])
-            .map_err(|e| CuError::new_with_cause("IO Error trying to write to the SBUS", &e))?;
+            .map_err(|e| CuError::new_with_cause("IO Error trying to write to the SBUS", e))?;
         let response = self.read_response().map_err(|e| {
-            CuError::new_with_cause("IO Error trying to read the ping response from SBUS", &e)
+            CuError::new_with_cause("IO Error trying to read the ping response from SBUS", e)
         })?;
 
         if response.2[0] == id {
@@ -160,10 +160,10 @@ impl Lewansoul {
         let mut remaining = vec![0; length as usize - 2]; // -2 for length itself already read + command already read
         self.port.read_exact(&mut remaining)?;
         let checksum = compute_checksum(
-            &mut header[2..]
+            header[2..]
                 .iter()
                 .chain(remaining[..remaining.len() - 1].iter())
-                .cloned(),
+                .copied(),
         );
         if checksum != *remaining.last().unwrap() {
             return Err(io::Error::other("Invalid checksum"));
@@ -176,7 +176,7 @@ impl Freezable for Lewansoul {
     // This driver is stateless as the IDs are recreate at new time, we keep the default implementation.
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServoPositionsPayload {
     pub positions: [Angle; MAX_SERVOS],
 }
@@ -197,9 +197,10 @@ impl Decode<()> for ServoPositionsPayload {
 }
 
 impl CuSinkTask for Lewansoul {
+    type Resources<'r> = ();
     type Input<'m> = input_msg!(ServoPositionsPayload);
 
-    fn new(config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {
@@ -216,17 +217,16 @@ impl CuSinkTask for Lewansoul {
 
         let mut ids = [0u8; 8];
         for (i, id) in ids.iter_mut().enumerate() {
-            let servo = kv.get(format!("servo{i}").as_str());
-            if servo.is_none() {
-                if i == 0 {
+            match kv.get(format!("servo{i}").as_str()) {
+                Some(servo) => *id = servo.clone().into(),
+                None if i == 0 => {
                     return Err(
                         "You need to specify at least one servo ID to address (as \"servo0\")"
                             .into(),
                     );
                 }
-                break;
+                None => break,
             }
-            *id = servo.unwrap().clone().into();
         }
 
         let port = serialport::new(serial_dev.as_str(), SERIAL_SPEED)
@@ -261,7 +261,7 @@ mod tests {
         config.0.insert("servo0".to_string(), 1.into());
         config.0.insert("servo1".to_string(), 2.into());
 
-        let mut lewansoul = Lewansoul::new(Some(&config)).unwrap();
+        let mut lewansoul = Lewansoul::new(Some(&config), ()).unwrap();
         let _position = lewansoul.read_current_position(1).unwrap();
 
         let _angle_limits = lewansoul.read_angle_limits(1).unwrap();

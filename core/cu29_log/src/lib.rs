@@ -17,7 +17,7 @@ mod imp {
 }
 
 #[cfg(feature = "defmt")]
-pub use defmt;
+extern crate defmt;
 
 #[cfg(feature = "std")]
 mod imp {
@@ -226,9 +226,25 @@ pub fn format_logline(
 /// This basically translates the world of copper logs to text logs.
 #[cfg(feature = "std")]
 pub fn rebuild_logline(all_interned_strings: &[String], entry: &CuLogEntry) -> CuResult<String> {
-    let format_string = &all_interned_strings[entry.msg_index as usize];
-    let mut anon_params: Vec<String> = Vec::new();
-    let mut named_params = HashMap::new();
+    let format_string = all_interned_strings
+        .get(entry.msg_index as usize)
+        .ok_or_else(|| {
+            cu29_traits::CuError::from(format!(
+                "Invalid message index {} (interned strings length {})",
+                entry.msg_index,
+                all_interned_strings.len()
+            ))
+        })?;
+    if entry.paramname_indexes.len() != entry.params.len() {
+        return Err(cu29_traits::CuError::from(format!(
+            "Mismatched parameter metadata: {} names for {} params",
+            entry.paramname_indexes.len(),
+            entry.params.len()
+        )));
+    }
+
+    let mut anon_params = Vec::with_capacity(entry.params.len());
+    let mut named_params = HashMap::with_capacity(entry.params.len());
 
     for (i, param) in entry.params.iter().enumerate() {
         let param_as_string = format!("{param}");
@@ -237,7 +253,16 @@ pub fn rebuild_logline(all_interned_strings: &[String], entry: &CuLogEntry) -> C
             anon_params.push(param_as_string);
         } else {
             // Named parameter
-            let name = all_interned_strings[entry.paramname_indexes[i] as usize].clone();
+            let name = all_interned_strings
+                .get(entry.paramname_indexes[i] as usize)
+                .ok_or_else(|| {
+                    cu29_traits::CuError::from(format!(
+                        "Invalid parameter name index {} (interned strings length {})",
+                        entry.paramname_indexes[i],
+                        all_interned_strings.len()
+                    ))
+                })?
+                .clone();
             named_params.insert(name, param_as_string);
         }
     }
@@ -253,7 +278,11 @@ pub fn rebuild_logline(all_interned_strings: &[String], entry: &CuLogEntry) -> C
 // ---- defmt shims, selected at cu29-log compile time ----
 #[cfg(all(feature = "defmt", not(feature = "std")))]
 #[macro_export]
-macro_rules! __cu29_defmt_debug { ($fmt:literal $(, $arg:expr)* $(,)?) => { defmt::debug!($fmt $(, $arg)*); } }
+macro_rules! __cu29_defmt_debug {
+    ($fmt:literal $(, $arg:expr)* $(,)?) => {
+        ::defmt::debug!($fmt $(, $arg)*);
+    }
+}
 #[cfg(not(all(feature = "defmt", not(feature = "std"))))]
 #[macro_export]
 macro_rules! __cu29_defmt_debug {
@@ -262,7 +291,11 @@ macro_rules! __cu29_defmt_debug {
 
 #[cfg(all(feature = "defmt", not(feature = "std")))]
 #[macro_export]
-macro_rules! __cu29_defmt_info  { ($fmt:literal $(, $arg:expr)* $(,)?) => { defmt::info! ($fmt $(, $arg)*); } }
+macro_rules! __cu29_defmt_info {
+    ($fmt:literal $(, $arg:expr)* $(,)?) => {
+        ::defmt::info!($fmt $(, $arg)*);
+    }
+}
 #[cfg(not(all(feature = "defmt", not(feature = "std"))))]
 #[macro_export]
 macro_rules! __cu29_defmt_info {
@@ -271,7 +304,11 @@ macro_rules! __cu29_defmt_info {
 
 #[cfg(all(feature = "defmt", not(feature = "std")))]
 #[macro_export]
-macro_rules! __cu29_defmt_warn  { ($fmt:literal $(, $arg:expr)* $(,)?) => { defmt::warn! ($fmt $(, $arg)*); } }
+macro_rules! __cu29_defmt_warn {
+    ($fmt:literal $(, $arg:expr)* $(,)?) => {
+        ::defmt::warn!($fmt $(, $arg)*);
+    }
+}
 #[cfg(not(all(feature = "defmt", not(feature = "std"))))]
 #[macro_export]
 macro_rules! __cu29_defmt_warn {
@@ -280,11 +317,35 @@ macro_rules! __cu29_defmt_warn {
 
 #[cfg(all(feature = "defmt", not(feature = "std")))]
 #[macro_export]
-macro_rules! __cu29_defmt_error { ($fmt:literal $(, $arg:expr)* $(,)?) => { defmt::error!($fmt $(, $arg)*); } }
+macro_rules! __cu29_defmt_error {
+    ($fmt:literal $(, $arg:expr)* $(,)?) => {
+        ::defmt::error!($fmt $(, $arg)*);
+    }
+}
 #[cfg(not(all(feature = "defmt", not(feature = "std"))))]
 #[macro_export]
 macro_rules! __cu29_defmt_error {
     ($($tt:tt)*) => {{}};
+}
+
+#[macro_export]
+macro_rules! defmt_debug {
+    ($($tt:tt)*) => { $crate::__cu29_defmt_debug!($($tt)*) };
+}
+
+#[macro_export]
+macro_rules! defmt_info {
+    ($($tt:tt)*) => { $crate::__cu29_defmt_info!($($tt)*) };
+}
+
+#[macro_export]
+macro_rules! defmt_warn {
+    ($($tt:tt)*) => { $crate::__cu29_defmt_warn!($($tt)*) };
+}
+
+#[macro_export]
+macro_rules! defmt_error {
+    ($($tt:tt)*) => { $crate::__cu29_defmt_error!($($tt)*) };
 }
 
 #[cfg(test)]

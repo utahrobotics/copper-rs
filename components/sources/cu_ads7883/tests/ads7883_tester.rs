@@ -1,6 +1,6 @@
+use cu_ads7883_new::ADSReadingPayload;
 use cu29::prelude::*;
 use cu29_helpers::basic_copper_setup;
-use cu_ads7883_new::ADSReadingPayload;
 
 #[copper_runtime(config = "tests/copperconfig.ron")]
 struct ADS78883Tester {}
@@ -10,8 +10,9 @@ pub struct ADS78883TestSink {}
 impl Freezable for ADS78883TestSink {}
 
 impl CuSinkTask for ADS78883TestSink {
+    type Resources<'r> = ();
     type Input<'m> = input_msg!(ADSReadingPayload);
-    fn new(_config: Option<&ComponentConfig>) -> CuResult<Self>
+    fn new(_config: Option<&ComponentConfig>, _resources: Self::Resources<'_>) -> CuResult<Self>
     where
         Self: Sized,
     {

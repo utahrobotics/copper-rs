@@ -11,7 +11,7 @@ homepage.workspace = true
 repository.workspace = true
 
 [package.metadata.cargo-machete]
-ignored = ["cu29-log", "cu29-log-runtime"]  # proc macro
+ignored = ["cu29-log", "cu29-log-runtime"] # proc macro
 
 [dependencies]
 cu29 = { workspace = true }
@@ -21,7 +21,7 @@ bincode = { workspace = true }
 serde = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rppal = { version = "0.22.1", features = ["hal"] }
+rppal = { version = "0.22.1", default-features = false, features = ["hal"] }
 
 [build-dependencies]
 cfg_aliases = "0.2.1"

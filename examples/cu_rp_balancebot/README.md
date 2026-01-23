@@ -16,12 +16,6 @@ $ cargo run --release
 
 See the UI help for the navigation.
 
-To debug the game engine side you can add a perf overlay with:
-
-```bash
-cargo run --release --features perf-ui
-```
-
 ## To run the resimulation
 
 (you need at least a log in `logs` for example from a simulation run).
@@ -65,3 +59,4 @@ $ cargo run --bin balancebot-logreader --release
 - `just balancebot-dump-text-logs` — extract human-readable logs from `logs/balance.copper` into `../../target/debug/cu29_log_index/strings.bin`.
 - `just balancebot-fsck` — integrity check of `logs/balance.copper`.
 - `just balancebot-set-pwm-permissions` — fix PWM sysfs permissions on the target (requires appropriate privileges).
+- `just dag-logstats` — generate logstats and open an annotated DAG SVG for the current `copperconfig.ron`.
