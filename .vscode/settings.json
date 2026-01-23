@@ -1,3 +1,6 @@
 {
-    "cmake.sourceDirectory": "/home/matthew_a/copper-rs/catkin_point_lio_unilidar/src/point_lio_ros2"
+    "cmake.sourceDirectory": "/home/matthew_a/copper-rs/catkin_point_lio_unilidar/src/point_lio_ros2",
+    "rust-analyzer.cargo.features": [
+        "hardware"
+    ]
 }
