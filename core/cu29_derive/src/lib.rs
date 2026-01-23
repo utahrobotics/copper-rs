@@ -3938,7 +3938,8 @@ fn generate_bridge_rx_execution_tokens(
                 let ovr = sim_callback(SimStep::#enum_name(state));
 
                 if let SimOverride::Errored(reason) = ovr  {
-                    cumsg_output.set_error(CuError::from(reason));
+                    let error: CuError = reason.into();
+                    cumsg_output.metadata.status = CuError::from(error).to_compact_string();
                     false
                 } else {
                     true
