@@ -121,7 +121,7 @@ where
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConfigError {
-    message: String,
+    pub message: String,
 }
 
 impl ConfigError {
