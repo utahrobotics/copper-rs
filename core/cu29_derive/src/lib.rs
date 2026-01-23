@@ -3888,7 +3888,6 @@ fn generate_task_execution_tokens(
         }
     }
 }
-
 fn generate_bridge_rx_execution_tokens(
     step: &CuExecutionStep,
     bridge_spec: &BridgeSpec,
@@ -3933,13 +3932,16 @@ fn generate_bridge_rx_execution_tokens(
     let call_sim_callback = if sim_mode {
         quote! {
             let doit = {
+                // Use a separate reborrow for the callback to avoid moving
                 let cumsg_output = #output_ref;
                 let state = CuTaskCallbackState::Process((), cumsg_output);
                 let ovr = sim_callback(SimStep::#enum_name(state));
 
                 if let SimOverride::Errored(reason) = ovr  {
                     let error: CuError = reason.into();
-                    cumsg_output.metadata.set_status(error.to_string());
+                    // Access through output_ref again since cumsg_output was moved
+                    let err_output = #output_ref;
+                    err_output.metadata.set_status(error.to_string());
                     false
                 } else {
                     true
@@ -3955,6 +3957,7 @@ fn generate_bridge_rx_execution_tokens(
             {
                 let bridge = &mut bridges.#bridge_tuple_index;
                 #call_sim_callback
+                // Fresh borrow after the callback scope has ended
                 let cumsg_output = #output_ref;
                 cumsg_output.metadata.process_time.start = clock.now().into();
                 let maybe_error = if doit {
@@ -3993,7 +3996,6 @@ fn generate_bridge_rx_execution_tokens(
         quote! {},
     )
 }
-
 fn generate_bridge_tx_execution_tokens(
     step: &CuExecutionStep,
     bridge_spec: &BridgeSpec,
