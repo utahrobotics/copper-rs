@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ThreadPoolId"],"struct":["Borrowed","BundleContext","BundleIndex","Owned","ResourceBindingMap","ResourceKey","ResourceManager","ThreadPoolBundle"],"trait":["ResourceBindings","ResourceBundle","ResourceBundleDecl","ResourceId"]};

@@ -1,0 +1,1854 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://copper-project.github.io/copper-rs/Baremetal-Development/">
+      
+      
+        <link rel="prev" href="../Modular-Configuration/">
+      
+      
+        <link rel="next" href="../Supported-Platforms/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.1">
+    
+    
+      
+        <title>Baremetal Development - Copper Wiki</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="teal">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#baremetal-development-with-copper" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="Copper Wiki" class="md-header__button md-logo" aria-label="Copper Wiki" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Copper Wiki
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Baremetal Development
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="teal"  aria-hidden="true"  type="radio" name="__palette" id="__palette_0">
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/copper-project/copper-rs" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="Copper Wiki" class="md-nav__button md-logo" aria-label="Copper Wiki" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Copper Wiki
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/copper-project/copper-rs" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Start
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Project-Templates/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Project Templates
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Copper-Application-Overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Copper Application Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Build-and-Deploy-a-Copper-Application/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build and Deploy a Copper Application
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Copper-RON-Configuration-Reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Copper Configuration file Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Task-Automation-with-Just/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Task Automation with just
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Concepts
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Concepts
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Copper-Runtime-Overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Copper Runtime Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Config-and-Missions-Visualization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Copper Configuration and Mission Visualization
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Task-Lifecycle/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Copper Tasks lifecycle overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../CuBridge-Concept/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Copper Bridge concept
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Resources/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Resources
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Modular-Configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Modular Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Embedded
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Embedded
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Baremetal Development
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Baremetal Development
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#getting-started" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Getting Started
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Getting Started">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#hardware-reference-platform" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Hardware (reference platform)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Hardware (reference platform)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#base-board" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Base board
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#extension-boards-to-get-a-sdcard-slot-to-be-able-to-log-with-copper" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Extension boards to get a sdcard slot (to be able to log with Copper).
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#adafruit-proto-doubler-optional" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Adafruit Proto Doubler (optional)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#debug-probe-hw" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debug Probe HW
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#debug-probe-cable-and-setup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debug probe cable and setup.
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Debug probe cable and setup.">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#power" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Power
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#debug" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debug
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#extra-leds-optional" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Extra LEDs (optional)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#software" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Software
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Software">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#quick-sanity-check" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quick sanity check
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#run-the-plain-copper-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run the plain Copper example.
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#run-the-copper-example-with-the-debug-probe" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run the Copper example with the debug probe.
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#extract-the-logs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Extract the logs.
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#resim" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Resim
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#caveats" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Caveats
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Supported-Platforms/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Supported Platforms
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../SDK-Features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Features
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Available-Components/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Available Components
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../FAQ/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    FAQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Roadmap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Roadmap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Copper-Release-Notes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Copper Release Notes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    External
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    External
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://github.com/copper-project/copper-rs" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Source code on GitHub
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://docs.rs/cu29" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API docs on docs.rs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://crates.io/crates/cu29" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Crates.io
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://discord.gg/VkCG7Sb9Kw" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Discord
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#getting-started" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Getting Started
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Getting Started">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#hardware-reference-platform" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Hardware (reference platform)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Hardware (reference platform)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#base-board" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Base board
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#extension-boards-to-get-a-sdcard-slot-to-be-able-to-log-with-copper" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Extension boards to get a sdcard slot (to be able to log with Copper).
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#adafruit-proto-doubler-optional" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Adafruit Proto Doubler (optional)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#debug-probe-hw" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debug Probe HW
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#debug-probe-cable-and-setup" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debug probe cable and setup.
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Debug probe cable and setup.">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#power" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Power
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#debug" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debug
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#extra-leds-optional" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Extra LEDs (optional)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#software" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Software
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Software">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#quick-sanity-check" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quick sanity check
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#run-the-plain-copper-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run the plain Copper example.
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#run-the-copper-example-with-the-debug-probe" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run the Copper example with the debug probe.
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#extract-the-logs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Extract the logs.
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#resim" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Resim
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#caveats" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Caveats
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="baremetal-development-with-copper">Baremetal Development with Copper<a class="headerlink" href="#baremetal-development-with-copper" title="Permanent link">&para;</a></h1>
+<p>Copper can also be deployed on baremetal ie. <code>no-std</code> on an MCU.</p>
+<p>The main advantage is that algorithms can be written to be usable on both normal (on an OS) and baremetal.
+The underlying logging format is also the same so you can extract the logs, replay in simulation what happened on the
+device, and debug with the comfort of a full local environment development and debugger.</p>
+<h2 id="getting-started">Getting Started<a class="headerlink" href="#getting-started" title="Permanent link">&para;</a></h2>
+<h3 id="hardware-reference-platform">Hardware (reference platform)<a class="headerlink" href="#hardware-reference-platform" title="Permanent link">&para;</a></h3>
+<p>We chose a beefed-up RP2350B-based board as a reference platform. 
+It is very well-documented, relatively cheap, and a lot of peripherals and accessories are available.</p>
+<p>Overview:</p>
+<p><img alt="baremetal-w-camera.jpg" height="600" src="imgs/baremetal-w-camera.jpg"/></p>
+<p>Note: we are not affiliated with any of those vendors or HW manufacturers. We just like them.</p>
+<blockquote>
+<p>If you want to receive the <strong>whole kit ready to be deployed with Copper</strong>: all soldered with the debug probe, 
+a debug cable and tested. We can send you one: Ping us directly at info@copper-robotics.com.</p>
+</blockquote>
+<h4 id="base-board">Base board<a class="headerlink" href="#base-board" title="Permanent link">&para;</a></h4>
+<p>It is a <code>Pimoroni Pico plus 2W</code>.</p>
+<p><img alt="ppico_plus_2_pinout_diagram.webp" height="600" src="imgs/ppico_plus_2_pinout_diagram.webp"/></p>
+<p>Out of the box it has:
+- Powered by RP2350B (Dual Arm Cortex M33 running at up to 150MHz with 520KB of SRAM)
+- 16MB of QSPI flash supporting XiP
+- 8MB of PSRAM
+- USB-C connector for power, programming, and data transfer
+- Qw/ST (Qwiic/STEMMA QT) compatible I2C connector
+- 3 pin debug connector (JST-SH)
+- Reset and BOOT buttons (the BOOT button can also be used as a user button)
+- User LED indicator (addressable through the wifi chip though)
+- On-board 3V3 regulator (max regulator current output 600mA)
+- Input voltage range 3V - 5.5V </p>
+<p>You can buy it here:
+https://www.adafruit.com/product/6243</p>
+<p>From the UK here:
+https://shop.pimoroni.com/products/pimoroni-pico-plus-2-w?variant=42182811942995</p>
+<p>If you don't care about the Wi-Fi, you can opt for a simple plus 2: https://shop.pimoroni.com/products/pimoroni-pico-plus-2?variant=42092668289107</p>
+<h4 id="extension-boards-to-get-a-sdcard-slot-to-be-able-to-log-with-copper">Extension boards to get a sdcard slot (to be able to log with Copper).<a class="headerlink" href="#extension-boards-to-get-a-sdcard-slot-to-be-able-to-log-with-copper" title="Permanent link">&para;</a></h4>
+<p>Adafruit PiCowBell Camera Breakout (Here the 160 deg wide lens version):
+https://www.adafruit.com/product/5947</p>
+<p>If you don't care about a camera: Adafruit PiCowbell Adalogger for Pico - MicroSD, RTC &amp; STEMMA QT
+https://www.adafruit.com/product/5703a</p>
+<p>Or a simple, more compact alternative a break-out board just for the SD Card:</p>
+<p><img alt="sdcard-breakout.jpg" height="400" src="imgs/sdcard-breakout.jpg"/></p>
+<h4 id="adafruit-proto-doubler-optional">Adafruit Proto Doubler (optional)<a class="headerlink" href="#adafruit-proto-doubler-optional" title="Permanent link">&para;</a></h4>
+<p><img alt="proto-doubler.jpg" height="400" src="imgs/proto-doubler.jpg"/></p>
+<p>This is a very nice addition for a bench setup. It allows you to connect the extension boards side by side with an extra
+row of pins you can use directly and some prototyping space underneath.</p>
+<p>https://www.adafruit.com/product/5906</p>
+<h4 id="debug-probe-hw">Debug Probe HW<a class="headerlink" href="#debug-probe-hw" title="Permanent link">&para;</a></h4>
+<p>It is highly recommended to use a debug probe: you'll be able to see the Copper structured logs in real-time, 
+deploy from <code>cargo run</code> without having to reset the probe, set breakpoints etc...</p>
+<p>We recommend a CMSIS-DAP compliant debugger like the DAPLink-based ones: https://developer.arm.com/documentation/101451/0100/About-CMSIS-DAP because it works right out of the box with <code>probe-rs</code>, a Rust embedded probe tooling support.</p>
+<p>We had success with this one: https://github.com/WeActStudio/WeActStudio.MiniDebugger</p>
+<p>It is compact, with USB-C (most of the commercial probes are like tanks with USB-A), can provide a 5V power supply, and is straightforward to use.</p>
+<blockquote>
+<p>Be sure to buy the <strong>DapLink Version</strong> (not the ST-Link one).</p>
+</blockquote>
+<p><img alt="debugger.jpg" height="400" src="imgs/debugger.jpg"/></p>
+<h4 id="debug-probe-cable-and-setup">Debug probe cable and setup.<a class="headerlink" href="#debug-probe-cable-and-setup" title="Permanent link">&para;</a></h4>
+<p><img alt="debugger-connector.png" src="../imgs/debugger-connector.png" /></p>
+<p>There are 2 connectors to connect:
+ - power
+ - debug</p>
+<h5 id="power">Power<a class="headerlink" href="#power" title="Permanent link">&para;</a></h5>
+<p>This allows you to just have to plug in a single USB-C connector <strong>on the probe side</strong> and the board will power itself up.</p>
+<p><img alt="power.jpg" src="imgs/power.jpg" width="1000"/></p>
+<p>This is the 5V connection on the probe side (see the picture above).
+You need to connect that to the VB (VBUS) pin on the board side. (NOT VS).</p>
+<h5 id="debug">Debug<a class="headerlink" href="#debug" title="Permanent link">&para;</a></h5>
+<p>You now have to connect the SWDIO SWCLK and GND pins on the probe side to the SWDIO SWCLK and GND pins on the board side.
+Ideally, you want to crimp a JST-SH connector to the probe wires to be able to plug it directly into the board.</p>
+<p><img alt="debug-connection-probe.jpg" src="imgs/debug-connection-probe.jpg" width="500"/>
+<img alt="debug-connection-board.jpg" src="imgs/debug-connection-board.jpg" width="500"/></p>
+<h5 id="extra-leds-optional">Extra LEDs (optional)<a class="headerlink" href="#extra-leds-optional" title="Permanent link">&para;</a></h5>
+<p>You can, for example, use some already made LED + resistor called lilypads: https://shop.pimoroni.com/en-us/products/lilypad-led-5pcs</p>
+<p><img alt="led1.jpg" height="300" src="imgs/led1.jpg"/></p>
+<p>Here on plugged between pin 20 and GND. Ready to go for the rp2350 copper example.</p>
+<p><img alt="led2.jpg" height="300" src="imgs/led2.jpg"/></p>
+<h3 id="software">Software<a class="headerlink" href="#software" title="Permanent link">&para;</a></h3>
+<h4 id="quick-sanity-check">Quick sanity check<a class="headerlink" href="#quick-sanity-check" title="Permanent link">&para;</a></h4>
+<p>Plug in your debugger and run <code>dmesg</code>, check to see if the board is detected.</p>
+<p><img alt="dmesg.png" src="../imgs/dmesg.png" /></p>
+<p>Install probe-rs: <code>cargo install probe-rs-tools --locked</code></p>
+<p>Now check with <code>probe-rs</code> to see if the probe can connect to the board.</p>
+<p>First with a <code>probe-rs list</code> to see if the probe is detected and accessible.
+Then with <code>probe-rs info --protocol swd</code> to dump the target debug information.</p>
+<p>It should look like this:</p>
+<p><img alt="target-recognized.png" src="../imgs/target-recognized.png" /></p>
+<p>If not, check if your user has the right permissions to access the device. For example, you might want to add raw access to the USB devices with:</p>
+<pre><code>$ cat /etc/udev/rules.d/60-cmsis-dap.rules
+
+# ARM mbed CMSIS-DAP (WeAct MiniDebugger DAPLink) VID:PID 0d28:0204
+SUBSYSTEM==&quot;usb&quot;, ATTR{idVendor}==&quot;0d28&quot;, ATTR{idProduct}==&quot;0204&quot;, MODE=&quot;0660&quot;, TAG+=&quot;uaccess&quot;
+SUBSYSTEM==&quot;hidraw&quot;, ATTRS{idVendor}==&quot;0d28&quot;, ATTRS{idProduct}==&quot;0204&quot;, MODE=&quot;0660&quot;, TAG+=&quot;uaccess&quot;
+</code></pre>
+<p>Also, double-check your cable.</p>
+<h4 id="run-the-plain-copper-example">Run the plain Copper example.<a class="headerlink" href="#run-the-plain-copper-example" title="Permanent link">&para;</a></h4>
+<p>In <code>/examples/cu_rp2350_skeleton</code> you can find a fully working example that will just flip the GPIO 21 and log the result on the SD card.</p>
+<p>First, plug an SD card on your computer and run the formatting script on it:
+<code>support/mk_cu29_sdcard.sh &lt;path to sdcard block device&gt;</code> </p>
+<p>You need <code>wipefs</code> and <code>sgdisk</code> installed for that (on Arch Linux, <code>sudo pacman -S util-linux gptfdisk</code>)</p>
+<blockquote>
+<p>TRIPLE-CHECK THAT PATH TO THE SD CARD BLOCK DEVICE IS CORRECT, it will wipe out any disk you point it to.</p>
+</blockquote>
+<p>Here I monitor dmesg to see on which block device the SD card reader shows up and format it:</p>
+<p><img alt="sdcard-format.png" src="../imgs/sdcard-format.png" /></p>
+<p>You can also run into user rights issues, this one you can sudo out of it <code>sudo support/mk_cu29_sdcard.sh &lt;YOUR DEVICE&gt;</code></p>
+<h4 id="run-the-copper-example-with-the-debug-probe">Run the Copper example with the debug probe.<a class="headerlink" href="#run-the-copper-example-with-the-debug-probe" title="Permanent link">&para;</a></h4>
+<p>go to <code>/examples/cu_rp2350_skeleton</code> and run <code>cargo run-arm</code></p>
+<p>You should see the Copper text logs streaming right through the debugger. With it finding the SD card and starting to log on it.
+The LED on GPIO 21 should blink.</p>
+<p><img alt="running-embedded-copper.png" src="../imgs/running-embedded-copper.png" /></p>
+<h4 id="extract-the-logs">Extract the logs.<a class="headerlink" href="#extract-the-logs" title="Permanent link">&para;</a></h4>
+<p>If you want to see the tasks data logs (copperlists), directly dump the partition to a file (basically recreating a slab):</p>
+<pre><code>$ # here substiture with your own device, probably the same as the one you formatted the sdcard with
+$ pv /dev/sdb2 &gt; logs/blinky_0.copper
+</code></pre>
+<p>Then you can dump the logs with exactly like a standard Copper log file, note we made also a shortcut for the log reader:
+Note: no _0 suffix here, the log reader figures out the slab number automatically.</p>
+<pre><code>$ cargo run-logreader extract-copperlists logs/blinky.copper
+</code></pre>
+<h4 id="resim">Resim<a class="headerlink" href="#resim" title="Permanent link">&para;</a></h4>
+<p>If you check the src/tasks.rs file, you'll see that the tasks are just standard Copper tasks.
+You can resimulate the log the same way as any other Copper programs (+/- managing the std/no-std variations), check the <code>examples</code> folder for resim examples.</p>
+<h4 id="caveats">Caveats<a class="headerlink" href="#caveats" title="Permanent link">&para;</a></h4>
+<p>The logs don't get closed correctly, it should not prevent you from reading them but it is annoying. You can implement a button to drop the Copper instance and force the correct closure of the logs.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": [], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>
