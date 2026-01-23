@@ -103,13 +103,17 @@ impl ComponentConfig {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Value(pub RonValue);
 
-impl<T> From<Value> for Vec<T>
+impl<T> TryFrom<Value> for Vec<T>
 where
-    T: From<Value>,
+    T: TryFrom<Value, Error = ConfigError>,
 {
-    fn from(value: Value) -> Self {
+    type Error = ConfigError;
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value.0 {
-            RonValue::Seq(seq) => seq.into_iter().map(|v| T::from(Value(v))).collect(),
+            RonValue::Seq(seq) => seq
+                .into_iter()
+                .map(|v| T::try_from(Value(v)))
+                .collect::<Result<Vec<T>, ConfigError>>(),
             _ => panic!("Expected sequence value"), // or return empty vec, or use Result
         }
     }
