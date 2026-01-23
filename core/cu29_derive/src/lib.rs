@@ -4024,9 +4024,9 @@ fn generate_bridge_tx_execution_tokens(
         });
     let input_ref = if output_size > 1 {
         let port_index = syn::Index::from(input.src_port);
-        quote! { &mut msgs.#input_index.#port_index }
+        quote! { msgs.#input_index.#port_index }
     } else {
-        quote! { &mut msgs.#input_index }
+        quote! { msgs.#input_index }
     };
     let bridge_tuple_index = int2sliceindex(bridge_spec.tuple_index as u32);
     let bridge_type = &bridge_spec.type_path;
@@ -4059,7 +4059,7 @@ fn generate_bridge_tx_execution_tokens(
             {
                 let bridge = &mut bridges.#bridge_tuple_index;
                 #call_sim_callback
-                let cumsg_input = #input_ref;
+                let cumsg_input =  &mut #input_ref;
                 // Stamp timing so monitors see consistent ranges for bridge Tx as well.
                 cumsg_input.metadata.process_time.start = clock.now().into();
                 let maybe_error = if doit {
