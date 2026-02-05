@@ -1566,29 +1566,46 @@ impl CuMonitor for CuConsoleMon {
                     topology.clone(),
                 );
 
-                // Override the cu29-log-runtime Log Subscriber
+                // Override the cu29-log-runtime Log Subscriber using the new live listener API
                 #[cfg(debug_assertions)]
-                if cu29_log_runtime::EXTRA_TEXT_LOGGER
-                    .read()
-                    .unwrap()
-                    .is_some()
                 {
                     let max_lines = terminal.size().unwrap().height - 5;
                     let (debug_log, tx) = debug_pane::DebugLog::new(max_lines);
 
-                    let log_subscriber = debug_pane::LogSubscriber::new(tx);
+                    // Register the live log listener instead of using EXTRA_TEXT_LOGGER
+                    cu29_log_runtime::register_live_log_listener(move |entry, format_str, param_names| {
+                        use cu29::prelude::CuLogLevel;
+                        // Build a text line from structured data
+                        let params: Vec<String> = entry.params.iter().map(|v| v.to_string()).collect();
+                        let named_params: std::collections::HashMap<String, String> = param_names
+                            .iter()
+                            .zip(params.iter())
+                            .map(|(name, value)| (name.to_string(), value.clone()))
+                            .collect();
+                        if let Ok(line) = cu29_log_runtime::format_message_only(format_str, params.as_slice(), &named_params) {
+                            let level = match entry.level {
+                                CuLogLevel::Debug => "DEBUG",
+                                CuLogLevel::Info => "INFO",
+                                CuLogLevel::Warning => "WARN",
+                                CuLogLevel::Error => "ERROR",
+                                CuLogLevel::Critical => "CRITICAL",
+                            };
+                            let message = format!(
+                                "{} [{}] - {}\n",
+                                chrono::Local::now().time().format("%H:%M:%S"),
+                                level,
+                                line
+                            );
+                            let _ = tx.send(message);
+                        }
+                    });
 
-                    *cu29_log_runtime::EXTRA_TEXT_LOGGER.write().unwrap() =
-                        Some(Box::new(log_subscriber) as Box<dyn log::Log>);
-
-                    // Set up the terminal again, as there might be some logs which in the console before updating `EXTRA_TEXT_LOGGER`
+                    // Set up the terminal again, as there might be some logs which in the console before updating the listener
                     if let Err(err) = setup_terminal() {
                         eprintln!("Failed to reinitialize terminal after log redirect: {err}");
                     }
 
                     ui.debug_output = Some(debug_log);
-                } else {
-                    println!("EXTRA_TEXT_LOGGER is none");
                 }
                 if let Err(err) = ui.run_app(&mut terminal) {
                     let _ = restore_terminal();

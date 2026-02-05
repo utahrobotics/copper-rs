@@ -7,13 +7,13 @@ pub mod mcap_export;
 #[cfg(feature = "mcap")]
 pub mod serde_to_jsonschema;
 
+use bincode::Decode;
 use bincode::config::standard;
 use bincode::decode_from_std_read;
 use bincode::error::DecodeError;
-use bincode::Decode;
 use clap::{Parser, Subcommand, ValueEnum};
-use cu29::prelude::*;
 use cu29::UnifiedLogType;
+use cu29::prelude::*;
 use cu29_intern_strs::read_interned_strings;
 use fsck::check;
 #[cfg(feature = "mcap")]
@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 
 #[cfg(feature = "mcap")]
 pub use mcap_export::{
-    export_to_mcap, export_to_mcap_with_schemas, mcap_info, McapExportStats, PayloadSchemas,
+    McapExportStats, PayloadSchemas, export_to_mcap, export_to_mcap_with_schemas, mcap_info,
 };
 
 #[cfg(feature = "mcap")]
@@ -435,7 +435,7 @@ fn read_next_entry<T: Decode<()>>(src: &mut impl Read) -> Option<T> {
         Ok(entry) => Some(entry),
         Err(DecodeError::UnexpectedEnd { .. }) => None,
         Err(DecodeError::Io { inner, additional }) => {
-            eprintln!("Are your saved logs incompatable with the config?");
+            println!("Do your saved copperlists match your schema (copperconfig)?");
             if inner.kind() == std::io::ErrorKind::UnexpectedEof {
                 None
             } else {
@@ -444,8 +444,8 @@ fn read_next_entry<T: Decode<()>>(src: &mut impl Read) -> Option<T> {
             }
         }
         Err(e) => {
-            eprintln!("Are your saved logs incompatable with the config?");
             println!("Error {e:?}");
+            println!("Do your saved copperlists match your schema (copperconfig)?");
             None
         }
     }
@@ -709,14 +709,14 @@ mod python {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bincode::{encode_into_slice, Decode, Encode};
+    use bincode::{Decode, Encode, encode_into_slice};
     use serde::Deserialize;
     use std::env;
     use std::fs;
     use std::io::Cursor;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
-    use tempfile::{tempdir, TempDir};
+    use tempfile::{TempDir, tempdir};
 
     fn copy_stringindex_to_temp(tmpdir: &TempDir) -> PathBuf {
         // Build a minimal index on the fly so tests don't depend on build-time artifacts.

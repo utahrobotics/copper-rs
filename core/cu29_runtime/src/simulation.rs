@@ -112,6 +112,10 @@ use crate::cutask::CuMsgPack;
 
 use crate::cutask::{CuMsg, CuMsgPayload, CuSinkTask, CuSrcTask, Freezable};
 use crate::{input_msg, output_msg};
+use bincode::de::Decoder;
+use bincode::enc::Encoder;
+use bincode::error::{DecodeError, EncodeError};
+use bincode::{Decode, Encode};
 use core::marker::PhantomData;
 use cu29_clock::RobotClock;
 use cu29_traits::CuResult;
@@ -149,13 +153,41 @@ pub enum SimOverride {
     Errored(String),
 }
 
+/// Lifecycle callbacks for bridges when running in simulation.
+///
+/// These mirror the CuBridge trait hooks so a simulator can choose to
+/// bypass the real implementation (e.g. to avoid opening hardware) or
+/// inject faults.
+pub enum CuBridgeLifecycleState {
+    /// The bridge is about to be constructed. Gives access to config.
+    New(Option<ComponentConfig>),
+    /// The bridge is starting.
+    Start,
+    /// Called before the I/O cycle.
+    Preprocess,
+    /// Called after the I/O cycle.
+    Postprocess,
+    /// The bridge is stopping.
+    Stop,
+}
+
 /// This is a placeholder task for a source task for the simulations.
 /// It basically does nothing in place of a real driver so it won't try to initialize any hardware.
 pub struct CuSimSrcTask<T> {
     boo: PhantomData<T>,
+    state: bool,
 }
 
-impl<T> Freezable for CuSimSrcTask<T> {}
+impl<T> Freezable for CuSimSrcTask<T> {
+    fn freeze<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
+        Encode::encode(&self.state, encoder)
+    }
+
+    fn thaw<D: Decoder>(&mut self, decoder: &mut D) -> Result<(), DecodeError> {
+        self.state = Decode::decode(decoder)?;
+        Ok(())
+    }
+}
 
 impl<T: CuMsgPayload> CuSrcTask for CuSimSrcTask<T> {
     type Resources<'r> = ();
@@ -165,7 +197,11 @@ impl<T: CuMsgPayload> CuSrcTask for CuSimSrcTask<T> {
     where
         Self: Sized,
     {
-        Ok(Self { boo: PhantomData })
+        // Default to true to mirror typical source initial state; deterministic across runs.
+        Ok(Self {
+            boo: PhantomData,
+            state: true,
+        })
     }
 
     fn process(&mut self, _clock: &RobotClock, _new_msg: &mut Self::Output<'_>) -> CuResult<()> {
@@ -173,6 +209,16 @@ impl<T: CuMsgPayload> CuSrcTask for CuSimSrcTask<T> {
             "A placeholder for sim was called for a source, you need answer SimOverride to ExecutedBySim for the Process step."
         )
     }
+}
+
+impl<T> CuSimSrcTask<T> {
+    /// Placeholder hook for simulation-driven sources.
+    ///
+    /// In the sim placeholder we don't advance any internal state because the
+    /// simulator is responsible for providing deterministic outputs and state
+    /// snapshots are carried by the real task (when run_in_sim = true).
+    /// Keeping this as a no-op avoids baking any fake behavior into keyframes.
+    pub fn sim_tick(&mut self) {}
 }
 
 /// Helper to map a payload type (or tuple of payload types) to the corresponding `input_msg!` form.
