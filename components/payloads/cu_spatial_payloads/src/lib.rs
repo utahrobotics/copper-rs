@@ -32,6 +32,42 @@ enum TransformInner<T: Copy + Debug + 'static> {
 
 pub type Pose<T> = Transform3D<T>;
 
+macro_rules! impl_transform_accessors {
+    ($ty:ty, $len:ty, $ang:ty) => {
+        impl Transform3D<$ty> {
+            pub fn translation(&self) -> [$len; 3] {
+                let mat = self.to_matrix();
+                [
+                    <$len>::new::<meter>(mat[0][3]),
+                    <$len>::new::<meter>(mat[1][3]),
+                    <$len>::new::<meter>(mat[2][3]),
+                ]
+            }
+
+            pub fn rotation(&self) -> [[$ang; 3]; 3] {
+                let mat = self.to_matrix();
+                [
+                    [
+                        <$ang>::new::<radian>(mat[0][0]),
+                        <$ang>::new::<radian>(mat[0][1]),
+                        <$ang>::new::<radian>(mat[0][2]),
+                    ],
+                    [
+                        <$ang>::new::<radian>(mat[1][0]),
+                        <$ang>::new::<radian>(mat[1][1]),
+                        <$ang>::new::<radian>(mat[1][2]),
+                    ],
+                    [
+                        <$ang>::new::<radian>(mat[2][0]),
+                        <$ang>::new::<radian>(mat[2][1]),
+                        <$ang>::new::<radian>(mat[2][2]),
+                    ],
+                ]
+            }
+        }
+    };
+}
+
 // Manual implementations for serialization
 impl<T: Copy + Debug + Default + 'static> Serialize for Transform3D<T>
 where
@@ -181,106 +217,8 @@ impl<T: Copy + Debug + Default + 'static> TransformInner<T> {
     }
 }
 
-impl Transform3D<f64> {
-    pub fn translation(&self) -> [Length64; 3] {
-        let mat = self.to_matrix();
-        [
-            Length64::new::<meter>(mat[0][3]),
-            Length64::new::<meter>(mat[1][3]),
-            Length64::new::<meter>(mat[2][3]),
-        ]
-    }
-
-    pub fn rotation(&self) -> [[Angle64; 3]; 3] {
-        let mat = self.to_matrix();
-        [
-            [
-                Angle64::new::<radian>(mat[0][0]),
-                Angle64::new::<radian>(mat[0][1]),
-                Angle64::new::<radian>(mat[0][2]),
-            ],
-            [
-                Angle64::new::<radian>(mat[1][0]),
-                Angle64::new::<radian>(mat[1][1]),
-                Angle64::new::<radian>(mat[1][2]),
-            ],
-            [
-                Angle64::new::<radian>(mat[2][0]),
-                Angle64::new::<radian>(mat[2][1]),
-                Angle64::new::<radian>(mat[2][2]),
-            ],
-        ]
-    }
-}
-
-pub trait Transform3DCast {
-    fn cast(&self) -> Transform3D<f64>;
-}
-
-impl Transform3DCast for Transform3D<f32> {
-    fn cast(&self) -> Transform3D<f64> {
-        let mat_f32 = self.to_matrix();
-        let mat_f64: [[f64; 4]; 4] = [
-            [
-                mat_f32[0][0] as f64,
-                mat_f32[0][1] as f64,
-                mat_f32[0][2] as f64,
-                mat_f32[0][3] as f64,
-            ],
-            [
-                mat_f32[1][0] as f64,
-                mat_f32[1][1] as f64,
-                mat_f32[1][2] as f64,
-                mat_f32[1][3] as f64,
-            ],
-            [
-                mat_f32[2][0] as f64,
-                mat_f32[2][1] as f64,
-                mat_f32[2][2] as f64,
-                mat_f32[2][3] as f64,
-            ],
-            [
-                mat_f32[3][0] as f64,
-                mat_f32[3][1] as f64,
-                mat_f32[3][2] as f64,
-                mat_f32[3][3] as f64,
-            ],
-        ];
-        Transform3D::from_matrix(mat_f64)
-    }
-}
-
-impl Transform3D<f32> {
-    pub fn translation(&self) -> [Length32; 3] {
-        let mat = self.to_matrix();
-        [
-            Length32::new::<meter>(mat[0][3]),
-            Length32::new::<meter>(mat[1][3]),
-            Length32::new::<meter>(mat[2][3]),
-        ]
-    }
-
-    pub fn rotation(&self) -> [[Angle32; 3]; 3] {
-        let mat = self.to_matrix();
-        [
-            [
-                Angle32::new::<radian>(mat[0][0]),
-                Angle32::new::<radian>(mat[0][1]),
-                Angle32::new::<radian>(mat[0][2]),
-            ],
-            [
-                Angle32::new::<radian>(mat[1][0]),
-                Angle32::new::<radian>(mat[1][1]),
-                Angle32::new::<radian>(mat[1][2]),
-            ],
-            [
-                Angle32::new::<radian>(mat[2][0]),
-                Angle32::new::<radian>(mat[2][1]),
-                Angle32::new::<radian>(mat[2][2]),
-            ],
-        ]
-    }
-}
+impl_transform_accessors!(f32, Length32, Angle32);
+impl_transform_accessors!(f64, Length64, Angle64);
 
 impl<T: Copy + Debug + Default + 'static> Default for Transform3D<T> {
     fn default() -> Self {
@@ -288,67 +226,42 @@ impl<T: Copy + Debug + Default + 'static> Default for Transform3D<T> {
     }
 }
 
-/// Implementation for f32
-impl Mul for Transform3D<f32> {
-    type Output = Self;
+macro_rules! impl_transform_mul {
+    ($ty:ty, $zero:expr, $variant:ident) => {
+        impl Mul for Transform3D<$ty> {
+            type Output = Self;
 
-    fn mul(self, rhs: Self) -> Self::Output {
-        #[cfg(feature = "glam")]
-        {
-            match (&self.inner, &rhs.inner) {
-                (TransformInner::F32(a), TransformInner::F32(b)) => Self {
-                    inner: TransformInner::F32(*a * *b),
-                },
-                _ => unreachable!(),
-            }
-        }
-        #[cfg(not(feature = "glam"))]
-        {
-            let mut result = [[0.0f32; 4]; 4];
-            for i in 0..4 {
-                for j in 0..4 {
-                    let mut sum = 0.0;
-                    for k in 0..4 {
-                        sum += self.mat[i][k] * rhs.mat[k][j];
+            fn mul(self, rhs: Self) -> Self::Output {
+                #[cfg(feature = "glam")]
+                {
+                    match (&self.inner, &rhs.inner) {
+                        (TransformInner::$variant(a), TransformInner::$variant(b)) => Self {
+                            inner: TransformInner::$variant(*a * *b),
+                        },
+                        _ => unreachable!(),
                     }
-                    result[i][j] = sum;
+                }
+                #[cfg(not(feature = "glam"))]
+                {
+                    let mut result = [[$zero; 4]; 4];
+                    for i in 0..4 {
+                        for j in 0..4 {
+                            let mut sum = $zero;
+                            for k in 0..4 {
+                                sum += self.mat[i][k] * rhs.mat[k][j];
+                            }
+                            result[i][j] = sum;
+                        }
+                    }
+                    Self { mat: result }
                 }
             }
-            Self { mat: result }
         }
-    }
+    };
 }
 
-/// Implementation for f64
-impl Mul for Transform3D<f64> {
-    type Output = Self;
-
-    fn mul(self, rhs: Self) -> Self::Output {
-        #[cfg(feature = "glam")]
-        {
-            match (&self.inner, &rhs.inner) {
-                (TransformInner::F64(a), TransformInner::F64(b)) => Self {
-                    inner: TransformInner::F64(*a * *b),
-                },
-                _ => unreachable!(),
-            }
-        }
-        #[cfg(not(feature = "glam"))]
-        {
-            let mut result = [[0.0f64; 4]; 4];
-            for i in 0..4 {
-                for j in 0..4 {
-                    let mut sum = 0.0;
-                    for k in 0..4 {
-                        sum += self.mat[i][k] * rhs.mat[k][j];
-                    }
-                    result[i][j] = sum;
-                }
-            }
-            Self { mat: result }
-        }
-    }
-}
+impl_transform_mul!(f32, 0.0f32, F32);
+impl_transform_mul!(f64, 0.0f64, F64);
 
 /// Reference implementations for f32
 impl Mul for &Transform3D<f32> {
@@ -400,129 +313,74 @@ impl Mul<&Transform3D<f64>> for Transform3D<f64> {
     }
 }
 
-impl Transform3D<f32> {
-    /// Computes the inverse of this transformation matrix.
-    pub fn inverse(&self) -> Self {
-        #[cfg(feature = "glam")]
-        {
-            match &self.inner {
-                TransformInner::F32(affine) => Self {
-                    inner: TransformInner::F32(affine.inverse()),
-                },
-                _ => unreachable!(),
-            }
-        }
-        #[cfg(not(feature = "glam"))]
-        {
-            let mat = self.mat;
-            // Extract rotation matrix (top-left 3x3)
-            let r = [
-                [mat[0][0], mat[0][1], mat[0][2]],
-                [mat[1][0], mat[1][1], mat[1][2]],
-                [mat[2][0], mat[2][1], mat[2][2]],
-            ];
+macro_rules! impl_transform_inverse {
+    ($ty:ty, $zero:expr, $one:expr, $variant:ident) => {
+        impl Transform3D<$ty> {
+            /// Computes the inverse of this transformation matrix.
+            pub fn inverse(&self) -> Self {
+                #[cfg(feature = "glam")]
+                {
+                    match &self.inner {
+                        TransformInner::$variant(affine) => Self {
+                            inner: TransformInner::$variant(affine.inverse()),
+                        },
+                        _ => unreachable!(),
+                    }
+                }
+                #[cfg(not(feature = "glam"))]
+                {
+                    let mat = self.mat;
+                    // Extract rotation matrix (top-left 3x3)
+                    let r = [
+                        [mat[0][0], mat[0][1], mat[0][2]],
+                        [mat[1][0], mat[1][1], mat[1][2]],
+                        [mat[2][0], mat[2][1], mat[2][2]],
+                    ];
 
-            // Extract translation (top-right 3x1)
-            let t = [mat[0][3], mat[1][3], mat[2][3]];
+                    // Extract translation (top-right 3x1)
+                    let t = [mat[0][3], mat[1][3], mat[2][3]];
 
-            // Compute transpose of rotation matrix (which is its inverse for orthogonal matrices)
-            let r_inv = [
-                [r[0][0], r[1][0], r[2][0]],
-                [r[0][1], r[1][1], r[2][1]],
-                [r[0][2], r[1][2], r[2][2]],
-            ];
+                    // Compute transpose of rotation matrix (which is its inverse for orthogonal matrices)
+                    let r_inv = [
+                        [r[0][0], r[1][0], r[2][0]],
+                        [r[0][1], r[1][1], r[2][1]],
+                        [r[0][2], r[1][2], r[2][2]],
+                    ];
 
-            // Compute -R^T * t
-            let t_inv = [
-                -(r_inv[0][0] * t[0] + r_inv[0][1] * t[1] + r_inv[0][2] * t[2]),
-                -(r_inv[1][0] * t[0] + r_inv[1][1] * t[1] + r_inv[1][2] * t[2]),
-                -(r_inv[2][0] * t[0] + r_inv[2][1] * t[1] + r_inv[2][2] * t[2]),
-            ];
+                    // Compute -R^T * t
+                    let t_inv = [
+                        -(r_inv[0][0] * t[0] + r_inv[0][1] * t[1] + r_inv[0][2] * t[2]),
+                        -(r_inv[1][0] * t[0] + r_inv[1][1] * t[1] + r_inv[1][2] * t[2]),
+                        -(r_inv[2][0] * t[0] + r_inv[2][1] * t[1] + r_inv[2][2] * t[2]),
+                    ];
 
-            // Construct the inverse transformation matrix
-            let mut inv_mat = [[0.0f32; 4]; 4];
+                    // Construct the inverse transformation matrix
+                    let mut inv_mat = [[$zero; 4]; 4];
 
-            // Copy rotation transpose
-            for i in 0..3 {
-                for j in 0..3 {
-                    inv_mat[i][j] = r_inv[i][j];
+                    // Copy rotation transpose
+                    for i in 0..3 {
+                        for j in 0..3 {
+                            inv_mat[i][j] = r_inv[i][j];
+                        }
+                    }
+
+                    // Copy translation part
+                    inv_mat[0][3] = t_inv[0];
+                    inv_mat[1][3] = t_inv[1];
+                    inv_mat[2][3] = t_inv[2];
+
+                    // Keep the homogeneous coordinate the same
+                    inv_mat[3][3] = $one;
+
+                    Self { mat: inv_mat }
                 }
             }
-
-            // Copy translation part
-            inv_mat[0][3] = t_inv[0];
-            inv_mat[1][3] = t_inv[1];
-            inv_mat[2][3] = t_inv[2];
-
-            // Keep the homogeneous coordinate the same
-            inv_mat[3][3] = 1.0;
-
-            Self { mat: inv_mat }
         }
-    }
+    };
 }
 
-impl Transform3D<f64> {
-    /// Computes the inverse of this transformation matrix.
-    pub fn inverse(&self) -> Self {
-        #[cfg(feature = "glam")]
-        {
-            match &self.inner {
-                TransformInner::F64(affine) => Self {
-                    inner: TransformInner::F64(affine.inverse()),
-                },
-                _ => unreachable!(),
-            }
-        }
-        #[cfg(not(feature = "glam"))]
-        {
-            let mat = self.mat;
-            // Extract rotation matrix (top-left 3x3)
-            let r = [
-                [mat[0][0], mat[0][1], mat[0][2]],
-                [mat[1][0], mat[1][1], mat[1][2]],
-                [mat[2][0], mat[2][1], mat[2][2]],
-            ];
-
-            // Extract translation (top-right 3x1)
-            let t = [mat[0][3], mat[1][3], mat[2][3]];
-
-            // Compute transpose of rotation matrix (which is its inverse for orthogonal matrices)
-            let r_inv = [
-                [r[0][0], r[1][0], r[2][0]],
-                [r[0][1], r[1][1], r[2][1]],
-                [r[0][2], r[1][2], r[2][2]],
-            ];
-
-            // Compute -R^T * t
-            let t_inv = [
-                -(r_inv[0][0] * t[0] + r_inv[0][1] * t[1] + r_inv[0][2] * t[2]),
-                -(r_inv[1][0] * t[0] + r_inv[1][1] * t[1] + r_inv[1][2] * t[2]),
-                -(r_inv[2][0] * t[0] + r_inv[2][1] * t[1] + r_inv[2][2] * t[2]),
-            ];
-
-            // Construct the inverse transformation matrix
-            let mut inv_mat = [[0.0f64; 4]; 4];
-
-            // Copy rotation transpose
-            for i in 0..3 {
-                for j in 0..3 {
-                    inv_mat[i][j] = r_inv[i][j];
-                }
-            }
-
-            // Copy translation part
-            inv_mat[0][3] = t_inv[0];
-            inv_mat[1][3] = t_inv[1];
-            inv_mat[2][3] = t_inv[2];
-
-            // Keep the homogeneous coordinate the same
-            inv_mat[3][3] = 1.0;
-
-            Self { mat: inv_mat }
-        }
-    }
-}
+impl_transform_inverse!(f32, 0.0f32, 1.0f32, F32);
+impl_transform_inverse!(f64, 0.0f64, 1.0f64, F64);
 
 #[cfg(feature = "faer")]
 mod faer_integration {
@@ -736,6 +594,27 @@ pub use faer_integration::*;
 mod tests {
     use super::*;
 
+    fn assert_matrix_close<const N: usize, T: Copy + Into<f64>>(
+        lhs: [[T; N]; N],
+        rhs: [[T; N]; N],
+        eps: f64,
+    ) {
+        for i in 0..N {
+            for j in 0..N {
+                let lhs = lhs[i][j].into();
+                let rhs = rhs[i][j].into();
+                assert!(
+                    (lhs - rhs).abs() <= eps,
+                    "Element at [{},{}] differs: {} vs expected {}",
+                    i,
+                    j,
+                    lhs,
+                    rhs
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_pose_default() {
         let pose: Transform3D<f32> = Transform3D::default();
@@ -790,18 +669,7 @@ mod tests {
         let epsilon = 1e-5;
         let inv_mat = inverse.to_matrix();
         let exp_mat = expected_inverse.to_matrix();
-        for i in 0..4 {
-            for j in 0..4 {
-                assert!(
-                    (inv_mat[i][j] - exp_mat[i][j]).abs() < epsilon,
-                    "Element at [{},{}] differs: {} vs expected {}",
-                    i,
-                    j,
-                    inv_mat[i][j],
-                    exp_mat[i][j]
-                );
-            }
-        }
+        assert_matrix_close(inv_mat, exp_mat, epsilon);
     }
 
     #[test]
@@ -829,18 +697,7 @@ mod tests {
         let epsilon = 1e-10;
         let inv_mat = inverse.to_matrix();
         let exp_mat = expected_inverse.to_matrix();
-        for i in 0..4 {
-            for j in 0..4 {
-                assert!(
-                    (inv_mat[i][j] - exp_mat[i][j]).abs() < epsilon,
-                    "Element at [{},{}] differs: {} vs expected {}",
-                    i,
-                    j,
-                    inv_mat[i][j],
-                    exp_mat[i][j]
-                );
-            }
-        }
+        assert_matrix_close(inv_mat, exp_mat, epsilon);
     }
 
     #[test]
@@ -860,18 +717,7 @@ mod tests {
         let epsilon = 1e-5;
         let inv_mat = inverse.to_matrix();
         let id_mat = identity.to_matrix();
-        for i in 0..4 {
-            for j in 0..4 {
-                assert!(
-                    (inv_mat[i][j] - id_mat[i][j]).abs() < epsilon,
-                    "Element at [{},{}] differs: {} vs expected {}",
-                    i,
-                    j,
-                    inv_mat[i][j],
-                    id_mat[i][j]
-                );
-            }
-        }
+        assert_matrix_close(inv_mat, id_mat, epsilon);
     }
 
     #[test]
@@ -906,18 +752,7 @@ mod tests {
         let epsilon = 1e-5;
         let res_mat = result.to_matrix();
         let exp_mat = expected.to_matrix();
-        for i in 0..4 {
-            for j in 0..4 {
-                assert!(
-                    (res_mat[i][j] - exp_mat[i][j]).abs() < epsilon,
-                    "Element at [{},{}] differs: {} vs expected {}",
-                    i,
-                    j,
-                    res_mat[i][j],
-                    exp_mat[i][j]
-                );
-            }
-        }
+        assert_matrix_close(res_mat, exp_mat, epsilon);
     }
 
     #[test]
@@ -952,18 +787,7 @@ mod tests {
         let epsilon = 1e-10;
         let res_mat = result.to_matrix();
         let exp_mat = expected.to_matrix();
-        for i in 0..4 {
-            for j in 0..4 {
-                assert!(
-                    (res_mat[i][j] - exp_mat[i][j]).abs() < epsilon,
-                    "Element at [{},{}] differs: {} vs expected {}",
-                    i,
-                    j,
-                    res_mat[i][j],
-                    exp_mat[i][j]
-                );
-            }
-        }
+        assert_matrix_close(res_mat, exp_mat, epsilon);
     }
 
     #[test]
@@ -998,18 +822,7 @@ mod tests {
         let epsilon = 1e-5;
         let res_mat = result.to_matrix();
         let exp_mat = expected.to_matrix();
-        for i in 0..4 {
-            for j in 0..4 {
-                assert!(
-                    (res_mat[i][j] - exp_mat[i][j]).abs() < epsilon,
-                    "Element at [{},{}] differs: {} vs expected {}",
-                    i,
-                    j,
-                    res_mat[i][j],
-                    exp_mat[i][j]
-                );
-            }
-        }
+        assert_matrix_close(res_mat, exp_mat, epsilon);
     }
 
     #[cfg(feature = "faer")]
@@ -1117,38 +930,5 @@ mod tests {
         assert_eq!(mat_transposed.w_axis.x, 5.0);
         assert_eq!(mat_transposed.w_axis.y, 6.0);
         assert_eq!(mat_transposed.w_axis.z, 7.0);
-    }
-
-    #[test]
-    fn test_transform3d_cast() {
-        // Create a Transform3D<f32> with some test values
-        let transform_f32 = Transform3D::<f32>::from_matrix([
-            [1.0, 0.5, 0.25, 2.5],
-            [0.75, 1.0, 0.125, 3.25],
-            [0.375, 0.625, 1.0, 4.125],
-            [0.0, 0.0, 0.0, 1.0],
-        ]);
-
-        // Cast to f64
-        let transform_f64 = transform_f32.cast();
-
-        // Verify the cast preserves the values
-        let mat_f32 = transform_f32.to_matrix();
-        let mat_f64 = transform_f64.to_matrix();
-
-        let epsilon = 1e-10;
-        for i in 0..4 {
-            for j in 0..4 {
-                let expected = mat_f32[i][j] as f64;
-                assert!(
-                    (mat_f64[i][j] - expected).abs() < epsilon,
-                    "Element at [{},{}] differs: {} vs expected {}",
-                    i,
-                    j,
-                    mat_f64[i][j],
-                    expected
-                );
-            }
-        }
     }
 }

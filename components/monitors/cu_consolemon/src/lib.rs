@@ -9,6 +9,8 @@ use color_eyre::config::HookBuilder;
 use compact_str::{CompactString, ToCompactString};
 use cu29::clock::{CuDuration, RobotClock};
 use cu29::config::CuConfig;
+use cu29::config::Flavor;
+use cu29::curuntime::{CuExecutionUnit, compute_runtime_plan};
 use cu29::cutask::CuMsgMetadata;
 use cu29::monitoring::{
     ComponentKind, CopperListInfo, CopperListIoStats, CuDurationStatistics, CuMonitor, CuTaskState,
@@ -16,11 +18,18 @@ use cu29::monitoring::{
 };
 use cu29::prelude::{CuCompactString, CuTime, pool};
 use cu29::{CuError, CuResult};
+use cu29_log::CuLogLevel;
+#[cfg(debug_assertions)]
+use cu29_log_runtime::{
+    format_message_only, register_live_log_listener, unregister_live_log_listener,
+};
 #[cfg(feature = "debug_pane")]
-use debug_pane::UIExt;
+use debug_pane::{StyledLine, StyledRun, UIExt};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
-use ratatui::crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode};
+use ratatui::crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, MouseButton, MouseEventKind,
+};
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -45,6 +54,9 @@ use std::time::{Duration, Instant};
 use std::{collections::HashMap, io, thread};
 use tui_widgets::scrollview::{ScrollView, ScrollViewState};
 
+#[cfg(feature = "debug_pane")]
+use arboard::Clipboard;
+
 #[derive(Clone, Copy)]
 struct TabDef {
     screen: Screen,
@@ -52,7 +64,30 @@ struct TabDef {
     key: &'static str,
 }
 
-#[cfg(feature = "debug_pane")]
+#[derive(Clone, Copy)]
+struct TabHitbox {
+    screen: Screen,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+}
+
+#[derive(Clone, Copy)]
+enum HelpAction {
+    ResetLatency,
+    Quit,
+}
+
+#[derive(Clone, Copy)]
+struct HelpHitbox {
+    action: HelpAction,
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16,
+}
+
 const TAB_DEFS: &[TabDef] = &[
     TabDef {
         screen: Screen::Neofetch,
@@ -79,39 +114,11 @@ const TAB_DEFS: &[TabDef] = &[
         label: "MEM",
         key: "5",
     },
+    #[cfg(feature = "debug_pane")]
     TabDef {
         screen: Screen::DebugOutput,
         label: "LOG",
         key: "6",
-    },
-];
-
-#[cfg(not(feature = "debug_pane"))]
-const TAB_DEFS: &[TabDef] = &[
-    TabDef {
-        screen: Screen::Neofetch,
-        label: "SYS",
-        key: "1",
-    },
-    TabDef {
-        screen: Screen::Dag,
-        label: "DAG",
-        key: "2",
-    },
-    TabDef {
-        screen: Screen::Latency,
-        label: "LAT",
-        key: "3",
-    },
-    TabDef {
-        screen: Screen::CopperList,
-        label: "BW",
-        key: "4",
-    },
-    TabDef {
-        screen: Screen::MemoryPools,
-        label: "MEM",
-        key: "5",
     },
 ];
 
@@ -126,6 +133,302 @@ enum Screen {
     CopperList,
     #[cfg(feature = "debug_pane")]
     DebugOutput,
+}
+
+#[cfg(feature = "debug_pane")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SelectionPoint {
+    row: usize,
+    col: usize,
+}
+
+#[cfg(feature = "debug_pane")]
+#[derive(Clone, Copy, Debug, Default)]
+struct DebugSelection {
+    anchor: Option<SelectionPoint>,
+    cursor: Option<SelectionPoint>,
+}
+
+#[cfg(feature = "debug_pane")]
+impl DebugSelection {
+    fn clear(&mut self) {
+        self.anchor = None;
+        self.cursor = None;
+    }
+
+    fn start(&mut self, point: SelectionPoint) {
+        self.anchor = Some(point);
+        self.cursor = Some(point);
+    }
+
+    fn update(&mut self, point: SelectionPoint) {
+        if self.anchor.is_some() {
+            self.cursor = Some(point);
+        }
+    }
+
+    fn range(&self) -> Option<(SelectionPoint, SelectionPoint)> {
+        let anchor = self.anchor?;
+        let cursor = self.cursor?;
+        if (anchor.row, anchor.col) <= (cursor.row, cursor.col) {
+            Some((anchor, cursor))
+        } else {
+            Some((cursor, anchor))
+        }
+    }
+}
+
+fn segment_width(key: &str, label: &str) -> u16 {
+    (6 + key.chars().count() + label.chars().count()) as u16
+}
+
+fn mouse_inside(mouse: &event::MouseEvent, x: u16, y: u16, width: u16, height: u16) -> bool {
+    mouse.column >= x && mouse.column < x + width && mouse.row >= y && mouse.row < y + height
+}
+
+#[cfg(feature = "debug_pane")]
+fn char_to_byte_index(text: &str, char_idx: usize) -> usize {
+    text.char_indices()
+        .nth(char_idx)
+        .map(|(idx, _)| idx)
+        .unwrap_or(text.len())
+}
+
+#[cfg(feature = "debug_pane")]
+fn slice_char_range(text: &str, start: usize, end: usize) -> (&str, &str, &str) {
+    let start_idx = char_to_byte_index(text, start);
+    let end_idx = char_to_byte_index(text, end);
+    let start_idx = start_idx.min(text.len());
+    let end_idx = end_idx.min(text.len());
+    let (start_idx, end_idx) = if start_idx <= end_idx {
+        (start_idx, end_idx)
+    } else {
+        (end_idx, start_idx)
+    };
+    (
+        &text[..start_idx],
+        &text[start_idx..end_idx],
+        &text[end_idx..],
+    )
+}
+
+#[cfg(feature = "debug_pane")]
+fn line_selection_bounds(
+    line_index: usize,
+    line_len: usize,
+    start: SelectionPoint,
+    end: SelectionPoint,
+) -> Option<(usize, usize)> {
+    if line_index < start.row || line_index > end.row {
+        return None;
+    }
+
+    let start_col = if line_index == start.row {
+        start.col
+    } else {
+        0
+    };
+    let mut end_col = if line_index == end.row {
+        end.col
+    } else {
+        line_len
+    };
+    if line_index == end.row {
+        end_col = end_col.saturating_add(1).min(line_len);
+    }
+    let start_col = start_col.min(line_len);
+    let end_col = end_col.min(line_len);
+    if start_col >= end_col {
+        return None;
+    }
+
+    Some((start_col, end_col))
+}
+
+#[cfg(feature = "debug_pane")]
+fn slice_chars_owned(text: &str, start: usize, end: usize) -> String {
+    let start_idx = char_to_byte_index(text, start);
+    let end_idx = char_to_byte_index(text, end);
+    text[start_idx.min(text.len())..end_idx.min(text.len())].to_string()
+}
+
+#[cfg(feature = "debug_pane")]
+fn spans_from_runs(line: &StyledLine) -> Vec<Span<'static>> {
+    if line.runs.is_empty() {
+        return vec![Span::raw(line.text.clone())];
+    }
+
+    let mut spans = Vec::new();
+    let mut cursor = 0usize;
+    let total_chars = line.text.chars().count();
+    let mut runs = line.runs.clone();
+    runs.sort_by_key(|r| r.start);
+
+    for run in runs {
+        let start = run.start.min(total_chars);
+        let end = run.end.min(total_chars);
+        if start > cursor {
+            let before = slice_chars_owned(&line.text, cursor, start);
+            if !before.is_empty() {
+                spans.push(Span::raw(before));
+            }
+        }
+        if end > start {
+            let segment = slice_chars_owned(&line.text, start, end);
+            spans.push(Span::styled(segment, run.style));
+        }
+        cursor = cursor.max(end);
+    }
+
+    if cursor < total_chars {
+        let tail = slice_chars_owned(&line.text, cursor, total_chars);
+        if !tail.is_empty() {
+            spans.push(Span::raw(tail));
+        }
+    }
+
+    spans
+}
+
+#[cfg(feature = "debug_pane")]
+fn color_for_level(level: CuLogLevel) -> Color {
+    match level {
+        CuLogLevel::Debug => Color::Green,
+        CuLogLevel::Info => Color::Gray,
+        CuLogLevel::Warning => Color::Yellow,
+        CuLogLevel::Error => Color::Red,
+        CuLogLevel::Critical => Color::Red,
+    }
+}
+
+#[cfg(feature = "debug_pane")]
+fn format_ts(time: CuTime) -> String {
+    let nanos = time.as_nanos();
+    let total_ms = nanos / 1_000_000;
+    let millis = total_ms % 1000;
+    let total_s = total_ms / 1000;
+    let secs = total_s % 60;
+    let mins = (total_s / 60) % 60;
+    let hours = (total_s / 3600) % 24;
+    format!("{hours:02}:{mins:02}:{secs:02}.{millis:03}")
+}
+
+#[cfg(feature = "debug_pane")]
+fn build_message_with_runs(
+    format_str: &str,
+    params: &[String],
+    named_params: &HashMap<String, String>,
+) -> (String, Vec<(usize, usize)>) {
+    let mut out = String::new();
+    let mut param_spans = Vec::new();
+    let mut anon_iter = params.iter();
+    let mut iter = format_str.char_indices().peekable();
+    while let Some((idx, ch)) = iter.next() {
+        if ch == '{' {
+            let start_idx = idx + ch.len_utf8();
+            if let Some(end) = format_str[start_idx..].find('}') {
+                let end_idx = start_idx + end;
+                let placeholder = &format_str[start_idx..end_idx];
+                let replacement_opt = if placeholder.is_empty() {
+                    anon_iter.next()
+                } else {
+                    named_params.get(placeholder)
+                };
+                if let Some(repl) = replacement_opt {
+                    let span_start = out.chars().count();
+                    out.push_str(repl);
+                    let span_end = out.chars().count();
+                    param_spans.push((span_start, span_end));
+                    let skip_to = end_idx + '}'.len_utf8();
+                    while let Some((next_idx, _)) = iter.peek().copied() {
+                        if next_idx < skip_to {
+                            iter.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
+        out.push(ch);
+    }
+    (out, param_spans)
+}
+
+#[cfg(feature = "debug_pane")]
+fn styled_line_from_structured(
+    time: CuTime,
+    level: CuLogLevel,
+    format_str: &str,
+    params: &[String],
+    named_params: &HashMap<String, String>,
+) -> StyledLine {
+    let ts = format_ts(time);
+    let level_txt = format!("[{:?}]", level);
+
+    let (msg_text, param_spans) = build_message_with_runs(format_str, params, named_params);
+    let mut msg_runs = Vec::new();
+    let mut cursor = 0usize;
+    let param_spans_sorted = {
+        let mut v = param_spans;
+        v.sort_by_key(|p| p.0);
+        v
+    };
+    for (start, end) in param_spans_sorted {
+        if start > cursor {
+            msg_runs.push(StyledRun {
+                start: cursor,
+                end: start,
+                style: Style::default().fg(Color::Gray),
+            });
+        }
+        msg_runs.push(StyledRun {
+            start,
+            end,
+            style: Style::default().fg(Color::Magenta),
+        });
+        cursor = end;
+    }
+    if cursor < msg_text.chars().count() {
+        msg_runs.push(StyledRun {
+            start: cursor,
+            end: msg_text.chars().count(),
+            style: Style::default().fg(Color::Gray),
+        });
+    }
+
+    let prefix = format!("{ts} {level_txt} ");
+    let prefix_len = prefix.chars().count();
+    let line_text = format!("{prefix}{msg_text}");
+
+    let mut runs = Vec::new();
+    let ts_len = ts.chars().count();
+    let level_start = ts_len + 1;
+    let level_end = level_start + level_txt.chars().count();
+
+    runs.push(StyledRun {
+        start: 0,
+        end: ts_len,
+        style: Style::default().fg(Color::Blue),
+    });
+    runs.push(StyledRun {
+        start: level_start,
+        end: level_end,
+        style: Style::default().fg(color_for_level(level)).bold(),
+    });
+    for run in msg_runs {
+        runs.push(StyledRun {
+            start: prefix_len + run.start,
+            end: prefix_len + run.end,
+            style: run.style,
+        });
+    }
+
+    StyledLine {
+        text: line_text,
+        runs,
+    }
 }
 
 struct TaskStats {
@@ -168,7 +471,6 @@ struct PoolStats {
     handles_in_use: usize,
     handles_per_second: usize,
     last_update: Instant,
-    prev_handles_in_use: usize,
 }
 
 impl PoolStats {
@@ -186,7 +488,6 @@ impl PoolStats {
             handles_in_use: total_size - space_left,
             handles_per_second: 0,
             last_update: Instant::now(),
-            prev_handles_in_use: 0,
         }
     }
 
@@ -198,7 +499,6 @@ impl PoolStats {
         if elapsed >= 1.0 {
             self.handles_per_second =
                 ((handles_in_use.abs_diff(self.handles_in_use)) as f32 / elapsed) as usize;
-            self.prev_handles_in_use = self.handles_in_use;
             self.last_update = now;
         }
 
@@ -241,7 +541,6 @@ impl CopperListStats {
 
     fn set_info(&mut self, info: CopperListInfo) {
         self.size_bytes = info.size_bytes;
-        let _ = info.count;
     }
 
     fn update_io(&mut self, stats: cu29::monitoring::CopperListIoStats) {
@@ -428,11 +727,6 @@ impl NodesScrollableWidgetState {
         let mut display_nodes: Vec<DisplayNode> = Vec::new();
         let mut status_index_map = Vec::new();
         let mut node_lookup = HashMap::new();
-        let task_index_lookup: HashMap<&str, usize> = task_ids
-            .iter()
-            .enumerate()
-            .map(|(i, id)| (*id, i))
-            .collect();
 
         for node in topology.nodes.iter() {
             let node_type = match node.kind {
@@ -463,7 +757,7 @@ impl NodesScrollableWidgetState {
             node_lookup.insert(node.id.clone(), idx);
 
             let status_idx = match node.kind {
-                ComponentKind::Task => task_index_lookup.get(node.id.as_str()).cloned(),
+                ComponentKind::Task => task_ids.iter().position(|id| *id == node.id.as_str()),
                 ComponentKind::Bridge => None,
             };
             status_index_map.push(status_idx);
@@ -641,6 +935,7 @@ const NODE_WIDTH_CONTENT: u16 = NODE_WIDTH - 2;
 const NODE_HEIGHT: u16 = 5;
 const NODE_META_LINES: usize = 2;
 const NODE_PORT_ROW_OFFSET: usize = NODE_META_LINES;
+const MAX_CULIST_MAP: usize = 512;
 
 fn clip_tail(value: &str, max_chars: usize) -> String {
     if max_chars == 0 {
@@ -758,6 +1053,7 @@ pub struct CuConsoleMon {
     taskids: &'static [&'static str],
     task_stats: Arc<Mutex<TaskStats>>,
     task_statuses: Arc<Mutex<Vec<TaskStatus>>>,
+    culist_to_task: [usize; MAX_CULIST_MAP],
     ui_handle: Option<JoinHandle<()>>,
     pool_stats: Arc<Mutex<Vec<PoolStats>>>,
     copperlist_stats: Arc<Mutex<CopperListStats>>,
@@ -781,11 +1077,23 @@ struct UI {
     sysinfo: String,
     task_stats: Arc<Mutex<TaskStats>>,
     quitting: Arc<AtomicBool>,
+    tab_hitboxes: Vec<TabHitbox>,
+    help_hitboxes: Vec<HelpHitbox>,
     nodes_scrollable_widget_state: NodesScrollableWidgetState,
     #[cfg(feature = "debug_pane")]
-    error_redirect: gag::BufferRedirect,
+    error_redirect: Option<gag::BufferRedirect>,
     #[cfg(feature = "debug_pane")]
     debug_output: Option<debug_pane::DebugLog>,
+    #[cfg(feature = "debug_pane")]
+    debug_output_area: Option<Rect>,
+    #[cfg(feature = "debug_pane")]
+    debug_output_visible_offset: usize,
+    #[cfg(feature = "debug_pane")]
+    debug_output_lines: Vec<debug_pane::StyledLine>,
+    #[cfg(feature = "debug_pane")]
+    debug_selection: DebugSelection,
+    #[cfg(feature = "debug_pane")]
+    clipboard: Option<Clipboard>,
     pool_stats: Arc<Mutex<Vec<PoolStats>>>,
     copperlist_stats: Arc<Mutex<CopperListStats>>,
 }
@@ -800,7 +1108,7 @@ impl UI {
         task_stats: Arc<Mutex<TaskStats>>,
         task_statuses: Arc<Mutex<Vec<TaskStatus>>>,
         quitting: Arc<AtomicBool>,
-        error_redirect: gag::BufferRedirect,
+        error_redirect: Option<gag::BufferRedirect>,
         debug_output: Option<debug_pane::DebugLog>,
         pool_stats: Arc<Mutex<Vec<PoolStats>>>,
         copperlist_stats: Arc<Mutex<CopperListStats>>,
@@ -821,9 +1129,16 @@ impl UI {
             sysinfo: sysinfo::pfetch_info(),
             task_stats,
             quitting,
+            tab_hitboxes: Vec::new(),
+            help_hitboxes: Vec::new(),
             nodes_scrollable_widget_state,
             error_redirect,
             debug_output,
+            debug_output_area: None,
+            debug_output_visible_offset: 0,
+            debug_output_lines: Vec::new(),
+            debug_selection: DebugSelection::default(),
+            clipboard: None,
             pool_stats,
             copperlist_stats,
         }
@@ -855,6 +1170,8 @@ impl UI {
             sysinfo: sysinfo::pfetch_info(),
             task_stats,
             quitting,
+            tab_hitboxes: Vec::new(),
+            help_hitboxes: Vec::new(),
             nodes_scrollable_widget_state,
             pool_stats,
             copperlist_stats,
@@ -1251,7 +1568,7 @@ impl UI {
         )
     }
 
-    fn render_tabs(&self, f: &mut Frame, area: Rect) {
+    fn render_tabs(&mut self, f: &mut Frame, area: Rect) {
         let base_bg = Color::Rgb(16, 18, 20);
         let active_bg = Color::Rgb(56, 110, 120);
         let inactive_bg = Color::Rgb(40, 44, 52);
@@ -1260,7 +1577,10 @@ impl UI {
         let key_fg = Color::Rgb(255, 208, 128);
 
         let mut spans = Vec::new();
+        self.tab_hitboxes.clear();
+        let mut cursor_x = area.x;
         spans.push(Span::styled(" ", Style::default().bg(base_bg)));
+        cursor_x = cursor_x.saturating_add(1);
 
         for tab in TAB_DEFS {
             let is_active = self.active_screen == tab.screen;
@@ -1271,6 +1591,15 @@ impl UI {
             } else {
                 Style::default().fg(fg).bg(bg)
             };
+            let tab_width = segment_width(tab.key, tab.label);
+            self.tab_hitboxes.push(TabHitbox {
+                screen: tab.screen,
+                x: cursor_x,
+                y: area.y,
+                width: tab_width,
+                height: area.height,
+            });
+            cursor_x = cursor_x.saturating_add(tab_width);
 
             spans.push(Span::styled("", Style::default().fg(bg).bg(base_bg)));
             spans.push(Span::styled(" ", Style::default().bg(bg)));
@@ -1298,13 +1627,16 @@ impl UI {
         f.render_widget(tabs, area);
     }
 
-    fn render_help(&self, f: &mut Frame, area: Rect) {
+    fn render_help(&mut self, f: &mut Frame, area: Rect) {
         let base_bg = Color::Rgb(18, 16, 22);
         let key_fg = Color::Rgb(248, 231, 176);
         let text_fg = Color::Rgb(236, 236, 236);
 
         let mut spans = Vec::new();
+        self.help_hitboxes.clear();
+        let mut cursor_x = area.x;
         spans.push(Span::styled(" ", Style::default().bg(base_bg)));
+        cursor_x = cursor_x.saturating_add(1);
 
         let tab_hint = if cfg!(feature = "debug_pane") {
             "1-6"
@@ -1320,6 +1652,23 @@ impl UI {
         ];
 
         for (key, label, bg) in segments {
+            let segment_len = segment_width(key, label);
+            let action = match key {
+                "r" => Some(HelpAction::ResetLatency),
+                "q" => Some(HelpAction::Quit),
+                _ => None,
+            };
+            if let Some(action) = action {
+                self.help_hitboxes.push(HelpHitbox {
+                    action,
+                    x: cursor_x,
+                    y: area.y,
+                    width: segment_len,
+                    height: area.height,
+                });
+            }
+            cursor_x = cursor_x.saturating_add(segment_len);
+
             spans.push(Span::styled("", Style::default().fg(bg).bg(base_bg)));
             spans.push(Span::styled(" ", Style::default().bg(bg)));
             spans.push(Span::styled(
@@ -1385,6 +1734,233 @@ impl UI {
             #[cfg(feature = "debug_pane")]
             Screen::DebugOutput => self.draw_debug_output(f, layout[1]),
         };
+    }
+
+    fn handle_tab_click(&mut self, mouse: event::MouseEvent) {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+
+        for hitbox in &self.tab_hitboxes {
+            if mouse_inside(&mouse, hitbox.x, hitbox.y, hitbox.width, hitbox.height) {
+                self.active_screen = hitbox.screen;
+                break;
+            }
+        }
+    }
+
+    fn handle_help_click(&mut self, mouse: event::MouseEvent) -> bool {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return false;
+        }
+
+        for hitbox in &self.help_hitboxes {
+            if !mouse_inside(&mouse, hitbox.x, hitbox.y, hitbox.width, hitbox.height) {
+                continue;
+            }
+
+            match hitbox.action {
+                HelpAction::ResetLatency => {
+                    if self.active_screen == Screen::Latency {
+                        self.task_stats.lock().unwrap().reset();
+                    }
+                }
+                HelpAction::Quit => {
+                    self.quitting.store(true, Ordering::SeqCst);
+                }
+            }
+            return true;
+        }
+
+        false
+    }
+
+    fn handle_scroll_mouse(&mut self, mouse: event::MouseEvent) {
+        if self.active_screen != Screen::Dag {
+            return;
+        }
+
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                self.nodes_scrollable_widget_state
+                    .nodes_scrollable_state
+                    .scroll_down();
+            }
+            MouseEventKind::ScrollUp => {
+                self.nodes_scrollable_widget_state
+                    .nodes_scrollable_state
+                    .scroll_up();
+            }
+            MouseEventKind::ScrollRight => {
+                for _ in 0..5 {
+                    self.nodes_scrollable_widget_state
+                        .nodes_scrollable_state
+                        .scroll_right();
+                }
+            }
+            MouseEventKind::ScrollLeft => {
+                for _ in 0..5 {
+                    self.nodes_scrollable_widget_state
+                        .nodes_scrollable_state
+                        .scroll_left();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[cfg(feature = "debug_pane")]
+    fn handle_mouse_event(&mut self, mouse: event::MouseEvent) {
+        self.handle_tab_click(mouse);
+        if self.handle_help_click(mouse) {
+            return;
+        }
+        self.handle_scroll_mouse(mouse);
+
+        if self.active_screen != Screen::DebugOutput {
+            return;
+        }
+
+        let Some(area) = self.debug_output_area else {
+            return;
+        };
+
+        if !mouse_inside(&mouse, area.x, area.y, area.width, area.height) {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                self.debug_selection.clear();
+            }
+            return;
+        }
+
+        let rel_row = (mouse.row - area.y) as usize;
+        let rel_col = (mouse.column - area.x) as usize;
+        let line_index = self.debug_output_visible_offset.saturating_add(rel_row);
+        let Some(line) = self.debug_output_lines.get(line_index) else {
+            return;
+        };
+        let line_len = line.text.chars().count();
+        let point = SelectionPoint {
+            row: line_index,
+            col: rel_col.min(line_len),
+        };
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.debug_selection.start(point);
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                self.debug_selection.update(point);
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.debug_selection.update(point);
+                if let Some(text) = self.selected_debug_text() {
+                    self.copy_debug_text(text);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[cfg(not(feature = "debug_pane"))]
+    fn handle_mouse_event(&mut self, mouse: event::MouseEvent) {
+        self.handle_tab_click(mouse);
+        let _ = self.handle_help_click(mouse);
+        self.handle_scroll_mouse(mouse);
+    }
+
+    #[cfg(feature = "debug_pane")]
+    fn selected_debug_text(&self) -> Option<String> {
+        let (start, end) = self.debug_selection.range()?;
+        if start == end {
+            return None;
+        }
+        if self.debug_output_lines.is_empty() {
+            return None;
+        }
+        if start.row >= self.debug_output_lines.len() || end.row >= self.debug_output_lines.len() {
+            return None;
+        }
+
+        let mut selected = Vec::new();
+        for row in start.row..=end.row {
+            let line = &self.debug_output_lines[row];
+            let line_len = line.text.chars().count();
+            let Some((start_col, end_col)) = line_selection_bounds(row, line_len, start, end)
+            else {
+                selected.push(String::new());
+                continue;
+            };
+            let (_, selected_part, _) = slice_char_range(&line.text, start_col, end_col);
+            selected.push(selected_part.to_string());
+        }
+        Some(selected.join("\n"))
+    }
+
+    #[cfg(feature = "debug_pane")]
+    fn copy_debug_text(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+
+        if self.clipboard.is_none() {
+            match Clipboard::new() {
+                Ok(clipboard) => self.clipboard = Some(clipboard),
+                Err(err) => {
+                    eprintln!("CuConsoleMon clipboard init failed: {err}");
+                    return;
+                }
+            }
+        }
+
+        if let Some(clipboard) = self.clipboard.as_mut()
+            && let Err(err) = clipboard.set_text(text)
+        {
+            eprintln!("CuConsoleMon clipboard copy failed: {err}");
+        }
+    }
+
+    #[cfg(feature = "debug_pane")]
+    fn build_debug_output_text(&self, area: Rect) -> Text<'_> {
+        let mut rendered_lines = Vec::new();
+        let selection = self
+            .debug_selection
+            .range()
+            .filter(|(start, end)| start != end);
+        let selection_style = Style::default().bg(Color::Blue).fg(Color::Black);
+        let visible = self
+            .debug_output_lines
+            .iter()
+            .skip(self.debug_output_visible_offset)
+            .take(area.height as usize);
+
+        for (idx, line) in visible.enumerate() {
+            let line_index = self.debug_output_visible_offset + idx;
+            let spans = if let Some((start, end)) = selection {
+                let line_len = line.text.chars().count();
+                if let Some((start_col, end_col)) =
+                    line_selection_bounds(line_index, line_len, start, end)
+                {
+                    let (before, selected, after) =
+                        slice_char_range(&line.text, start_col, end_col);
+                    let mut spans = Vec::new();
+                    if !before.is_empty() {
+                        spans.push(Span::raw(before.to_string()));
+                    }
+                    spans.push(Span::styled(selected.to_string(), selection_style));
+                    if !after.is_empty() {
+                        spans.push(Span::raw(after.to_string()));
+                    }
+                    spans
+                } else {
+                    spans_from_runs(line)
+                }
+            } else {
+                spans_from_runs(line)
+            };
+            rendered_lines.push(Line::from(spans));
+        }
+
+        Text::from(rendered_lines)
     }
 
     fn run_app<B: Backend<Error = io::Error>>(
@@ -1456,11 +2032,15 @@ impl UI {
                             }
                         }
                         KeyCode::Char('q') => {
+                            self.quitting.store(true, Ordering::SeqCst);
                             break;
                         }
                         _ => {}
                     },
 
+                    Event::Mouse(mouse) => {
+                        self.handle_mouse_event(mouse);
+                    }
                     Event::Resize(_columns, rows) => {
                         self.nodes_scrollable_widget_state.mark_graph_dirty();
                         #[cfg(not(feature = "debug_pane"))]
@@ -1483,6 +2063,10 @@ impl CuMonitor for CuConsoleMon {
     where
         Self: Sized,
     {
+        let mut culist_to_task = [usize::MAX; MAX_CULIST_MAP];
+        if let Ok(map) = build_culist_to_task_index(config, taskids) {
+            culist_to_task = map;
+        }
         let task_stats = Arc::new(Mutex::new(TaskStats::new(
             taskids.len(),
             CuDuration::from(Duration::from_secs(5)),
@@ -1493,6 +2077,7 @@ impl CuMonitor for CuConsoleMon {
             taskids,
             task_stats,
             task_statuses: Arc::new(Mutex::new(vec![TaskStatus::default(); taskids.len()])),
+            culist_to_task,
             ui_handle: None,
             quitting: Arc::new(AtomicBool::new(false)),
             pool_stats: Arc::new(Mutex::new(Vec::new())),
@@ -1516,6 +2101,14 @@ impl CuMonitor for CuConsoleMon {
 
     fn start(&mut self, _clock: &RobotClock) -> CuResult<()> {
         if !should_start_ui() {
+            #[cfg(debug_assertions)]
+            {
+                register_live_log_listener(|entry, format_str, param_names| {
+                    if let Some(line) = format_headless_log_line(entry, format_str, param_names) {
+                        println!("{line}");
+                    }
+                });
+            }
             return Ok(());
         }
 
@@ -1550,7 +2143,15 @@ impl CuMonitor for CuConsoleMon {
             #[cfg(feature = "debug_pane")]
             {
                 // redirect stderr, so it doesn't pop in the terminal
-                let error_redirect = gag::BufferRedirect::stderr().unwrap();
+                let error_redirect = match gag::BufferRedirect::stderr() {
+                    Ok(redirect) => Some(redirect),
+                    Err(err) => {
+                        eprintln!(
+                            "Failed to redirect stderr for debug pane; continuing without redirect: {err}"
+                        );
+                        None
+                    }
+                };
 
                 let mut ui = UI::new(
                     config_dup,
@@ -1566,52 +2167,50 @@ impl CuMonitor for CuConsoleMon {
                     topology.clone(),
                 );
 
-                // Override the cu29-log-runtime Log Subscriber using the new live listener API
                 #[cfg(debug_assertions)]
                 {
                     let max_lines = terminal.size().unwrap().height - 5;
-                    let (debug_log, tx) = debug_pane::DebugLog::new(max_lines);
+                    let (mut debug_log, tx) = debug_pane::DebugLog::new(max_lines);
 
-                    // Register the live log listener instead of using EXTRA_TEXT_LOGGER
-                    cu29_log_runtime::register_live_log_listener(move |entry, format_str, param_names| {
-                        use cu29::prelude::CuLogLevel;
-                        // Build a text line from structured data
-                        let params: Vec<String> = entry.params.iter().map(|v| v.to_string()).collect();
-                        let named_params: std::collections::HashMap<String, String> = param_names
-                            .iter()
-                            .zip(params.iter())
-                            .map(|(name, value)| (name.to_string(), value.clone()))
-                            .collect();
-                        if let Ok(line) = cu29_log_runtime::format_message_only(format_str, params.as_slice(), &named_params) {
-                            let level = match entry.level {
-                                CuLogLevel::Debug => "DEBUG",
-                                CuLogLevel::Info => "INFO",
-                                CuLogLevel::Warning => "WARN",
-                                CuLogLevel::Error => "ERROR",
-                                CuLogLevel::Critical => "CRITICAL",
-                            };
-                            let message = format!(
-                                "{} [{}] - {}\n",
-                                chrono::Local::now().time().format("%H:%M:%S"),
-                                level,
-                                line
+                    cu29_log_runtime::register_live_log_listener(
+                        move |entry, format_str, param_names| {
+                            // Rebuild line from structured data, then push to bounded channel.
+                            let params: Vec<String> =
+                                entry.params.iter().map(|v| v.to_string()).collect();
+                            let named_params: HashMap<String, String> = param_names
+                                .iter()
+                                .zip(params.iter())
+                                .map(|(name, value)| (name.to_string(), value.clone()))
+                                .collect();
+                            let line = styled_line_from_structured(
+                                entry.time,
+                                entry.level,
+                                format_str,
+                                params.as_slice(),
+                                &named_params,
                             );
-                            let _ = tx.send(message);
-                        }
-                    });
+                            // Non-blocking: drop log if the bounded channel is full to avoid stalling the runtime.
+                            match tx.try_send(line) {
+                                Ok(_) => {}
+                                Err(std::sync::mpsc::TrySendError::Full(_)) => {}
+                                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                                    // Receiver dropped; nothing else we can do.
+                                }
+                            }
+                        },
+                    );
 
-                    // Set up the terminal again, as there might be some logs which in the console before updating the listener
-                    if let Err(err) = setup_terminal() {
-                        eprintln!("Failed to reinitialize terminal after log redirect: {err}");
-                    }
-
+                    // Drain any pending from the channel into the UI buffer once to size it.
+                    debug_log.update_logs();
                     ui.debug_output = Some(debug_log);
                 }
                 if let Err(err) = ui.run_app(&mut terminal) {
                     let _ = restore_terminal();
                     eprintln!("CuConsoleMon UI exited with error: {err}");
+                    cu29_log_runtime::unregister_live_log_listener();
                     return;
                 }
+                cu29_log_runtime::unregister_live_log_listener();
             }
 
             #[cfg(not(feature = "debug_pane"))]
@@ -1623,7 +2222,7 @@ impl CuMonitor for CuConsoleMon {
                     taskids,
                     task_stats_ui,
                     error_states,
-                    quitting,
+                    quitting.clone(),
                     pool_stats_ui,
                     copperlist_stats_ui,
                     topology,
@@ -1659,7 +2258,12 @@ impl CuMonitor for CuConsoleMon {
             let mut task_statuses = self.task_statuses.lock().unwrap();
             for (i, msg) in msgs.iter().enumerate() {
                 let CuCompactString(status_txt) = &msg.status_txt;
-                task_statuses[i].status_txt = status_txt.clone();
+                if let Some(&task_idx) = self.culist_to_task.get(i)
+                    && task_idx != usize::MAX
+                    && task_idx < task_statuses.len()
+                {
+                    task_statuses[task_idx].status_txt = status_txt.clone();
+                }
             }
         }
 
@@ -1708,6 +2312,11 @@ impl CuMonitor for CuConsoleMon {
             let _ = handle.join();
         }
 
+        #[cfg(debug_assertions)]
+        if !should_start_ui() {
+            unregister_live_log_listener();
+        }
+
         self.task_stats
             .lock()
             .unwrap()
@@ -1724,6 +2333,36 @@ impl Drop for TerminalRestoreGuard {
     fn drop(&mut self) {
         let _ = restore_terminal();
     }
+}
+
+fn build_culist_to_task_index(
+    config: &CuConfig,
+    task_ids: &'static [&'static str],
+) -> CuResult<[usize; MAX_CULIST_MAP]> {
+    let graph = config.get_graph(None)?;
+    let plan = compute_runtime_plan(graph)?;
+
+    let mut mapping = [usize::MAX; MAX_CULIST_MAP];
+
+    for unit in &plan.steps {
+        if let CuExecutionUnit::Step(step) = unit
+            && let Some(output_pack) = &step.output_msg_pack
+        {
+            if step.node.get_flavor() != Flavor::Task {
+                continue;
+            }
+            let node_id = step.node.get_id();
+            let culist_idx = output_pack.culist_index as usize;
+            if culist_idx >= MAX_CULIST_MAP {
+                continue;
+            }
+            if let Some(task_idx) = task_ids.iter().position(|id| *id == node_id.as_str()) {
+                mapping[culist_idx] = task_idx;
+            }
+        }
+    }
+
+    Ok(mapping)
 }
 
 fn init_error_hooks() {
@@ -1755,6 +2394,7 @@ fn init_error_hooks() {
 
 fn setup_terminal() -> io::Result<()> {
     enable_raw_mode()?;
+    // Enable mouse capture for in-app log selection.
     execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
     Ok(())
 }
@@ -1762,6 +2402,39 @@ fn setup_terminal() -> io::Result<()> {
 fn restore_terminal() -> io::Result<()> {
     execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
     disable_raw_mode()
+}
+
+#[cfg(debug_assertions)]
+fn format_timestamp(time: CuDuration) -> String {
+    // Render CuTime/CuDuration as HH:mm:ss.xxxx (4 fractional digits of a second).
+    let nanos = time.as_nanos();
+    let total_seconds = nanos / 1_000_000_000;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds / 60) % 60;
+    let seconds = total_seconds % 60;
+    let fractional_1e4 = (nanos % 1_000_000_000) / 100_000;
+    format!("{hours:02}:{minutes:02}:{seconds:02}.{fractional_1e4:04}")
+}
+
+#[cfg(debug_assertions)]
+fn format_headless_log_line(
+    entry: &cu29_log::CuLogEntry,
+    format_str: &str,
+    param_names: &[&str],
+) -> Option<String> {
+    let params: Vec<String> = entry.params.iter().map(|v| v.to_string()).collect();
+    let named: HashMap<String, String> = param_names
+        .iter()
+        .zip(params.iter())
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect();
+
+    format_message_only(format_str, params.as_slice(), &named)
+        .ok()
+        .map(|msg| {
+            let ts = format_timestamp(entry.time);
+            format!("{} [{:?}] {}", ts, entry.level, msg)
+        })
 }
 
 fn should_start_ui() -> bool {

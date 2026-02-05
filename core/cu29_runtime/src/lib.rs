@@ -7,6 +7,8 @@ extern crate alloc;
 pub use paste::paste as __cu29_paste;
 
 pub mod app;
+#[cfg(feature = "std")]
+mod app_sim;
 pub mod config;
 pub mod copperlist;
 #[cfg(feature = "std")]
@@ -14,6 +16,8 @@ pub mod cuasynctask; // no no-std version yet
 pub mod cubridge;
 pub mod curuntime;
 pub mod cutask;
+#[cfg(feature = "std")]
+pub mod debug;
 pub(crate) mod log;
 pub mod monitoring;
 pub mod payload;

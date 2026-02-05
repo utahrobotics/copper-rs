@@ -13,15 +13,6 @@ homepage.workspace = true
 repository.workspace = true
 
 publish = false
-[package.metadata.cargo-machete]
-ignored = [
-  "cu29-log",
-  "cu29-log-runtime",
-  "cu29-unifiedlog",
-  "cu-consolemon",
-  "copper-traits",
-] # proc macro and console
-
 [[bin]]
 name = "cu-dorabench"
 path = "src/main.rs"
@@ -32,7 +23,6 @@ path = "src/logreader.rs"
 
 [dependencies]
 bincode = { workspace = true }
-# cu29 = { workspace = true, features = ["macro_debug"] } # needed for cargo cubuild
 cu29 = { workspace = true }
 cu29-helpers = { workspace = true }
 cu29-export = { workspace = true, features = ["python", "mcap"] }

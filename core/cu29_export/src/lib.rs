@@ -435,7 +435,6 @@ fn read_next_entry<T: Decode<()>>(src: &mut impl Read) -> Option<T> {
         Ok(entry) => Some(entry),
         Err(DecodeError::UnexpectedEnd { .. }) => None,
         Err(DecodeError::Io { inner, additional }) => {
-            println!("Do your saved copperlists match your schema (copperconfig)?");
             if inner.kind() == std::io::ErrorKind::UnexpectedEof {
                 None
             } else {
@@ -445,7 +444,6 @@ fn read_next_entry<T: Decode<()>>(src: &mut impl Read) -> Option<T> {
         }
         Err(e) => {
             println!("Error {e:?}");
-            println!("Do your saved copperlists match your schema (copperconfig)?");
             None
         }
     }

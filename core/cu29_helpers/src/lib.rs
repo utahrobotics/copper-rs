@@ -8,7 +8,6 @@ use cu29_runtime::curuntime::CopperContext;
 use cu29_traits::{CuError, CuResult, UnifiedLogType, with_cause};
 use cu29_unifiedlog::{UnifiedLogger, UnifiedLoggerBuilder, stream_write};
 use simplelog::TermLogger;
-use simplelog::{ColorChoice, Config, LevelFilter, TerminalMode};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -55,17 +54,7 @@ pub fn basic_copper_setup(
         4096 * 10,
     )?;
 
-    let extra: Option<TermLogger> = if _text_log {
-        let slow_text_logger = TermLogger::new(
-            LevelFilter::Debug,
-            Config::default(),
-            TerminalMode::Mixed,
-            ColorChoice::Auto,
-        );
-        Some(*slow_text_logger)
-    } else {
-        None
-    };
+    let extra: Option<TermLogger> = None;
 
     let clock = clock.unwrap_or_default();
     let structured_logging = LoggerRuntime::init(clock.clone(), structured_stream, extra);

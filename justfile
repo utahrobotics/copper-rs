@@ -16,18 +16,18 @@ lint:
 
 # Formatting check only
 fmt-check: check-format-tools
-	cargo +stable fmt --all -- --check
-	git ls-files -z '*.toml' | xargs -0 taplo format --check
-	git ls-files -z '*.ron' ':!examples/modular_config_example/motors.ron' | xargs -0 -n 1 ronfmt
-	rg --files -g '*.ron.bak' | xargs rm -f
-	git diff --exit-code -- '*.ron'
+	@cargo +stable fmt --all -- --check
+	@git ls-files -z '*.toml' | xargs -0 -r env RUST_LOG=warn taplo format --check
+	@git ls-files -z '*.ron' ':!examples/modular_config_example/motors.ron' | xargs -0 -r -n 1 fmtron --input
+	@rg --files -g '*.ron.bak' | xargs rm -f
+	@git diff --exit-code -- '*.ron'
 
 # Apply formatting to Rust, TOML, and RON files
 fmt: check-format-tools
-	cargo +stable fmt --all
-	git ls-files -z '*.toml' | xargs -0 taplo format
-	git ls-files -z '*.ron' ':!examples/modular_config_example/motors.ron' | xargs -0 -n 1 ronfmt
-	rg --files -g '*.ron.bak' | xargs rm -f
+	@cargo +stable fmt --all
+	@git ls-files -z '*.toml' | xargs -0 -r env RUST_LOG=warn taplo format >/dev/null
+	@git ls-files -z '*.ron' ':!examples/modular_config_example/motors.ron' | xargs -0 -r -n 1 fmtron --input>/dev/null
+	@rg --files -g '*.ron.bak' | xargs rm -f
 
 # Ensure the formatters needed by fmt/fmt-check are installed.
 check-format-tools:
@@ -39,8 +39,8 @@ check-format-tools:
 		echo "Missing taplo (taplo-cli). Install with: cargo install --locked taplo-cli"
 		missing=1
 	fi
-	if ! command -v ronfmt >/dev/null 2>&1; then
-		echo "Missing ronfmt. Install with: cargo install --locked ronfmt"
+	if ! command -v fmtron >/dev/null 2>&1; then
+		echo "Missing fmtron. Install with: cargo install --locked fmtron"
 		missing=1
 	fi
 	if ! command -v rg > /dev/null 2>&1; then
@@ -68,7 +68,8 @@ nostd-ci: lint
 	cargo +stable nextest run --no-default-features
 	python3 support/ci/embedded_crates.py run --action clippy
 	python3 support/ci/embedded_crates.py run --action build
-	cd examples/cu_rp2350_skeleton && cargo +stable clippy
+	cd examples/cu_rp2350_skeleton && cargo +stable clippy --target thumbv8m.main-none-eabihf --bin cu-blinky --features firmware
+	cd examples/cu_rp2350_skeleton && cargo +stable clippy --no-default-features --features host --bins --target={{host_target}}
 	cd examples/cu_rp2350_skeleton && cargo +stable build-arm
 	cd examples/cu_rp2350_skeleton && cargo +stable build --target={{host_target}} --no-default-features --features host --bin blinky-logreader
 
@@ -127,6 +128,34 @@ std-ci mode="debug": lint
 			cargo +stable build
 		)
 	fi
+
+# Proc-macro expansion helpers (cargo-expand).
+check-expand:
+	#!/usr/bin/env bash
+	set -euo pipefail
+
+	if ! cargo +stable expand --version >/dev/null 2>&1; then
+		echo "Missing cargo-expand. Install with: cargo install cargo-expand"
+		exit 1
+	fi
+
+# Inspect expanded output of cu29-deriva in the target
+expand-runtime pkg bin features="": check-expand
+	#!/usr/bin/env bash
+	# Usage: just expand-runtime pkg=<crate> bin=<bin> [features=feat1,feat2]
+	set -euo pipefail
+
+	features_flag=""
+	if [[ -n "{{features}}" ]]; then
+	    features_flag="--features {{features}}"
+	fi
+
+	cargo +stable expand -p "{{pkg}}" --bin "{{bin}}" $features_flag
+
+# expand macro of cu29-soa-derive test target
+expand-soa test="proctest": check-expand
+	# Usage: just expand-soa [test=proctest]
+	cargo +stable expand -p cu29-soa-derive --test "{{test}}"
 
 # Run RTSan on a single app (defaults to cu-caterpillar).
 # RTSan reports violations to stderr; tweak RTSAN_OPTIONS if you need to keep running.

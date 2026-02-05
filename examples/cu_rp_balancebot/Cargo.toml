@@ -13,18 +13,11 @@ default-run = "balancebot-sim"
 
 publish = false
 
-[package.metadata.cargo-machete]
-ignored = [
-  "cu-consolemon",
-  "cu29-log",
-  "cu29-log-runtime",
-  "cu29-unifiedlog",
-  "copper-traits",
-] # proc macro and console
+[package.metadata.cargo-shear]
+ignored = ["serde"]
 
 [dependencies]
 # Core dependencies
-# cu29 = { workspace = true, features = ["macro_debug"] }
 cu29 = { workspace = true }
 cu29-helpers = { workspace = true }
 serde = { workspace = true }
@@ -79,7 +72,6 @@ cached-path = { version = "0.10.0", features = [
   "progress-bar",
 ], optional = true }
 bevy_anti_alias = { version = "0.18.0", optional = true }
-bevy_utils = { version = "0.18.0", features = ["debug"] }
 
 [features]
 default = ["logreader", "sim"]

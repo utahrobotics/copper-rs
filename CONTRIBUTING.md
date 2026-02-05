@@ -54,6 +54,49 @@ The `just std-ci` command runs the same checks as CI, including:
 - Unit tests with cargo-nextest
 - Project generation tests (debug mode only)
 
+### Prek hooks (Recommended)
+
+To mirror the CI lint steps locally, you can install prek hooks that run formatting and typos checks on each commit.
+
+1. Install `prek`
+    ```bash
+    cargo binstall install prek
+    # or
+    cargo install install prek
+    ```
+2. Reinstall the git hooks if you previously executed `pre-commit install`
+    ```bash
+    prek install -f
+    ```
+
+3. Run once to verify:
+    ```bash
+    prek run --all-files
+    ```
+
+If you want to customize prek, please modify `.pre-commit-config.yaml`.
+
+### Proc-macro expansion (cargo expand)
+
+Prefer `cargo expand` when inspecting generated code from Copper proc-macros.
+Install it once with:
+
+```bash
+cargo install cargo-expand
+```
+
+Then use the root `justfile` helpers:
+
+```bash
+# Expand a crate that uses cu29_derive (provide your target)
+just expand-runtime pkg=<crate_name> bin=<bin_name> [features=<comma_separated_features>]
+
+# Expand the SoA derive tests (default target: proctest)
+just expand-soa
+```
+
+You can also run `cargo expand -p <crate> --bin <bin>` directly when preferred.
+
 ### Building the Project
 
 To build the project, navigate to the root directory and run:
@@ -96,6 +139,7 @@ cargo nextest run --workspace --all-targets --features mock,image,kornia,python,
     ```bash
     git checkout -b user/feat/description
     ```
+
 4. **Make Changes**: Implement your feature or fix the bug. Write clear and concise code.
 
 5. **Run Checks**: Before committing, ensure your code adheres to the project's standards. The easiest way is to run `just std-ci` which executes all CI checks. Alternatively, run individual checks:
@@ -117,24 +161,24 @@ cargo nextest run --workspace --all-targets --features mock,image,kornia,python,
 
 We keep our dependencies minimal and up-to-date.
 
-We use ```cargo-machete``` to identify and remove unused dependencies. Before submitting a PR, please run:
+We use ```cargo-shear``` to identify and remove unused dependencies. Before submitting a PR, please run:
 
-1. Install ```cargo-machete```
+1. Install ```cargo-shear```
 ```bash
-cargo install cargo-machete
+cargo install cargo-shear
 ```
 
-2. Run ```cargo-machete``` to find unused dependencies:
+2. Run ```cargo-shear``` to find unused dependencies:
 ```bash
-cargo machete --with-metadata
+cargo shear
 ```
 
 3. Handling False Positives
 
-```cargo-machete``` is not perfect. If it incorrectly flags a necessary dependency (e.g., required by a feature flag or build script), add it to the ignored list in the relevant Cargo.toml file:
+```cargo-shear``` is not perfect. If it incorrectly flags a necessary dependency (e.g., required by a feature flag or build script), add it to the ignored list in the relevant Cargo.toml file:
 
 ```toml
-[package.metadata.cargo-machete]
+[package.metadata.cargo-shear]
 # Explain *why* the dependency is needed despite not being directly used in code.
 # e.g. "Required for X feature" or "Used in build.rs"
 ignored = ["some-crate", "another-crate"]

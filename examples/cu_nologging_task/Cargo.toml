@@ -13,7 +13,6 @@ default-run = "nologging-tasks"
 
 publish = false
 [dependencies]
-# cu29 = { workspace = true, features = ["macro_debug"] }
 cu29 = { workspace = true }
 cu29-helpers = { workspace = true }
 serde = { workspace = true }                            # Keep
@@ -27,3 +26,6 @@ path = "src/main.rs"
 [[bin]]
 name = "logreader"
 path = "src/logreader.rs"
+
+[package.metadata.cargo-shear]
+ignored = ["serde"]

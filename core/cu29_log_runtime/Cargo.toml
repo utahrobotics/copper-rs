@@ -27,9 +27,9 @@ cu29-value = { workspace = true }
 [features]
 default = ["std"]
 std = [
-    "cu29-log/std",
-    "cu29-traits/std",
-    "cu29-clock/std",
-    "bincode/std",
-    "dep:strfmt",
+  "cu29-log/std",
+  "cu29-traits/std",
+  "cu29-clock/std",
+  "bincode/std",
+  "dep:strfmt",
 ]
