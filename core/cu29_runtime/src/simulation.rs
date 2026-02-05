@@ -142,7 +142,7 @@ pub enum CuTaskCallbackState<I, O> {
 }
 
 /// This is the answer the simulator can give to control the simulation flow.
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum SimOverride {
     /// The callback took care of the logic on the simulation side and the actual
     /// implementation needs to be skipped.

@@ -13,10 +13,6 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-<<<<<<<< HEAD:components/sources/cu_iceoryx2_src/Cargo.toml
-iceoryx2 = { version = "0.8.0" }
-========
->>>>>>>> 66c408a3fb7cf7a9063dcec449a017e6a570c2eb:examples/cu_multi_output/Cargo.toml
 cu29 = { workspace = true }
 cu29-helpers = { workspace = true }
 tempfile = { workspace = true }
