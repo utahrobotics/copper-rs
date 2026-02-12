@@ -3769,9 +3769,7 @@ fn generate_task_execution_tokens(
                     }
                     Decision::Ignore => {
                         debug!("Process: IGNORE decision from monitoring. Task '{}' errored out \
-                                during process. The runtime will continue with a forced empty message.", #mission_mod::TASKS_IDS[#tid]);
-                        let cumsg_output = &mut msgs.#output_culist_index;
-                        #output_clear_payload
+                                during process. The runtime will continue with any potential payload anyways.", #mission_mod::TASKS_IDS[#tid]);
                     }
                     Decision::Shutdown => {
                         debug!("Process: SHUTDOWN decision from monitoring. Task '{}' errored out \
