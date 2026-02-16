@@ -99,6 +99,34 @@ where
         })
     }
 
+    fn start(&mut self, clock: &RobotClock) -> CuResult<()> {
+        self.task
+            .lock()
+            .map_err(|_| CuError::from("Async task mutex poisoned in start"))?
+            .start(clock)
+    }
+
+    fn preprocess(&mut self, clock: &RobotClock) -> CuResult<()> {
+        self.task
+            .lock()
+            .map_err(|_| CuError::from("Async task mutex poisoned in preprocess"))?
+            .preprocess(clock)
+    }
+
+    fn postprocess(&mut self, clock: &RobotClock) -> CuResult<()> {
+        self.task
+            .lock()
+            .map_err(|_| CuError::from("Async task mutex poisoned in postprocess"))?
+            .postprocess(clock)
+    }
+
+    fn stop(&mut self, clock: &RobotClock) -> CuResult<()> {
+        self.task
+            .lock()
+            .map_err(|_| CuError::from("Async task mutex poisoned in stop"))?
+            .stop(clock)
+    }
+
     fn process<'i, 'o>(
         &mut self,
         clock: &RobotClock,
