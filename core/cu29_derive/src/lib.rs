@@ -4120,8 +4120,7 @@ fn generate_bridge_rx_execution_tokens(
                             return Ok(());
                         }
                         Decision::Ignore => {
-                            debug!("Process: IGNORE decision from monitoring. Task '{}' errored out during process. The runtime will continue with a forced empty message.", #mission_mod::TASKS_IDS[#monitor_index]);
-                            cumsg_output.clear_payload();
+                            debug!("Process: IGNORE decision from monitoring. Task '{}' errored out during process. The runtime will continue with any potential payload anyways.", #mission_mod::TASKS_IDS[#monitor_index]);
                             false
                         }
                         Decision::Shutdown => {
@@ -4166,8 +4165,7 @@ fn generate_bridge_rx_execution_tokens(
                                 return Ok(());
                             }
                             Decision::Ignore => {
-                                debug!("Process: IGNORE decision from monitoring. Task '{}' errored out during process. The runtime will continue with a forced empty message.", #mission_mod::TASKS_IDS[#monitor_index]);
-                                cumsg_output.clear_payload();
+                                debug!("Process: IGNORE decision from monitoring. Task '{}' errored out during process. The runtime will continue with any potential payload anyways.", #mission_mod::TASKS_IDS[#monitor_index]);
                             }
                             Decision::Shutdown => {
                                 debug!("Process: SHUTDOWN decision from monitoring. Task '{}' errored out during process. The runtime cannot continue.", #mission_mod::TASKS_IDS[#monitor_index]);
