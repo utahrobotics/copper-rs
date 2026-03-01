@@ -25,6 +25,7 @@ cu-spatial-payloads = { path = "../../payloads/cu_spatial_payloads", version = "
     "nalgebra",
 ] }
 cu-sensor-payloads = { path = "../../payloads/cu_sensor_payloads", version = "0.12.0" }
+ron.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 apriltag = { path = "../../../apriltag-rust/apriltag", optional = true }

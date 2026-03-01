@@ -164,6 +164,10 @@ clap = { version = "4.5", default-features = false, features = [
   "error-context",
 ] }
 
+
+ron = { version = "0.12", default-features = false }
+
+
 # External proc macros
 proc-macro2 = { version = "1.0" }
 quote = "1.0"                                  # proc macros

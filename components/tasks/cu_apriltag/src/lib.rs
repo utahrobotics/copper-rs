@@ -7,6 +7,9 @@ use std::mem::ManuallyDrop;
 use apriltag::{Detector, DetectorBuilder, Family, Image, TagParams};
 
 #[cfg(feature = "hardware")]
+mod distortion;
+
+#[cfg(feature = "hardware")]
 use apriltag_sys::image_u8_t;
 
 use bincode::de::Decoder;
@@ -18,6 +21,9 @@ use cu_spatial_payloads::EncodableIsometry;
 use cu_spatial_payloads::Pose as CuPose;
 use serde::ser::SerializeTuple;
 use serde::{Deserialize, Deserializer, Serialize};
+
+#[cfg(feature = "hardware")]
+use crate::distortion::{Rs2Distortion, Rs2Intrinsics};
 
 // the maximum number of detections that can be returned by the detector
 const MAX_DETECTIONS: usize = 16;
@@ -165,6 +171,7 @@ pub struct AprilTags {
     // Store configuration for detector creation
     family_str: String, // Store as string instead of Family enum
     bits_corrected: usize,
+    distortion: Option<Rs2Intrinsics>,
 }
 
 #[cfg(any(feature = "sim", feature = "resim"))]
@@ -291,10 +298,11 @@ impl CuTask for AprilTags {
         Self: Sized,
     {
         if let Some(config) = _config {
+            use crate::distortion::Rs2Intrinsics;
+
             let family_cfg = config
                 .get::<String>("family")?
                 .unwrap_or(FAMILY.to_string());
-            let family: Family = family_cfg.parse().unwrap();
             let bits_corrected: u32 = config.get::<u32>("bits_corrected")?.unwrap_or(1);
             let tagsize = config.get::<f64>("tag_size")?.unwrap_or(TAG_SIZE);
             let fx = config.get::<f64>("fx")?.unwrap_or(FX);
@@ -309,12 +317,20 @@ impl CuTask for AprilTags {
                 tagsize,
             };
             let camera_id = config.get("camera_id")?.expect("provide camera id");
-
+            let distortion_path = config.get::<String>("distortion_path")?;
             return Ok(Self {
                 tag_params,
                 camera_id: Box::new(camera_id),
                 family_str: family_cfg,
                 bits_corrected: bits_corrected as usize,
+                distortion: distortion_path.and_then(|path| {
+                    use crate::distortion::intrinsics_from_file;
+                    let intrinsics = intrinsics_from_file(&path);
+                    if let Err(ref e) = intrinsics {
+                        eprintln!("failed to load intrinsics: {}", e);
+                    };
+                    intrinsics.ok()
+                })
             });
         }
         Ok(Self {
@@ -328,6 +344,7 @@ impl CuTask for AprilTags {
             camera_id: Box::new("cam_front".to_string()),
             family_str: FAMILY.to_string(),
             bits_corrected: 1,
+            distortion: None,
         })
     }
 

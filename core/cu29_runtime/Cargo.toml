@@ -40,7 +40,7 @@ petgraph = { version = "0.8", default-features = false, features = [
   "serde_derive",
   "stable_graph",
 ] }
-ron = { version = "0.12", default-features = false }
+ron = { workspace = true, default-features = false }
 hashbrown = { workspace = true }
 paste = { workspace = true }
 layout = { package = "layout-rs", version = "0.1.3", optional = true }
