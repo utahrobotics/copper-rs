@@ -23,7 +23,7 @@ use serde::ser::SerializeTuple;
 use serde::{Deserialize, Deserializer, Serialize};
 
 #[cfg(feature = "hardware")]
-use crate::distortion::{Rs2Distortion, Rs2Intrinsics};
+use crate::distortion::Rs2Intrinsics;
 
 // the maximum number of detections that can be returned by the detector
 const MAX_DETECTIONS: usize = 16;
@@ -298,7 +298,6 @@ impl CuTask for AprilTags {
         Self: Sized,
     {
         if let Some(config) = _config {
-            use crate::distortion::Rs2Intrinsics;
 
             let family_cfg = config
                 .get::<String>("family")?
@@ -362,8 +361,26 @@ impl CuTask for AprilTags {
 
             let detections = self.with_detector(|detector| detector.detect(&image))?;
 
+            let pose_params = if self.distortion.is_some() {
+                TagParams {
+                    tagsize: self.tag_params.tagsize,
+                    fx: 1.0,
+                    fy: 1.0,
+                    cx: 0.0,
+                    cy: 0.0,
+                }
+            } else {
+                self.tag_params.clone()
+            };
+
             for detection in detections {
-                if let Some(aprilpose) = detection.estimate_tag_pose(&self.tag_params) {
+                if let Some(ref intr) = self.distortion {
+                    unsafe {
+                        distortion::undistort_detection(detection.as_mut_ptr(), intr);
+                    }
+                }
+
+                if let Some(aprilpose) = detection.estimate_tag_pose(&pose_params) {
                     use apriltag_nalgebra::PoseExt;
 
                     let pose_na = aprilpose.to_na();
@@ -456,5 +473,104 @@ mod tests {
             return Ok(());
         }
         Err(anyhow::anyhow!("No output"))
+    }
+
+    #[test]
+    #[cfg(feature = "hardware")]
+    fn test_fisheye_undistortion() -> Result<()> {
+        let reader =
+            ImageReader::open("tests/data/realsense2.png").context("Failed to open image")?;
+        let img = reader
+            .decode()
+            .context("Failed to decode image")?
+            .into_luma8();
+
+        let make_cuimage = |img: &ImageBuffer<Luma<u8>, Vec<u8>>| -> Result<CuImage<Vec<u8>>> {
+            let format = CuImageBufferFormat {
+                width: img.width(),
+                height: img.height(),
+                stride: img.width(),
+                pixel_format: "GRAY".as_bytes().try_into()?,
+            };
+            let buffer_handle = CuHandle::new_detached(img.as_raw().clone());
+            Ok(CuImage::new(format, buffer_handle))
+        };
+
+        // Run WITHOUT undistortion
+        let mut config_no_distortion = ComponentConfig::default();
+        config_no_distortion.set("tag_size", 0.162);
+        config_no_distortion.set("fx", 285.883);
+        config_no_distortion.set("fy", 286.195);
+        config_no_distortion.set("cx", 420.073);
+        config_no_distortion.set("cy", 403.880);
+        config_no_distortion.set("family", "tag36h11".to_string());
+        config_no_distortion.set("camera_id", "fisheye".to_string());
+
+        let mut task_no_dist = AprilTags::new(Some(&config_no_distortion), ())?;
+        let input_no_dist = CuMsg::<CuImage<Vec<u8>>>::new(Some(make_cuimage(&img)?));
+        let mut output_no_dist = CuMsg::<AprilTagDetections>::default();
+        let clock = RobotClock::new();
+        task_no_dist.process(&clock, &input_no_dist, &mut output_no_dist)?;
+
+        // Run WITH undistortion
+        let mut config_distortion = ComponentConfig::default();
+        config_distortion.set("tag_size", 0.162);
+        config_distortion.set("fx", 285.883);
+        config_distortion.set("fy", 286.195);
+        config_distortion.set("cx", 420.073);
+        config_distortion.set("cy", 403.880);
+        config_distortion.set("family", "tag36h11".to_string());
+        config_distortion.set("camera_id", "fisheye".to_string());
+        config_distortion.set(
+            "distortion_path",
+            "tests/data/realsense2_intrinsics.ron".to_string(),
+        );
+
+        let mut task_dist = AprilTags::new(Some(&config_distortion), ())?;
+        let input_dist = CuMsg::<CuImage<Vec<u8>>>::new(Some(make_cuimage(&img)?));
+        let mut output_dist = CuMsg::<AprilTagDetections>::default();
+        task_dist.process(&clock, &input_dist, &mut output_dist)?;
+
+        // Both should detect the same tag(s)
+        let det_no = output_no_dist
+            .payload()
+            .expect("Expected detections without undistortion");
+        let det_yes = output_dist
+            .payload()
+            .expect("Expected detections with undistortion");
+
+        assert_eq!(
+            det_no.ids.0.as_slice(),
+            det_yes.ids.0.as_slice(),
+            "Both runs should detect the same tag IDs"
+        );
+
+        // The poses should differ — proving undistortion actually changes the result
+        let CuArrayVec(poses_no) = &det_no.poses;
+        let CuArrayVec(poses_yes) = &det_yes.poses;
+
+
+        for (i, (pose_no, pose_yes)) in poses_no.iter().zip(poses_yes.iter()).enumerate() {
+            let t_no = &pose_no.inner[12..15];
+            let t_yes = &pose_yes.inner[12..15];
+
+            println!("Tag {} (id={}):", i, det_no.ids.0[i]);
+            println!("  Without undistortion: t=[{:.4}, {:.4}, {:.4}]", t_no[0], t_no[1], t_no[2]);
+            println!("  With    undistortion: t=[{:.4}, {:.4}, {:.4}]", t_yes[0], t_yes[1], t_yes[2]);
+
+            let diff = ((t_no[0] - t_yes[0]).powi(2)
+                + (t_no[1] - t_yes[1]).powi(2)
+                + (t_no[2] - t_yes[2]).powi(2))
+            .sqrt();
+            println!("  Translation difference: {:.6}", diff);
+
+            assert!(
+                diff > 1e-6,
+                "Poses should differ when undistortion is applied (tag id={})",
+                det_no.ids.0[i]
+            );
+        }
+
+        Ok(())
     }
 }

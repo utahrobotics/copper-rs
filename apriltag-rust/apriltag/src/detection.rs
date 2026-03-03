@@ -134,6 +134,14 @@ impl Detection {
         }
     }
 
+    /// Returns a raw mutable pointer to the underlying detection struct.
+    ///
+    /// The detection retains ownership. The caller must not deallocate or
+    /// outlive the `Detection`.
+    pub fn as_mut_ptr(&self) -> *mut sys::apriltag_detection_t {
+        self.ptr.as_ptr()
+    }
+
     /// Returns the underlying pointer.
     pub fn into_raw(self) -> NonNull<sys::apriltag_detection_t> {
         ManuallyDrop::new(self).ptr
