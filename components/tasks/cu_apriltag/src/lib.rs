@@ -373,17 +373,6 @@ impl CuTask for AprilTags {
                 self.tag_params.clone()
             };
 
-            /*
-            // shouldnt have that 17X roll, the robot isn't upsideown bruh
-            [cu_apriltag] tag_id=16 best_err=0.000001 alt_err=0.000071 ambiguity=0.012
-[cu_apriltag] tag_id=16 ACCEPTED undistorted=true t=[-0.0562, 0.0085, -0.6830] euler_deg=[-7.6, -22.2, -171.9]
-[april_handler] tag_id=16 cam=929122111514 CV_pose: t=[-0.0562, 0.0085, -0.6830] euler_deg=[-7.6, -22.2, -171.9]
-[april_handler] tag_id=16 cam=929122111514 physics_local: t=[-0.6830, 0.0562, -0.0085] euler_deg=[-172.5, -4.5, -23.0]
-[get_isometry] tag_id=16 cam=929122111514 camera_mount: t=[0.0000, 0.0000, 0.0000] euler_deg=[0.0, -0.0, 0.0]
-[get_isometry] tag_id=16 cam=929122111514 observer_in_world: t=[-0.0981, -1.1492, 0.6907] euler_deg=[174.8, -7.1, -112.4]
-[get_isometry] tag_id=16 cam=929122111514 FINAL robot_base: t=[-0.0981, -1.1492, 0.6907] euler_deg=[174.8, -7.1, -112.4]
-^CGStreamer [cam_laptop_front]: Pipeline stopped
-             */
             for detection in detections {
                 // --- DEBUG: raw detection corners before undistortion ---
                 println!(
@@ -448,13 +437,13 @@ impl CuTask for AprilTags {
                     let t = est.pose.translation();
                     let r_data = r.data();
                     let t_data = t.data();
-                    // Rotation matrix determinant (should be +1.0 for proper rotation)
                     let det_r = r_data[0] * (r_data[4] * r_data[8] - r_data[5] * r_data[7])
                               - r_data[1] * (r_data[3] * r_data[8] - r_data[5] * r_data[6])
                               + r_data[2] * (r_data[3] * r_data[7] - r_data[4] * r_data[6]);
                     println!(
-                        "[cu_apriltag][DEBUG] tag_id={} solution[{}] err={:.6}",
-                        detection.id(), si, est.error,
+                        "[cu_apriltag][DEBUG] tag_id={} solution[{}] err={:.6} t_z={:.6} {}",
+                        detection.id(), si, est.error, t_data[2],
+                        if t_data[2] < 0.0 { "*** BEHIND CAMERA ***" } else { "OK" },
                     );
                     println!(
                         "[cu_apriltag][DEBUG]   R = [{:.6}, {:.6}, {:.6}; {:.6}, {:.6}, {:.6}; {:.6}, {:.6}, {:.6}] det(R)={:.6}",
@@ -467,66 +456,102 @@ impl CuTask for AprilTags {
                         "[cu_apriltag][DEBUG]   t = [{:.6}, {:.6}, {:.6}]",
                         t_data[0], t_data[1], t_data[2],
                     );
-                    // Also show what R would look like with the Intel T265 Y/Z flip:
-                    // The C++ reference does: R->data[c] *= -1 for c in {1,2,4,5,7,8}
-                    // This negates columns 1 and 2 (Y and Z) of the rotation matrix.
-                    println!(
-                        "[cu_apriltag][DEBUG]   R_with_yz_flip = [{:.6}, {:.6}, {:.6}; {:.6}, {:.6}, {:.6}; {:.6}, {:.6}, {:.6}]",
-                        r_data[0], -r_data[1], -r_data[2],
-                        r_data[3], -r_data[4], -r_data[5],
-                        r_data[6], -r_data[7], -r_data[8],
-                    );
-                    let det_r_flipped = r_data[0] * ((-r_data[4]) * (-r_data[8]) - (-r_data[5]) * (-r_data[7]))
-                                      - (-r_data[1]) * (r_data[3] * (-r_data[8]) - (-r_data[5]) * r_data[6])
-                                      + (-r_data[2]) * (r_data[3] * (-r_data[7]) - (-r_data[4]) * r_data[6]);
-                    println!(
-                        "[cu_apriltag][DEBUG]   det(R_with_yz_flip)={:.6}",
-                        det_r_flipped,
-                    );
                 }
 
-                // Pick the solution with lower object-space error
-                let (best_idx, alt_idx) = if pose_estimations.len() == 2
-                    && pose_estimations[1].error < pose_estimations[0].error
-                {
-                    (1, Some(0))
-                } else {
-                    (0, if pose_estimations.len() == 2 { Some(1) } else { None })
-                };
+                // --- Filter solutions: tag must be in front of camera (t_z > 0) ---
+                // The orthogonal iteration can converge to a "behind the camera" mirror
+                // solution (negative Z). This is physically impossible for a detected tag.
+                // Among valid (positive Z) solutions, pick the one with lowest error.
+                let valid_solutions: Vec<(usize, f64)> = pose_estimations
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, est)| {
+                        let t_data = est.pose.translation().data().to_vec();
+                        t_data[2] > 0.0
+                    })
+                    .map(|(i, est)| (i, est.error))
+                    .collect();
 
-                let best_err = pose_estimations[best_idx].error;
-                let alt_err = alt_idx.map(|i| pose_estimations[i].error);
-
-                // Ambiguity ratio: 0 = unambiguous, 1 = totally ambiguous
-                let ambiguity_ratio = match alt_err {
-                    Some(worse_err) if worse_err > 0.0 => best_err / worse_err,
-                    _ => 0.0,
-                };
-
-                println!(
-                    "[cu_apriltag] tag_id={} best_err={:.6} alt_err={:.6} ambiguity={:.3}",
-                    detection.id(),
-                    best_err,
-                    alt_err.unwrap_or(f64::NAN),
-                    ambiguity_ratio,
-                );
-
-                // Reject ambiguous detections — the two PnP solutions are too similar
-                // to reliably distinguish, which causes the intermittent "flipped" pose.
-                // Threshold of 0.3: reject if best error is more than 30% of the alt error.
-                const AMBIGUITY_THRESHOLD: f64 = 0.3;
-                if ambiguity_ratio > AMBIGUITY_THRESHOLD {
+                // If all orthogonal iteration solutions have negative Z, fall back to
+                // the simpler estimate_tag_pose (homography SVD + single iteration).
+                // This matches what Intel's T265 reference code uses and handles
+                // chirality correctly.
+                let use_fallback = valid_solutions.is_empty();
+                let (chosen_pose_na, _best_err, _alt_err) = if use_fallback {
                     println!(
-                        "[cu_apriltag] REJECTING tag_id={} — ambiguity {:.3} > {:.3}",
+                        "[cu_apriltag][DEBUG] tag_id={} ALL ortho-iter solutions have t_z < 0! Falling back to estimate_tag_pose.",
                         detection.id(),
-                        ambiguity_ratio,
-                        AMBIGUITY_THRESHOLD,
                     );
-                    continue;
-                }
+                    match detection.estimate_tag_pose(&pose_params) {
+                        Some(pose) => {
+                            let t_data = pose.translation().data().to_vec();
+                            let err = 0.0; // estimate_tag_pose doesn't expose error
+                            println!(
+                                "[cu_apriltag][DEBUG] tag_id={} fallback t = [{:.6}, {:.6}, {:.6}]",
+                                detection.id(), t_data[0], t_data[1], t_data[2],
+                            );
+                            if t_data[2] < 0.0 {
+                                println!(
+                                    "[cu_apriltag][DEBUG] tag_id={} fallback ALSO has t_z < 0! Skipping.",
+                                    detection.id(),
+                                );
+                                continue;
+                            }
+                            use apriltag_nalgebra::PoseExt;
+                            (pose.to_na(), err, None)
+                        }
+                        None => {
+                            println!(
+                                "[cu_apriltag][DEBUG] tag_id={} fallback returned no pose. Skipping.",
+                                detection.id(),
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    // Among valid solutions, pick lowest error
+                    let &(best_idx, best_err) = valid_solutions
+                        .iter()
+                        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                        .unwrap();
+                    let alt_err = valid_solutions
+                        .iter()
+                        .filter(|&&(i, _)| i != best_idx)
+                        .map(|&(_, e)| e)
+                        .next();
 
-                use apriltag_nalgebra::PoseExt;
-                let pose_na = pose_estimations[best_idx].pose.to_na();
+                    // Ambiguity ratio: 0 = unambiguous, 1 = totally ambiguous
+                    let ambiguity_ratio = match alt_err {
+                        Some(worse_err) if worse_err > 0.0 => best_err / worse_err,
+                        _ => 0.0,
+                    };
+
+                    println!(
+                        "[cu_apriltag] tag_id={} best_err={:.6} alt_err={:.6} ambiguity={:.3}",
+                        detection.id(),
+                        best_err,
+                        alt_err.unwrap_or(f64::NAN),
+                        ambiguity_ratio,
+                    );
+
+                    // Reject ambiguous detections — the two PnP solutions are too similar
+                    // to reliably distinguish, which causes the intermittent "flipped" pose.
+                    const AMBIGUITY_THRESHOLD: f64 = 0.3;
+                    if ambiguity_ratio > AMBIGUITY_THRESHOLD {
+                        println!(
+                            "[cu_apriltag] REJECTING tag_id={} — ambiguity {:.3} > {:.3}",
+                            detection.id(),
+                            ambiguity_ratio,
+                            AMBIGUITY_THRESHOLD,
+                        );
+                        continue;
+                    }
+
+                    use apriltag_nalgebra::PoseExt;
+                    (pose_estimations[best_idx].pose.to_na(), best_err, alt_err)
+                };
+
+                let pose_na = chosen_pose_na;
 
                 // --- DEBUG: nalgebra isometry (as converted by to_na) ---
                 let rot_matrix = pose_na.rotation.to_rotation_matrix();
@@ -550,29 +575,20 @@ impl CuTask for AprilTags {
 
                 let euler = pose_na.rotation.euler_angles();
                 println!(
-                    "[cu_apriltag][DEBUG] tag_id={} ACCEPTED undistorted={} t=[{:.4}, {:.4}, {:.4}] euler_deg=[{:.1}, {:.1}, {:.1}]",
+                    "[cu_apriltag][DEBUG] tag_id={} ACCEPTED undistorted={} fallback={} t=[{:.4}, {:.4}, {:.4}] euler_deg=[{:.1}, {:.1}, {:.1}]",
                     detection.id(),
                     self.distortion.is_some(),
+                    use_fallback,
                     pose_na.translation.x, pose_na.translation.y, pose_na.translation.z,
                     euler.0.to_degrees(), euler.1.to_degrees(), euler.2.to_degrees(),
                 );
 
-                // --- DEBUG: Check if the roll component is flipped (~180°) ---
-                // The Intel T265 C++ sample applies: R->data[c] *= -1 for c in {1,2,4,5,7,8}
-                // which negates columns 1 & 2 (Y and Z axes) of the rotation matrix.
-                // If your euler roll is near ±180° but the tag isn't actually upside-down,
-                // this sign flip is likely what's missing.
+                // Sanity check: roll should not be near ±180° for a right-side-up tag
                 let roll_deg = euler.2.to_degrees();
                 if roll_deg.abs() > 120.0 {
                     println!(
-                        "[cu_apriltag][DEBUG] *** WARNING: tag_id={} roll={:.1}° looks flipped! ***",
+                        "[cu_apriltag][DEBUG] *** WARNING: tag_id={} roll={:.1}° still looks flipped after Z-filter! ***",
                         detection.id(), roll_deg,
-                    );
-                    println!(
-                        "[cu_apriltag][DEBUG] *** The Intel T265 reference code negates R columns Y & Z after pose estimation. ***",
-                    );
-                    println!(
-                        "[cu_apriltag][DEBUG] *** This code does NOT apply that fix. This is likely the cause of upside-down poses. ***",
                     );
                 }
 
