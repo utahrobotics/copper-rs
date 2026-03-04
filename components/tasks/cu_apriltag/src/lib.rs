@@ -378,6 +378,7 @@ impl CuTask for AprilTags {
                     unsafe {
                         distortion::undistort_detection(detection.as_mut_ptr(), intr);
                     }
+                    println!("undistorting detection");
                 }
 
                 let pose_estimations =
@@ -430,21 +431,6 @@ impl CuTask for AprilTags {
                 use apriltag_nalgebra::PoseExt;
                 let mut pose_na = pose_estimations[best_idx].pose.to_na();
 
-                // When using fisheye undistortion, the apriltag pose estimator returns
-                // a rotation with flipped Y/Z axes. The reference C++ implementation
-                // (rs-pose-apriltag.cpp) corrects this by negating columns 2 and 3 of R:
-                //   R' = R * diag(1, -1, -1)
-                // which is equivalent to post-multiplying by a 180° rotation around X.
-                if self.distortion.is_some() {
-                    let flip = nalgebra::UnitQuaternion::from_axis_angle(
-                        &nalgebra::Vector3::<f64>::x_axis(),
-                        std::f64::consts::PI,
-                    );
-                    pose_na = nalgebra::Isometry3::from_parts(
-                        pose_na.translation,
-                        pose_na.rotation * flip,
-                    );
-                }
 
                 let euler = pose_na.rotation.euler_angles();
                 println!(
