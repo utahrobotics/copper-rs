@@ -380,19 +380,89 @@ impl CuTask for AprilTags {
                     }
                 }
 
-                if let Some(aprilpose) = detection.estimate_tag_pose(&pose_params) {
-                    use apriltag_nalgebra::PoseExt;
+                let pose_estimations =
+                    detection.estimate_tag_pose_orthogonal_iteration(&pose_params, 50);
 
-                    let pose_na = aprilpose.to_na();
-                    let encodable_pose = EncodableIsometry::from_na(&pose_na);
-
-                    let CuArrayVec(detections) = &mut result.poses;
-                    detections.push(encodable_pose);
-                    let CuArrayVec(decision_margin) = &mut result.decision_margins;
-                    decision_margin.push(detection.decision_margin());
-                    let CuArrayVec(ids) = &mut result.ids;
-                    ids.push(detection.id());
+                if pose_estimations.is_empty() {
+                    continue;
                 }
+
+                // Pick the solution with lower object-space error
+                let (best_idx, alt_idx) = if pose_estimations.len() == 2
+                    && pose_estimations[1].error < pose_estimations[0].error
+                {
+                    (1, Some(0))
+                } else {
+                    (0, if pose_estimations.len() == 2 { Some(1) } else { None })
+                };
+
+                let best_err = pose_estimations[best_idx].error;
+                let alt_err = alt_idx.map(|i| pose_estimations[i].error);
+
+                // Ambiguity ratio: 0 = unambiguous, 1 = totally ambiguous
+                let ambiguity_ratio = match alt_err {
+                    Some(worse_err) if worse_err > 0.0 => best_err / worse_err,
+                    _ => 0.0,
+                };
+
+                println!(
+                    "[cu_apriltag] tag_id={} best_err={:.6} alt_err={:.6} ambiguity={:.3}",
+                    detection.id(),
+                    best_err,
+                    alt_err.unwrap_or(f64::NAN),
+                    ambiguity_ratio,
+                );
+
+                // Reject ambiguous detections — the two PnP solutions are too similar
+                // to reliably distinguish, which causes the intermittent "flipped" pose.
+                // Threshold of 0.3: reject if best error is more than 30% of the alt error.
+                const AMBIGUITY_THRESHOLD: f64 = 0.3;
+                if ambiguity_ratio > AMBIGUITY_THRESHOLD {
+                    println!(
+                        "[cu_apriltag] REJECTING tag_id={} — ambiguity {:.3} > {:.3}",
+                        detection.id(),
+                        ambiguity_ratio,
+                        AMBIGUITY_THRESHOLD,
+                    );
+                    continue;
+                }
+
+                use apriltag_nalgebra::PoseExt;
+                let mut pose_na = pose_estimations[best_idx].pose.to_na();
+
+                // When using fisheye undistortion, the apriltag pose estimator returns
+                // a rotation with flipped Y/Z axes. The reference C++ implementation
+                // (rs-pose-apriltag.cpp) corrects this by negating columns 2 and 3 of R:
+                //   R' = R * diag(1, -1, -1)
+                // which is equivalent to post-multiplying by a 180° rotation around X.
+                if self.distortion.is_some() {
+                    let flip = nalgebra::UnitQuaternion::from_axis_angle(
+                        &nalgebra::Vector3::<f64>::x_axis(),
+                        std::f64::consts::PI,
+                    );
+                    pose_na = nalgebra::Isometry3::from_parts(
+                        pose_na.translation,
+                        pose_na.rotation * flip,
+                    );
+                }
+
+                let euler = pose_na.rotation.euler_angles();
+                println!(
+                    "[cu_apriltag] tag_id={} ACCEPTED undistorted={} t=[{:.4}, {:.4}, {:.4}] euler_deg=[{:.1}, {:.1}, {:.1}]",
+                    detection.id(),
+                    self.distortion.is_some(),
+                    pose_na.translation.x, pose_na.translation.y, pose_na.translation.z,
+                    euler.0.to_degrees(), euler.1.to_degrees(), euler.2.to_degrees(),
+                );
+
+                let encodable_pose = EncodableIsometry::from_na(&pose_na);
+
+                let CuArrayVec(detections) = &mut result.poses;
+                detections.push(encodable_pose);
+                let CuArrayVec(decision_margin) = &mut result.decision_margins;
+                decision_margin.push(detection.decision_margin());
+                let CuArrayVec(ids) = &mut result.ids;
+                ids.push(detection.id());
             }
         }
 
