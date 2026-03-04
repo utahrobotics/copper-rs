@@ -985,12 +985,17 @@ impl CuGraph {
 
     #[allow(dead_code)]
     pub fn get_node_output_msg_type(&self, node_id: &str) -> Option<String> {
+        self.get_node_output_msg_types(node_id)
+            .and_then(|mut v| if v.len() == 1 { v.pop() } else { None })
+    }
+
+    pub fn get_node_output_msg_types(&self, node_id: &str) -> Option<Vec<String>> {
         self.0.node_indices().find_map(|node_index| {
             if let Some(node) = self.0.node_weight(node_index) {
                 if node.id != node_id {
                     return None;
                 }
-                let edges: Vec<_> = self
+                let mut edges: Vec<_> = self
                     .0
                     .edges_directed(node_index, Outgoing)
                     .map(|edge| edge.id().index())
@@ -998,11 +1003,20 @@ impl CuGraph {
                 if edges.is_empty() {
                     return None;
                 }
-                let cnx = self
-                    .0
-                    .edge_weight(EdgeIndex::new(edges[0]))
-                    .expect("Found an cnx id but could not retrieve it back");
-                return Some(cnx.msg.clone());
+                edges.sort();
+                let mut msgs = Vec::new();
+                let mut seen = Vec::new();
+                for edge_id in edges {
+                    let cnx = self
+                        .0
+                        .edge_weight(EdgeIndex::new(edge_id))
+                        .expect("Found an cnx id but could not retrieve it back");
+                    if !seen.contains(&cnx.msg) {
+                        seen.push(cnx.msg.clone());
+                        msgs.push(cnx.msg.clone());
+                    }
+                }
+                return Some(msgs);
             }
             None
         })

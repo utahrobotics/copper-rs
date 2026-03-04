@@ -925,11 +925,17 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                         if *run_in_sim {
                             sim_type.clone()
                         } else {
-                            let msg_type = graph
-                                .get_node_output_msg_type(task_id.as_str())
+                            let msg_types = graph
+                                .get_node_output_msg_types(task_id.as_str())
                                 .unwrap_or_else(|| panic!("CuSrcTask {task_id} should have an outgoing connection with a valid output msg type"));
-                            let sim_task_name = format!("CuSimSrcTask<{msg_type}>");
-                            parse_str(sim_task_name.as_str()).unwrap_or_else(|_| panic!("Could not build the placeholder for simulation: {sim_task_name}"))
+                            if msg_types.len() == 1 {
+                                let sim_task_name = format!("CuSimSrcTask<{}>", msg_types[0]);
+                                parse_str(sim_task_name.as_str()).unwrap_or_else(|_| panic!("Could not build the placeholder for simulation: {sim_task_name}"))
+                            } else {
+                                // CuSimSrcTask only supports single-output sources.
+                                // For multi-output sources, use the actual task type.
+                                sim_type.clone()
+                            }
                         }
                     }
                     CuTaskType::Regular => {
@@ -3701,7 +3707,16 @@ fn generate_task_execution_tokens(
     let enum_name = Ident::new(&task_enum_name, Span::call_site());
     let rt_guard = rtsan_guard_tokens();
     let run_in_sim_flag = task_specs.run_in_sim_flags[tid];
-    let maybe_sim_tick = if sim_mode && !run_in_sim_flag {
+
+    let output_pack = step
+        .output_msg_pack
+        .as_ref()
+        .expect("Task should have an output message pack.");
+
+    // Only generate sim_tick for single-output source tasks using CuSimSrcTask.
+    // Multi-output sources use the actual task type which doesn't have sim_tick.
+    let is_sim_stub = !run_in_sim_flag && output_pack.msg_types.len() == 1;
+    let maybe_sim_tick = if sim_mode && is_sim_stub {
         quote! {
             if !doit {
                 #task_instance.sim_tick();
@@ -3710,11 +3725,6 @@ fn generate_task_execution_tokens(
     } else {
         quote!()
     };
-
-    let output_pack = step
-        .output_msg_pack
-        .as_ref()
-        .expect("Task should have an output message pack.");
     let output_culist_index = int2sliceindex(output_pack.culist_index);
     let output_ports: Vec<syn::Index> = (0..output_pack.msg_types.len())
         .map(syn::Index::from)
