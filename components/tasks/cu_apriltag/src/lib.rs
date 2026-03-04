@@ -373,19 +373,116 @@ impl CuTask for AprilTags {
                 self.tag_params.clone()
             };
 
+            /*
+            // shouldnt have that 17X roll, the robot isn't upsideown bruh
+            [cu_apriltag] tag_id=16 best_err=0.000001 alt_err=0.000071 ambiguity=0.012
+[cu_apriltag] tag_id=16 ACCEPTED undistorted=true t=[-0.0562, 0.0085, -0.6830] euler_deg=[-7.6, -22.2, -171.9]
+[april_handler] tag_id=16 cam=929122111514 CV_pose: t=[-0.0562, 0.0085, -0.6830] euler_deg=[-7.6, -22.2, -171.9]
+[april_handler] tag_id=16 cam=929122111514 physics_local: t=[-0.6830, 0.0562, -0.0085] euler_deg=[-172.5, -4.5, -23.0]
+[get_isometry] tag_id=16 cam=929122111514 camera_mount: t=[0.0000, 0.0000, 0.0000] euler_deg=[0.0, -0.0, 0.0]
+[get_isometry] tag_id=16 cam=929122111514 observer_in_world: t=[-0.0981, -1.1492, 0.6907] euler_deg=[174.8, -7.1, -112.4]
+[get_isometry] tag_id=16 cam=929122111514 FINAL robot_base: t=[-0.0981, -1.1492, 0.6907] euler_deg=[174.8, -7.1, -112.4]
+^CGStreamer [cam_laptop_front]: Pipeline stopped
+             */
             for detection in detections {
+                // --- DEBUG: raw detection corners before undistortion ---
+                println!(
+                    "[cu_apriltag][DEBUG] tag_id={} decision_margin={:.1} raw_center=[{:.2}, {:.2}]",
+                    detection.id(),
+                    detection.decision_margin(),
+                    detection.center()[0],
+                    detection.center()[1],
+                );
+                for (ci, corner) in detection.corners().iter().enumerate() {
+                    println!(
+                        "[cu_apriltag][DEBUG]   raw corner[{}] = [{:.4}, {:.4}]",
+                        ci, corner[0], corner[1],
+                    );
+                }
+
                 if let Some(ref intr) = self.distortion {
                     unsafe {
                         distortion::undistort_detection(detection.as_mut_ptr(), intr);
                     }
-                    println!("undistorting detection");
+                    // --- DEBUG: corners after undistortion ---
+                    println!("[cu_apriltag][DEBUG] AFTER undistortion (normalized coords, fl=1):");
+                    println!(
+                        "[cu_apriltag][DEBUG]   center=[{:.6}, {:.6}]",
+                        detection.center()[0],
+                        detection.center()[1],
+                    );
+                    for (ci, corner) in detection.corners().iter().enumerate() {
+                        println!(
+                            "[cu_apriltag][DEBUG]   undist corner[{}] = [{:.6}, {:.6}]",
+                            ci, corner[0], corner[1],
+                        );
+                    }
+                    // --- DEBUG: homography matrix ---
+                    let h = detection.homography();
+                    let h_data = h.data();
+                    println!(
+                        "[cu_apriltag][DEBUG]   H = [{:.6}, {:.6}, {:.6}; {:.6}, {:.6}, {:.6}; {:.6}, {:.6}, {:.6}]",
+                        h_data[0], h_data[1], h_data[2],
+                        h_data[3], h_data[4], h_data[5],
+                        h_data[6], h_data[7], h_data[8],
+                    );
                 }
+
+                // --- DEBUG: pose params being used ---
+                println!(
+                    "[cu_apriltag][DEBUG] pose_params: tagsize={} fx={} fy={} cx={} cy={}",
+                    pose_params.tagsize, pose_params.fx, pose_params.fy, pose_params.cx, pose_params.cy,
+                );
 
                 let pose_estimations =
                     detection.estimate_tag_pose_orthogonal_iteration(&pose_params, 50);
 
                 if pose_estimations.is_empty() {
+                    println!("[cu_apriltag][DEBUG] tag_id={} NO pose solutions!", detection.id());
                     continue;
+                }
+
+                // --- DEBUG: dump ALL raw pose solutions ---
+                for (si, est) in pose_estimations.iter().enumerate() {
+                    let r = est.pose.rotation();
+                    let t = est.pose.translation();
+                    let r_data = r.data();
+                    let t_data = t.data();
+                    // Rotation matrix determinant (should be +1.0 for proper rotation)
+                    let det_r = r_data[0] * (r_data[4] * r_data[8] - r_data[5] * r_data[7])
+                              - r_data[1] * (r_data[3] * r_data[8] - r_data[5] * r_data[6])
+                              + r_data[2] * (r_data[3] * r_data[7] - r_data[4] * r_data[6]);
+                    println!(
+                        "[cu_apriltag][DEBUG] tag_id={} solution[{}] err={:.6}",
+                        detection.id(), si, est.error,
+                    );
+                    println!(
+                        "[cu_apriltag][DEBUG]   R = [{:.6}, {:.6}, {:.6}; {:.6}, {:.6}, {:.6}; {:.6}, {:.6}, {:.6}] det(R)={:.6}",
+                        r_data[0], r_data[1], r_data[2],
+                        r_data[3], r_data[4], r_data[5],
+                        r_data[6], r_data[7], r_data[8],
+                        det_r,
+                    );
+                    println!(
+                        "[cu_apriltag][DEBUG]   t = [{:.6}, {:.6}, {:.6}]",
+                        t_data[0], t_data[1], t_data[2],
+                    );
+                    // Also show what R would look like with the Intel T265 Y/Z flip:
+                    // The C++ reference does: R->data[c] *= -1 for c in {1,2,4,5,7,8}
+                    // This negates columns 1 and 2 (Y and Z) of the rotation matrix.
+                    println!(
+                        "[cu_apriltag][DEBUG]   R_with_yz_flip = [{:.6}, {:.6}, {:.6}; {:.6}, {:.6}, {:.6}; {:.6}, {:.6}, {:.6}]",
+                        r_data[0], -r_data[1], -r_data[2],
+                        r_data[3], -r_data[4], -r_data[5],
+                        r_data[6], -r_data[7], -r_data[8],
+                    );
+                    let det_r_flipped = r_data[0] * ((-r_data[4]) * (-r_data[8]) - (-r_data[5]) * (-r_data[7]))
+                                      - (-r_data[1]) * (r_data[3] * (-r_data[8]) - (-r_data[5]) * r_data[6])
+                                      + (-r_data[2]) * (r_data[3] * (-r_data[7]) - (-r_data[4]) * r_data[6]);
+                    println!(
+                        "[cu_apriltag][DEBUG]   det(R_with_yz_flip)={:.6}",
+                        det_r_flipped,
+                    );
                 }
 
                 // Pick the solution with lower object-space error
@@ -429,17 +526,55 @@ impl CuTask for AprilTags {
                 }
 
                 use apriltag_nalgebra::PoseExt;
-                let mut pose_na = pose_estimations[best_idx].pose.to_na();
+                let pose_na = pose_estimations[best_idx].pose.to_na();
 
+                // --- DEBUG: nalgebra isometry (as converted by to_na) ---
+                let rot_matrix = pose_na.rotation.to_rotation_matrix();
+                let m = rot_matrix.matrix();
+                println!(
+                    "[cu_apriltag][DEBUG] tag_id={} to_na() rotation matrix:",
+                    detection.id(),
+                );
+                println!(
+                    "[cu_apriltag][DEBUG]   [{:.6}, {:.6}, {:.6}]",
+                    m[(0, 0)], m[(0, 1)], m[(0, 2)],
+                );
+                println!(
+                    "[cu_apriltag][DEBUG]   [{:.6}, {:.6}, {:.6}]",
+                    m[(1, 0)], m[(1, 1)], m[(1, 2)],
+                );
+                println!(
+                    "[cu_apriltag][DEBUG]   [{:.6}, {:.6}, {:.6}]",
+                    m[(2, 0)], m[(2, 1)], m[(2, 2)],
+                );
 
                 let euler = pose_na.rotation.euler_angles();
                 println!(
-                    "[cu_apriltag] tag_id={} ACCEPTED undistorted={} t=[{:.4}, {:.4}, {:.4}] euler_deg=[{:.1}, {:.1}, {:.1}]",
+                    "[cu_apriltag][DEBUG] tag_id={} ACCEPTED undistorted={} t=[{:.4}, {:.4}, {:.4}] euler_deg=[{:.1}, {:.1}, {:.1}]",
                     detection.id(),
                     self.distortion.is_some(),
                     pose_na.translation.x, pose_na.translation.y, pose_na.translation.z,
                     euler.0.to_degrees(), euler.1.to_degrees(), euler.2.to_degrees(),
                 );
+
+                // --- DEBUG: Check if the roll component is flipped (~180°) ---
+                // The Intel T265 C++ sample applies: R->data[c] *= -1 for c in {1,2,4,5,7,8}
+                // which negates columns 1 & 2 (Y and Z axes) of the rotation matrix.
+                // If your euler roll is near ±180° but the tag isn't actually upside-down,
+                // this sign flip is likely what's missing.
+                let roll_deg = euler.2.to_degrees();
+                if roll_deg.abs() > 120.0 {
+                    println!(
+                        "[cu_apriltag][DEBUG] *** WARNING: tag_id={} roll={:.1}° looks flipped! ***",
+                        detection.id(), roll_deg,
+                    );
+                    println!(
+                        "[cu_apriltag][DEBUG] *** The Intel T265 reference code negates R columns Y & Z after pose estimation. ***",
+                    );
+                    println!(
+                        "[cu_apriltag][DEBUG] *** This code does NOT apply that fix. This is likely the cause of upside-down poses. ***",
+                    );
+                }
 
                 let encodable_pose = EncodableIsometry::from_na(&pose_na);
 
