@@ -374,88 +374,19 @@ impl CuTask for AprilTags {
             };
 
             for detection in detections {
-                // --- DEBUG: raw detection corners before undistortion ---
-                println!(
-                    "[cu_apriltag][DEBUG] tag_id={} decision_margin={:.1} raw_center=[{:.2}, {:.2}]",
-                    detection.id(),
-                    detection.decision_margin(),
-                    detection.center()[0],
-                    detection.center()[1],
-                );
-                for (ci, corner) in detection.corners().iter().enumerate() {
-                    println!(
-                        "[cu_apriltag][DEBUG]   raw corner[{}] = [{:.4}, {:.4}]",
-                        ci, corner[0], corner[1],
-                    );
-                }
 
                 if let Some(ref intr) = self.distortion {
                     unsafe {
                         distortion::undistort_detection(detection.as_mut_ptr(), intr);
                     }
-                    // --- DEBUG: corners after undistortion ---
-                    println!("[cu_apriltag][DEBUG] AFTER undistortion (normalized coords, fl=1):");
-                    println!(
-                        "[cu_apriltag][DEBUG]   center=[{:.6}, {:.6}]",
-                        detection.center()[0],
-                        detection.center()[1],
-                    );
-                    for (ci, corner) in detection.corners().iter().enumerate() {
-                        println!(
-                            "[cu_apriltag][DEBUG]   undist corner[{}] = [{:.6}, {:.6}]",
-                            ci, corner[0], corner[1],
-                        );
-                    }
-                    // --- DEBUG: homography matrix ---
-                    let h = detection.homography();
-                    let h_data = h.data();
-                    println!(
-                        "[cu_apriltag][DEBUG]   H = [{:.6}, {:.6}, {:.6}; {:.6}, {:.6}, {:.6}; {:.6}, {:.6}, {:.6}]",
-                        h_data[0], h_data[1], h_data[2],
-                        h_data[3], h_data[4], h_data[5],
-                        h_data[6], h_data[7], h_data[8],
-                    );
                 }
-
-                // --- DEBUG: pose params being used ---
-                println!(
-                    "[cu_apriltag][DEBUG] pose_params: tagsize={} fx={} fy={} cx={} cy={}",
-                    pose_params.tagsize, pose_params.fx, pose_params.fy, pose_params.cx, pose_params.cy,
-                );
 
                 let pose_estimations =
                     detection.estimate_tag_pose_orthogonal_iteration(&pose_params, 50);
 
                 if pose_estimations.is_empty() {
-                    println!("[cu_apriltag][DEBUG] tag_id={} NO pose solutions!", detection.id());
+                    eprintln!("[cu_apriltag][DEBUG] tag_id={} NO pose solutions!", detection.id());
                     continue;
-                }
-
-                // --- DEBUG: dump ALL raw pose solutions ---
-                for (si, est) in pose_estimations.iter().enumerate() {
-                    let r = est.pose.rotation();
-                    let t = est.pose.translation();
-                    let r_data = r.data();
-                    let t_data = t.data();
-                    let det_r = r_data[0] * (r_data[4] * r_data[8] - r_data[5] * r_data[7])
-                              - r_data[1] * (r_data[3] * r_data[8] - r_data[5] * r_data[6])
-                              + r_data[2] * (r_data[3] * r_data[7] - r_data[4] * r_data[6]);
-                    println!(
-                        "[cu_apriltag][DEBUG] tag_id={} solution[{}] err={:.6} t_z={:.6} {}",
-                        detection.id(), si, est.error, t_data[2],
-                        if t_data[2] < 0.0 { "*** BEHIND CAMERA ***" } else { "OK" },
-                    );
-                    println!(
-                        "[cu_apriltag][DEBUG]   R = [{:.6}, {:.6}, {:.6}; {:.6}, {:.6}, {:.6}; {:.6}, {:.6}, {:.6}] det(R)={:.6}",
-                        r_data[0], r_data[1], r_data[2],
-                        r_data[3], r_data[4], r_data[5],
-                        r_data[6], r_data[7], r_data[8],
-                        det_r,
-                    );
-                    println!(
-                        "[cu_apriltag][DEBUG]   t = [{:.6}, {:.6}, {:.6}]",
-                        t_data[0], t_data[1], t_data[2],
-                    );
                 }
 
                 // Pick the solution with lower object-space error
@@ -476,19 +407,11 @@ impl CuTask for AprilTags {
                     _ => 0.0,
                 };
 
-                println!(
-                    "[cu_apriltag] tag_id={} best_err={:.6} alt_err={:.6} ambiguity={:.3}",
-                    detection.id(),
-                    best_err,
-                    alt_err.unwrap_or(f64::NAN),
-                    ambiguity_ratio,
-                );
-
                 // Reject ambiguous detections — the two PnP solutions are too similar
                 // to reliably distinguish, which causes the intermittent "flipped" pose.
                 const AMBIGUITY_THRESHOLD: f64 = 0.3;
                 if ambiguity_ratio > AMBIGUITY_THRESHOLD {
-                    println!(
+                    eprintln!(
                         "[cu_apriltag] REJECTING tag_id={} — ambiguity {:.3} > {:.3}",
                         detection.id(),
                         ambiguity_ratio,
@@ -497,60 +420,11 @@ impl CuTask for AprilTags {
                     continue;
                 }
 
-                // Sanity check: reject if best solution has tag behind camera (t_z < 0).
-                // This shouldn't happen after the homography sign fix in undistort_detection,
-                // but is a safety net.
-                {
-                    let t_data = pose_estimations[best_idx].pose.translation().data().to_vec();
-                    if t_data[2] < 0.0 {
-                        println!(
-                            "[cu_apriltag][DEBUG] *** WARNING: tag_id={} best solution has t_z={:.4} < 0 (behind camera). Skipping. ***",
-                            detection.id(), t_data[2],
-                        );
-                        continue;
-                    }
-                }
-
                 use apriltag_nalgebra::PoseExt;
                 let pose_na = pose_estimations[best_idx].pose.to_na();
 
-                // --- DEBUG: nalgebra isometry (as converted by to_na) ---
                 let rot_matrix = pose_na.rotation.to_rotation_matrix();
                 let m = rot_matrix.matrix();
-                println!(
-                    "[cu_apriltag][DEBUG] tag_id={} to_na() rotation matrix:",
-                    detection.id(),
-                );
-                println!(
-                    "[cu_apriltag][DEBUG]   [{:.6}, {:.6}, {:.6}]",
-                    m[(0, 0)], m[(0, 1)], m[(0, 2)],
-                );
-                println!(
-                    "[cu_apriltag][DEBUG]   [{:.6}, {:.6}, {:.6}]",
-                    m[(1, 0)], m[(1, 1)], m[(1, 2)],
-                );
-                println!(
-                    "[cu_apriltag][DEBUG]   [{:.6}, {:.6}, {:.6}]",
-                    m[(2, 0)], m[(2, 1)], m[(2, 2)],
-                );
-
-                let euler = pose_na.rotation.euler_angles();
-                println!(
-                    "[cu_apriltag][DEBUG] tag_id={} ACCEPTED undistorted={} t=[{:.4}, {:.4}, {:.4}] euler_deg=[{:.1}, {:.1}, {:.1}]",
-                    detection.id(),
-                    self.distortion.is_some(),
-                    pose_na.translation.x, pose_na.translation.y, pose_na.translation.z,
-                    euler.0.to_degrees(), euler.1.to_degrees(), euler.2.to_degrees(),
-                );
-
-                // Sanity check: roll should not be near ±180° for a right-side-up tag
-                let roll_deg = euler.2.to_degrees();
-                if roll_deg.abs() > 120.0 {
-                    println!(
-                        "[cu_apriltag][DEBUG] *** WARNING: tag_id={} roll={:.1}° still looks flipped after Z-filter! ***",
-                        detection.id(), roll_deg,
-                    );
-                }
 
                 let encodable_pose = EncodableIsometry::from_na(&pose_na);
 
@@ -721,15 +595,10 @@ mod tests {
             let t_no = &pose_no.inner[12..15];
             let t_yes = &pose_yes.inner[12..15];
 
-            println!("Tag {} (id={}):", i, det_no.ids.0[i]);
-            println!("  Without undistortion: t=[{:.4}, {:.4}, {:.4}]", t_no[0], t_no[1], t_no[2]);
-            println!("  With    undistortion: t=[{:.4}, {:.4}, {:.4}]", t_yes[0], t_yes[1], t_yes[2]);
-
             let diff = ((t_no[0] - t_yes[0]).powi(2)
                 + (t_no[1] - t_yes[1]).powi(2)
                 + (t_no[2] - t_yes[2]).powi(2))
             .sqrt();
-            println!("  Translation difference: {:.6}", diff);
 
             assert!(
                 diff > 1e-6,
