@@ -225,7 +225,13 @@ pub unsafe fn undistort_detection(
     for c in 0..4 {
         det.p[c] = deproject_pixel_to_point(intr, det.p[c]);
         corr[c][0] = if c == 0 || c == 3 { -1.0 } else { 1.0 };
-        corr[c][1] = if c == 0 || c == 1 { -1.0 } else { 1.0 };
+        // The apriltag library computes det->p[i] using a Y-flipped convention
+        // relative to the quad's original homography (see apriltag.c line ~1000):
+        //   p[0] = H * (-1, +1),  p[1] = H * (+1, +1),
+        //   p[2] = H * (+1, -1),  p[3] = H * (-1, -1)
+        // We must use the same mapping when recomputing H from undistorted corners,
+        // so that the pose estimator (which assumes this convention) gets a correct H.
+        corr[c][1] = if c < 2 { 1.0 } else { -1.0 };
         corr[c][2] = det.p[c][0];
         corr[c][3] = det.p[c][1];
     }
@@ -235,4 +241,303 @@ pub unsafe fn undistort_detection(
     }
     let h_data = unsafe { std::slice::from_raw_parts_mut((*det.H).data, 9) };
     homography_compute2(&corr, h_data);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test: fisheye undistortion + H recomputation must produce
+    /// a pose with positive t_z (tag in front of camera).
+    ///
+    /// Root cause: the apriltag library computes det->p[i] using a Y-flipped
+    /// tag coordinate convention (see apriltag.c ~line 1005):
+    ///   p[0] = H*(-1,+1), p[1] = H*(+1,+1), p[2] = H*(+1,-1), p[3] = H*(-1,-1)
+    /// When recomputing H from undistorted corners, we must use the same mapping.
+    /// Using the quad's original convention (Y not flipped) produces an incorrect
+    /// homography that causes the pose estimator to output negative t_z.
+    ///
+    /// This test uses corner coordinates from an actual failing detection
+    /// (tag_id=16 on a T265 fisheye camera, KannalaBrandt4 model).
+    #[test]
+    fn test_undistort_detection_produces_positive_tz() {
+        let intr = Rs2Intrinsics {
+            width: 848,
+            height: 800,
+            ppx: 420.073,
+            ppy: 403.880,
+            fx: 285.883,
+            fy: 286.195,
+            model: Rs2Distortion::KannalaBrandt4,
+            coeffs: [-0.00567, 0.04139, -0.03887, 0.00694, 0.0],
+        };
+
+        let pixel_corners: [[f64; 2]; 4] = [
+            [330.8242, 297.6857],
+            [373.7998, 291.7668],
+            [370.6774, 248.0146],
+            [327.4177, 254.8688],
+        ];
+
+        unsafe {
+            // Build the initial H using the detection convention:
+            //   p[0]↔tag(-1,+1), p[1]↔tag(+1,+1), p[2]↔tag(+1,-1), p[3]↔tag(-1,-1)
+            let h_mat = apriltag_sys::matd_create(3, 3);
+            let mut corr_pixel = [[0.0f64; 4]; 4];
+            for c in 0..4 {
+                corr_pixel[c][0] = if c == 0 || c == 3 { -1.0 } else { 1.0 };
+                corr_pixel[c][1] = if c < 2 { 1.0 } else { -1.0 };
+                corr_pixel[c][2] = pixel_corners[c][0];
+                corr_pixel[c][3] = pixel_corners[c][1];
+            }
+            let h_data = std::slice::from_raw_parts_mut((*h_mat).data, 9);
+            homography_compute2(&corr_pixel, h_data);
+
+            let mut det = apriltag_sys::apriltag_detection_t {
+                family: std::ptr::null_mut(),
+                id: 16,
+                hamming: 0,
+                decision_margin: 108.7,
+                H: h_mat,
+                c: [350.47, 273.20],
+                p: pixel_corners,
+            };
+
+            undistort_detection(&mut det as *mut _, &intr);
+
+            println!("Undistorted center = [{:.6}, {:.6}]", det.c[0], det.c[1]);
+            for i in 0..4 {
+                println!(
+                    "Undistorted corner[{}] = [{:.6}, {:.6}]",
+                    i, det.p[i][0], det.p[i][1]
+                );
+            }
+
+            let new_h = std::slice::from_raw_parts((*det.H).data, 9);
+            println!(
+                "New H = [{:.6}, {:.6}, {:.6}; {:.6}, {:.6}, {:.6}; {:.6}, {:.6}, {:.6}]",
+                new_h[0], new_h[1], new_h[2],
+                new_h[3], new_h[4], new_h[5],
+                new_h[6], new_h[7], new_h[8],
+            );
+
+            // Run pose estimation with fx=1, fy=1, cx=0, cy=0 (normalized coords)
+            let tagsize = 0.145;
+            let info = apriltag_sys::apriltag_detection_info_t {
+                det: &mut det as *mut _,
+                tagsize,
+                fx: 1.0,
+                fy: 1.0,
+                cx: 0.0,
+                cy: 0.0,
+            };
+
+            let mut pose1 = std::mem::MaybeUninit::<apriltag_sys::apriltag_pose_t>::uninit();
+            let mut err1 = std::mem::MaybeUninit::<f64>::uninit();
+            let mut pose2 = std::mem::MaybeUninit::<apriltag_sys::apriltag_pose_t>::uninit();
+            let mut err2 = std::mem::MaybeUninit::<f64>::uninit();
+
+            apriltag_sys::estimate_tag_pose_orthogonal_iteration(
+                &info as *const _ as *mut _,
+                err1.as_mut_ptr(),
+                pose1.as_mut_ptr(),
+                err2.as_mut_ptr(),
+                pose2.as_mut_ptr(),
+                50,
+            );
+
+            let pose1 = pose1.assume_init();
+            let err1 = err1.assume_init();
+            let pose2 = pose2.assume_init();
+            let err2 = err2.assume_init();
+
+            let best_is_1 = err1 <= err2 || pose2.R.is_null();
+            if !pose1.R.is_null() {
+                let t1 = std::slice::from_raw_parts((*pose1.t).data, 3);
+                println!(
+                    "Pose 1: t=[{:.6}, {:.6}, {:.6}] err={:.6} {}",
+                    t1[0], t1[1], t1[2], err1,
+                    if best_is_1 { "<-- best" } else { "" }
+                );
+                if best_is_1 {
+                    assert!(
+                        t1[2] > 0.0,
+                        "Best solution t_z must be positive (tag in front of camera), got {:.6}",
+                        t1[2]
+                    );
+                }
+                apriltag_sys::matd_destroy(pose1.R);
+                apriltag_sys::matd_destroy(pose1.t);
+            }
+
+            if !pose2.R.is_null() {
+                let t2 = std::slice::from_raw_parts((*pose2.t).data, 3);
+                println!(
+                    "Pose 2: t=[{:.6}, {:.6}, {:.6}] err={:.6} {}",
+                    t2[0], t2[1], t2[2], err2,
+                    if !best_is_1 { "<-- best" } else { "" }
+                );
+                if !best_is_1 {
+                    assert!(
+                        t2[2] > 0.0,
+                        "Best solution t_z must be positive (tag in front of camera), got {:.6}",
+                        t2[2]
+                    );
+                }
+                apriltag_sys::matd_destroy(pose2.R);
+                apriltag_sys::matd_destroy(pose2.t);
+            }
+
+            apriltag_sys::matd_destroy(det.H);
+        }
+    }
+
+    /// Verify that the WRONG Y convention reproduces the original bug (negative t_z),
+    /// and the CORRECT convention produces positive t_z.
+    #[test]
+    fn test_wrong_y_convention_causes_negative_tz() {
+        let undist_corners: [[f64; 2]; 4] = [
+            [-0.331993, -0.378354],
+            [-0.166493, -0.392824],
+            [-0.187458, -0.583990],
+            [-0.362695, -0.567848],
+        ];
+
+        unsafe {
+            // WRONG convention (old bug): Y = (c==0||c==1)?-1:1
+            let h_wrong = apriltag_sys::matd_create(3, 3);
+            let mut corr_wrong = [[0.0f64; 4]; 4];
+            for c in 0..4 {
+                corr_wrong[c][0] = if c == 0 || c == 3 { -1.0 } else { 1.0 };
+                corr_wrong[c][1] = if c == 0 || c == 1 { -1.0 } else { 1.0 }; // WRONG
+                corr_wrong[c][2] = undist_corners[c][0];
+                corr_wrong[c][3] = undist_corners[c][1];
+            }
+            let h_w = std::slice::from_raw_parts_mut((*h_wrong).data, 9);
+            homography_compute2(&corr_wrong, h_w);
+
+            // CORRECT convention: Y = (c<2)?1:-1
+            let h_correct = apriltag_sys::matd_create(3, 3);
+            let mut corr_correct = [[0.0f64; 4]; 4];
+            for c in 0..4 {
+                corr_correct[c][0] = if c == 0 || c == 3 { -1.0 } else { 1.0 };
+                corr_correct[c][1] = if c < 2 { 1.0 } else { -1.0 }; // CORRECT
+                corr_correct[c][2] = undist_corners[c][0];
+                corr_correct[c][3] = undist_corners[c][1];
+            }
+            let h_c = std::slice::from_raw_parts_mut((*h_correct).data, 9);
+            homography_compute2(&corr_correct, h_c);
+
+            let tagsize = 0.145;
+
+            let mut det_wrong = apriltag_sys::apriltag_detection_t {
+                family: std::ptr::null_mut(),
+                id: 16,
+                hamming: 0,
+                decision_margin: 100.0,
+                H: h_wrong,
+                c: [-0.265, -0.481],
+                p: undist_corners,
+            };
+            let mut det_correct = apriltag_sys::apriltag_detection_t {
+                family: std::ptr::null_mut(),
+                id: 16,
+                hamming: 0,
+                decision_margin: 100.0,
+                H: h_correct,
+                c: [-0.265, -0.481],
+                p: undist_corners,
+            };
+
+            // Pose from WRONG H
+            let info_w = apriltag_sys::apriltag_detection_info_t {
+                det: &mut det_wrong as *mut _,
+                tagsize,
+                fx: 1.0,
+                fy: 1.0,
+                cx: 0.0,
+                cy: 0.0,
+            };
+            let mut p1_w = std::mem::MaybeUninit::<apriltag_sys::apriltag_pose_t>::uninit();
+            let mut e1_w = std::mem::MaybeUninit::<f64>::uninit();
+            let mut p2_w = std::mem::MaybeUninit::<apriltag_sys::apriltag_pose_t>::uninit();
+            let mut e2_w = std::mem::MaybeUninit::<f64>::uninit();
+            apriltag_sys::estimate_tag_pose_orthogonal_iteration(
+                &info_w as *const _ as *mut _,
+                e1_w.as_mut_ptr(),
+                p1_w.as_mut_ptr(),
+                e2_w.as_mut_ptr(),
+                p2_w.as_mut_ptr(),
+                50,
+            );
+            let p1_w = p1_w.assume_init();
+            let e1_w = e1_w.assume_init();
+            let p2_w = p2_w.assume_init();
+
+            let t1_w = std::slice::from_raw_parts((*p1_w.t).data, 3);
+            println!(
+                "WRONG  -> Pose 1: t=[{:.6}, {:.6}, {:.6}] err={:.6}",
+                t1_w[0], t1_w[1], t1_w[2], e1_w
+            );
+            let wrong_tz = t1_w[2];
+            apriltag_sys::matd_destroy(p1_w.R);
+            apriltag_sys::matd_destroy(p1_w.t);
+            if !p2_w.R.is_null() {
+                apriltag_sys::matd_destroy(p2_w.R);
+                apriltag_sys::matd_destroy(p2_w.t);
+            }
+
+            // Pose from CORRECT H
+            let info_c = apriltag_sys::apriltag_detection_info_t {
+                det: &mut det_correct as *mut _,
+                tagsize,
+                fx: 1.0,
+                fy: 1.0,
+                cx: 0.0,
+                cy: 0.0,
+            };
+            let mut p1_c = std::mem::MaybeUninit::<apriltag_sys::apriltag_pose_t>::uninit();
+            let mut e1_c = std::mem::MaybeUninit::<f64>::uninit();
+            let mut p2_c = std::mem::MaybeUninit::<apriltag_sys::apriltag_pose_t>::uninit();
+            let mut e2_c = std::mem::MaybeUninit::<f64>::uninit();
+            apriltag_sys::estimate_tag_pose_orthogonal_iteration(
+                &info_c as *const _ as *mut _,
+                e1_c.as_mut_ptr(),
+                p1_c.as_mut_ptr(),
+                e2_c.as_mut_ptr(),
+                p2_c.as_mut_ptr(),
+                50,
+            );
+            let p1_c = p1_c.assume_init();
+            let e1_c = e1_c.assume_init();
+            let p2_c = p2_c.assume_init();
+
+            let t1_c = std::slice::from_raw_parts((*p1_c.t).data, 3);
+            println!(
+                "CORRECT -> Pose 1: t=[{:.6}, {:.6}, {:.6}] err={:.6}",
+                t1_c[0], t1_c[1], t1_c[2], e1_c
+            );
+            let correct_tz = t1_c[2];
+            apriltag_sys::matd_destroy(p1_c.R);
+            apriltag_sys::matd_destroy(p1_c.t);
+            if !p2_c.R.is_null() {
+                apriltag_sys::matd_destroy(p2_c.R);
+                apriltag_sys::matd_destroy(p2_c.t);
+            }
+
+            apriltag_sys::matd_destroy(h_wrong);
+            apriltag_sys::matd_destroy(h_correct);
+
+            assert!(
+                wrong_tz < 0.0,
+                "WRONG Y convention should produce negative t_z (reproducing the bug), got {:.6}",
+                wrong_tz
+            );
+            assert!(
+                correct_tz > 0.0,
+                "CORRECT Y convention should produce positive t_z, got {:.6}",
+                correct_tz
+            );
+        }
+    }
 }

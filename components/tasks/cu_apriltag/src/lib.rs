@@ -458,100 +458,61 @@ impl CuTask for AprilTags {
                     );
                 }
 
-                // --- Filter solutions: tag must be in front of camera (t_z > 0) ---
-                // The orthogonal iteration can converge to a "behind the camera" mirror
-                // solution (negative Z). This is physically impossible for a detected tag.
-                // Among valid (positive Z) solutions, pick the one with lowest error.
-                let valid_solutions: Vec<(usize, f64)> = pose_estimations
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, est)| {
-                        let t_data = est.pose.translation().data().to_vec();
-                        t_data[2] > 0.0
-                    })
-                    .map(|(i, est)| (i, est.error))
-                    .collect();
-
-                // If all orthogonal iteration solutions have negative Z, fall back to
-                // the simpler estimate_tag_pose (homography SVD + single iteration).
-                // This matches what Intel's T265 reference code uses and handles
-                // chirality correctly.
-                let use_fallback = valid_solutions.is_empty();
-                let (chosen_pose_na, _best_err, _alt_err) = if use_fallback {
-                    println!(
-                        "[cu_apriltag][DEBUG] tag_id={} ALL ortho-iter solutions have t_z < 0! Falling back to estimate_tag_pose.",
-                        detection.id(),
-                    );
-                    match detection.estimate_tag_pose(&pose_params) {
-                        Some(pose) => {
-                            let t_data = pose.translation().data().to_vec();
-                            let err = 0.0; // estimate_tag_pose doesn't expose error
-                            println!(
-                                "[cu_apriltag][DEBUG] tag_id={} fallback t = [{:.6}, {:.6}, {:.6}]",
-                                detection.id(), t_data[0], t_data[1], t_data[2],
-                            );
-                            if t_data[2] < 0.0 {
-                                println!(
-                                    "[cu_apriltag][DEBUG] tag_id={} fallback ALSO has t_z < 0! Skipping.",
-                                    detection.id(),
-                                );
-                                continue;
-                            }
-                            use apriltag_nalgebra::PoseExt;
-                            (pose.to_na(), err, None)
-                        }
-                        None => {
-                            println!(
-                                "[cu_apriltag][DEBUG] tag_id={} fallback returned no pose. Skipping.",
-                                detection.id(),
-                            );
-                            continue;
-                        }
-                    }
+                // Pick the solution with lower object-space error
+                let (best_idx, alt_idx) = if pose_estimations.len() == 2
+                    && pose_estimations[1].error < pose_estimations[0].error
+                {
+                    (1, Some(0))
                 } else {
-                    // Among valid solutions, pick lowest error
-                    let &(best_idx, best_err) = valid_solutions
-                        .iter()
-                        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-                        .unwrap();
-                    let alt_err = valid_solutions
-                        .iter()
-                        .filter(|&&(i, _)| i != best_idx)
-                        .map(|&(_, e)| e)
-                        .next();
+                    (0, if pose_estimations.len() == 2 { Some(1) } else { None })
+                };
 
-                    // Ambiguity ratio: 0 = unambiguous, 1 = totally ambiguous
-                    let ambiguity_ratio = match alt_err {
-                        Some(worse_err) if worse_err > 0.0 => best_err / worse_err,
-                        _ => 0.0,
-                    };
+                let best_err = pose_estimations[best_idx].error;
+                let alt_err = alt_idx.map(|i| pose_estimations[i].error);
 
+                // Ambiguity ratio: 0 = unambiguous, 1 = totally ambiguous
+                let ambiguity_ratio = match alt_err {
+                    Some(worse_err) if worse_err > 0.0 => best_err / worse_err,
+                    _ => 0.0,
+                };
+
+                println!(
+                    "[cu_apriltag] tag_id={} best_err={:.6} alt_err={:.6} ambiguity={:.3}",
+                    detection.id(),
+                    best_err,
+                    alt_err.unwrap_or(f64::NAN),
+                    ambiguity_ratio,
+                );
+
+                // Reject ambiguous detections — the two PnP solutions are too similar
+                // to reliably distinguish, which causes the intermittent "flipped" pose.
+                const AMBIGUITY_THRESHOLD: f64 = 0.3;
+                if ambiguity_ratio > AMBIGUITY_THRESHOLD {
                     println!(
-                        "[cu_apriltag] tag_id={} best_err={:.6} alt_err={:.6} ambiguity={:.3}",
+                        "[cu_apriltag] REJECTING tag_id={} — ambiguity {:.3} > {:.3}",
                         detection.id(),
-                        best_err,
-                        alt_err.unwrap_or(f64::NAN),
                         ambiguity_ratio,
+                        AMBIGUITY_THRESHOLD,
                     );
+                    continue;
+                }
 
-                    // Reject ambiguous detections — the two PnP solutions are too similar
-                    // to reliably distinguish, which causes the intermittent "flipped" pose.
-                    const AMBIGUITY_THRESHOLD: f64 = 0.3;
-                    if ambiguity_ratio > AMBIGUITY_THRESHOLD {
+                // Sanity check: reject if best solution has tag behind camera (t_z < 0).
+                // This shouldn't happen after the homography sign fix in undistort_detection,
+                // but is a safety net.
+                {
+                    let t_data = pose_estimations[best_idx].pose.translation().data().to_vec();
+                    if t_data[2] < 0.0 {
                         println!(
-                            "[cu_apriltag] REJECTING tag_id={} — ambiguity {:.3} > {:.3}",
-                            detection.id(),
-                            ambiguity_ratio,
-                            AMBIGUITY_THRESHOLD,
+                            "[cu_apriltag][DEBUG] *** WARNING: tag_id={} best solution has t_z={:.4} < 0 (behind camera). Skipping. ***",
+                            detection.id(), t_data[2],
                         );
                         continue;
                     }
+                }
 
-                    use apriltag_nalgebra::PoseExt;
-                    (pose_estimations[best_idx].pose.to_na(), best_err, alt_err)
-                };
-
-                let pose_na = chosen_pose_na;
+                use apriltag_nalgebra::PoseExt;
+                let pose_na = pose_estimations[best_idx].pose.to_na();
 
                 // --- DEBUG: nalgebra isometry (as converted by to_na) ---
                 let rot_matrix = pose_na.rotation.to_rotation_matrix();
@@ -575,10 +536,9 @@ impl CuTask for AprilTags {
 
                 let euler = pose_na.rotation.euler_angles();
                 println!(
-                    "[cu_apriltag][DEBUG] tag_id={} ACCEPTED undistorted={} fallback={} t=[{:.4}, {:.4}, {:.4}] euler_deg=[{:.1}, {:.1}, {:.1}]",
+                    "[cu_apriltag][DEBUG] tag_id={} ACCEPTED undistorted={} t=[{:.4}, {:.4}, {:.4}] euler_deg=[{:.1}, {:.1}, {:.1}]",
                     detection.id(),
                     self.distortion.is_some(),
-                    use_fallback,
                     pose_na.translation.x, pose_na.translation.y, pose_na.translation.z,
                     euler.0.to_degrees(), euler.1.to_degrees(), euler.2.to_degrees(),
                 );
