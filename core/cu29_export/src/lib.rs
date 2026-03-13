@@ -144,7 +144,7 @@ fn build_read_logger(unifiedlog_base: &Path) -> CuResult<UnifiedLoggerRead> {
 #[cfg(feature = "mcap")]
 pub fn run_cli<P>() -> CuResult<()>
 where
-    P: CopperListTuple + CuPayloadRawBytes + mcap_export::PayloadSchemas,
+    P: CopperListTuple + CuPayloadRawBytes + MatchingTasks + mcap_export::PayloadSchemas,
 {
     run_cli_inner::<P>()
 }
@@ -154,7 +154,7 @@ where
 #[cfg(not(feature = "mcap"))]
 pub fn run_cli<P>() -> CuResult<()>
 where
-    P: CopperListTuple + CuPayloadRawBytes,
+    P: CopperListTuple + CuPayloadRawBytes + MatchingTasks,
 {
     run_cli_inner::<P>()
 }
@@ -162,7 +162,7 @@ where
 #[cfg(feature = "mcap")]
 fn run_cli_inner<P>() -> CuResult<()>
 where
-    P: CopperListTuple + CuPayloadRawBytes + mcap_export::PayloadSchemas,
+    P: CopperListTuple + CuPayloadRawBytes + MatchingTasks + mcap_export::PayloadSchemas,
 {
     let args = LogReaderCli::parse();
     let unifiedlog_base = args.unifiedlog_base;
@@ -275,7 +275,7 @@ where
 #[cfg(not(feature = "mcap"))]
 fn run_cli_inner<P>() -> CuResult<()>
 where
-    P: CopperListTuple + CuPayloadRawBytes,
+    P: CopperListTuple + CuPayloadRawBytes + MatchingTasks,
 {
     let args = LogReaderCli::parse();
     let unifiedlog_base = args.unifiedlog_base;
