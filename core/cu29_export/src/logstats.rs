@@ -1,6 +1,6 @@
 use crate::copperlists_reader;
 use cu29::clock::{CuDuration, OptionCuTime};
-use cu29::config::{CuConfig, CuGraph, Flavor};
+use cu29::config::{CuConfig, CuGraph};
 use cu29::curuntime::{CuExecutionLoop, CuExecutionUnit, compute_runtime_plan};
 use cu29::monitoring::CuDurationStatistics;
 use cu29::prelude::{CopperListTuple, CuMsgMetadataTrait, CuPayloadRawBytes};
@@ -317,7 +317,12 @@ struct OutputPackInfo {
 }
 
 fn collect_output_packs(graph: &CuGraph) -> CuResult<Vec<OutputPackInfo>> {
-    let plan = compute_runtime_plan(graph)?;
+    // `compute_runtime_plan` seeds its BFS only from zero-incoming-edge nodes.
+    // In the raw config graph a bridge has both incoming (Tx) and outgoing (Rx) edges,
+    // so it's never seeded as a source and tasks that depend on it are left unplanned.
+    // Use a copy of the graph where bridge Rx nodes look like pure sources.
+    let planning_graph = graph.with_bridge_rx_as_sources();
+    let plan = compute_runtime_plan(&planning_graph)?;
     let mut packs = Vec::new();
     collect_output_packs_from_loop(&plan, graph, &mut packs)?;
     packs.sort_by_key(|pack| pack.culist_index);

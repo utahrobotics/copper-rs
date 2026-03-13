@@ -960,6 +960,44 @@ impl CuGraph {
         self.0.node_weight(node_id.into())
     }
 
+    /// Returns a clone of this graph with incoming edges removed from every bridge node
+    /// that also has outgoing edges (i.e. a bridge acting as a source via its Rx channel).
+    ///
+    /// In the raw config graph a bridge is one node with both incoming (Tx consumer)
+    /// and outgoing (Rx producer) edges.  `compute_runtime_plan` seeds its BFS only from
+    /// zero-incoming-edge nodes, so bridges are never treated as sources and tasks that
+    /// depend on bridge data are left unplanned.  Stripping those incoming edges makes
+    /// bridge nodes look like pure sources to the planner, which mirrors what the
+    /// proc-macro does when it splits each bridge into separate Rx / Tx plan-graph nodes.
+    pub fn with_bridge_rx_as_sources(&self) -> Self {
+        let mut g = self.clone();
+        let bridge_ids: Vec<_> = g
+            .node_ids()
+            .into_iter()
+            .filter(|&id| {
+                g.get_node(id)
+                    .map(|n| n.get_flavor() == Flavor::Bridge)
+                    .unwrap_or(false)
+                    && g.outgoing_neighbor_count(id) > 0
+            })
+            .collect();
+
+        for id in bridge_ids {
+            let incoming: Vec<_> = g
+                .0
+                .edges_directed(
+                    petgraph::stable_graph::NodeIndex::new(id as usize),
+                    petgraph::Direction::Incoming,
+                )
+                .map(|e| e.id())
+                .collect();
+            for edge in incoming {
+                g.0.remove_edge(edge);
+            }
+        }
+        g
+    }
+
     #[allow(dead_code)]
     pub fn get_node_weight(&self, index: NodeId) -> Option<&Node> {
         self.0.node_weight(index.into())
