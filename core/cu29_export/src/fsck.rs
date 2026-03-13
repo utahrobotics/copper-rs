@@ -57,17 +57,21 @@ where
                         let mut first_ts: OptionCuTime = OptionCuTime::none();
                         for entry in iter {
                             last_cl = entry.id;
+                            let msgs = entry.cumsgs();
+
+                            // Find the first non-None start across all slots.
                             if first_ts.is_none() {
                                 first_cl = entry.id;
-                                let msgs = entry.cumsgs();
-                                let first_msg =
-                                    msgs.first().expect("Empty copperlist");
-                                first_ts = first_msg.metadata().process_time().start;
-                                if first_ts.is_none() {
-                                    let task_name =
-                                        task_ids.first().copied().unwrap_or("<unknown>");
+                                first_ts = msgs
+                                    .iter()
+                                    .find_map(|m| {
+                                        let s = m.metadata().process_time().start;
+                                        if s.is_none() { None } else { Some(s) }
+                                    })
+                                    .unwrap_or(OptionCuTime::none());
+                                if first_ts.is_none() && verbose > 0 {
                                     println!(
-                                        "  Warning: CL#{} msg[0] ({task_name}) has no process_time.start",
+                                        "  Warning: CL#{} — no task has process_time.start set:",
                                         entry.id
                                     );
                                     for (i, (msg, name)) in
@@ -84,14 +88,19 @@ where
                                     overall_first_ts = first_ts;
                                 }
                             }
-                            let msgs = entry.cumsgs();
-                            let last_msg = *msgs.last().expect("Empty copperlist");
-                            let candidate = last_msg.metadata().process_time().end;
+
+                            // Find the last non-None end across all slots.
+                            let candidate = msgs
+                                .iter()
+                                .rev()
+                                .find_map(|m| {
+                                    let e = m.metadata().process_time().end;
+                                    if e.is_none() { None } else { Some(e) }
+                                })
+                                .unwrap_or(OptionCuTime::none());
                             if candidate.is_none() && verbose > 0 {
-                                let task_name =
-                                    task_ids.last().copied().unwrap_or("<unknown>");
                                 println!(
-                                    "  Warning: CL#{} last msg ({task_name}) has no process_time.end",
+                                    "  Warning: CL#{} — no task has process_time.end set",
                                     entry.id
                                 );
                             }
