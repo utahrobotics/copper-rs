@@ -18,13 +18,8 @@ use cu29::monitoring::{
 };
 use cu29::prelude::{CuCompactString, CuTime, pool};
 use cu29::{CuError, CuResult};
-use cu29_log::CuLogLevel;
-#[cfg(debug_assertions)]
-use cu29_log_runtime::{
-    format_message_only, register_live_log_listener, unregister_live_log_listener,
-};
 #[cfg(feature = "debug_pane")]
-use debug_pane::{StyledLine, StyledRun, UIExt};
+use debug_pane::{StyledLine, UIExt};
 use ratatui::backend::CrosstermBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
@@ -290,147 +285,6 @@ fn spans_from_runs(line: &StyledLine) -> Vec<Span<'static>> {
     spans
 }
 
-#[cfg(feature = "debug_pane")]
-fn color_for_level(level: CuLogLevel) -> Color {
-    match level {
-        CuLogLevel::Debug => Color::Green,
-        CuLogLevel::Info => Color::Gray,
-        CuLogLevel::Warning => Color::Yellow,
-        CuLogLevel::Error => Color::Red,
-        CuLogLevel::Critical => Color::Red,
-    }
-}
-
-#[cfg(feature = "debug_pane")]
-fn format_ts(time: CuTime) -> String {
-    let nanos = time.as_nanos();
-    let total_ms = nanos / 1_000_000;
-    let millis = total_ms % 1000;
-    let total_s = total_ms / 1000;
-    let secs = total_s % 60;
-    let mins = (total_s / 60) % 60;
-    let hours = (total_s / 3600) % 24;
-    format!("{hours:02}:{mins:02}:{secs:02}.{millis:03}")
-}
-
-#[cfg(feature = "debug_pane")]
-fn build_message_with_runs(
-    format_str: &str,
-    params: &[String],
-    named_params: &HashMap<String, String>,
-) -> (String, Vec<(usize, usize)>) {
-    let mut out = String::new();
-    let mut param_spans = Vec::new();
-    let mut anon_iter = params.iter();
-    let mut iter = format_str.char_indices().peekable();
-    while let Some((idx, ch)) = iter.next() {
-        if ch == '{' {
-            let start_idx = idx + ch.len_utf8();
-            if let Some(end) = format_str[start_idx..].find('}') {
-                let end_idx = start_idx + end;
-                let placeholder = &format_str[start_idx..end_idx];
-                let replacement_opt = if placeholder.is_empty() {
-                    anon_iter.next()
-                } else {
-                    named_params.get(placeholder)
-                };
-                if let Some(repl) = replacement_opt {
-                    let span_start = out.chars().count();
-                    out.push_str(repl);
-                    let span_end = out.chars().count();
-                    param_spans.push((span_start, span_end));
-                    let skip_to = end_idx + '}'.len_utf8();
-                    while let Some((next_idx, _)) = iter.peek().copied() {
-                        if next_idx < skip_to {
-                            iter.next();
-                        } else {
-                            break;
-                        }
-                    }
-                    continue;
-                }
-            }
-        }
-        out.push(ch);
-    }
-    (out, param_spans)
-}
-
-#[cfg(feature = "debug_pane")]
-fn styled_line_from_structured(
-    time: CuTime,
-    level: CuLogLevel,
-    format_str: &str,
-    params: &[String],
-    named_params: &HashMap<String, String>,
-) -> StyledLine {
-    let ts = format_ts(time);
-    let level_txt = format!("[{:?}]", level);
-
-    let (msg_text, param_spans) = build_message_with_runs(format_str, params, named_params);
-    let mut msg_runs = Vec::new();
-    let mut cursor = 0usize;
-    let param_spans_sorted = {
-        let mut v = param_spans;
-        v.sort_by_key(|p| p.0);
-        v
-    };
-    for (start, end) in param_spans_sorted {
-        if start > cursor {
-            msg_runs.push(StyledRun {
-                start: cursor,
-                end: start,
-                style: Style::default().fg(Color::Gray),
-            });
-        }
-        msg_runs.push(StyledRun {
-            start,
-            end,
-            style: Style::default().fg(Color::Magenta),
-        });
-        cursor = end;
-    }
-    if cursor < msg_text.chars().count() {
-        msg_runs.push(StyledRun {
-            start: cursor,
-            end: msg_text.chars().count(),
-            style: Style::default().fg(Color::Gray),
-        });
-    }
-
-    let prefix = format!("{ts} {level_txt} ");
-    let prefix_len = prefix.chars().count();
-    let line_text = format!("{prefix}{msg_text}");
-
-    let mut runs = Vec::new();
-    let ts_len = ts.chars().count();
-    let level_start = ts_len + 1;
-    let level_end = level_start + level_txt.chars().count();
-
-    runs.push(StyledRun {
-        start: 0,
-        end: ts_len,
-        style: Style::default().fg(Color::Blue),
-    });
-    runs.push(StyledRun {
-        start: level_start,
-        end: level_end,
-        style: Style::default().fg(color_for_level(level)).bold(),
-    });
-    for run in msg_runs {
-        runs.push(StyledRun {
-            start: prefix_len + run.start,
-            end: prefix_len + run.end,
-            style: run.style,
-        });
-    }
-
-    StyledLine {
-        text: line_text,
-        runs,
-    }
-}
-
 struct TaskStats {
     stats: Vec<CuDurationStatistics>,
     end2end: CuDurationStatistics,
@@ -447,11 +301,13 @@ impl TaskStats {
 
     fn update(&mut self, msgs: &[&CuMsgMetadata]) {
         for (i, &msg) in msgs.iter().enumerate() {
-            let (before, after) = (
-                msg.process_time.start.unwrap(),
-                msg.process_time.end.unwrap(),
-            );
-            self.stats[i].record(after - before);
+            let before = Option::<CuTime>::from(msg.process_time.start);
+            let after = Option::<CuTime>::from(msg.process_time.end);
+            if let (Some(b), Some(a)) = (before, after) {
+                if a >= b {
+                    self.stats[i].record(a - b);
+                }
+            }
         }
         self.end2end.record(compute_end_to_end_latency(msgs));
     }
@@ -1081,6 +937,8 @@ struct UI {
     help_hitboxes: Vec<HelpHitbox>,
     nodes_scrollable_widget_state: NodesScrollableWidgetState,
     #[cfg(feature = "debug_pane")]
+    stdout_redirect: Option<gag::BufferRedirect>,
+    #[cfg(feature = "debug_pane")]
     error_redirect: Option<gag::BufferRedirect>,
     #[cfg(feature = "debug_pane")]
     debug_output: Option<debug_pane::DebugLog>,
@@ -1108,8 +966,9 @@ impl UI {
         task_stats: Arc<Mutex<TaskStats>>,
         task_statuses: Arc<Mutex<Vec<TaskStatus>>>,
         quitting: Arc<AtomicBool>,
+        stdout_redirect: Option<gag::BufferRedirect>,
         error_redirect: Option<gag::BufferRedirect>,
-        debug_output: Option<debug_pane::DebugLog>,
+        debug_output: debug_pane::DebugLog,
         pool_stats: Arc<Mutex<Vec<PoolStats>>>,
         copperlist_stats: Arc<Mutex<CopperListStats>>,
         topology: Option<MonitorTopology>,
@@ -1132,8 +991,9 @@ impl UI {
             tab_hitboxes: Vec::new(),
             help_hitboxes: Vec::new(),
             nodes_scrollable_widget_state,
+            stdout_redirect,
             error_redirect,
-            debug_output,
+            debug_output: Some(debug_output),
             debug_output_area: None,
             debug_output_visible_offset: 0,
             debug_output_lines: Vec::new(),
@@ -2101,14 +1961,6 @@ impl CuMonitor for CuConsoleMon {
 
     fn start(&mut self, _clock: &RobotClock) -> CuResult<()> {
         if !should_start_ui() {
-            #[cfg(debug_assertions)]
-            {
-                register_live_log_listener(|entry, format_str, param_names| {
-                    if let Some(line) = format_headless_log_line(entry, format_str, param_names) {
-                        println!("{line}");
-                    }
-                });
-            }
             return Ok(());
         }
 
@@ -2122,9 +1974,19 @@ impl CuMonitor for CuConsoleMon {
         let quitting = self.quitting.clone();
         let topology = self.topology.clone();
 
-        // Start the main UI loop
         let handle = thread::spawn(move || {
-            let backend = CrosstermBackend::new(stdout());
+            let tty = match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/tty")
+            {
+                Ok(f) => f,
+                Err(err) => {
+                    eprintln!("Failed to open /dev/tty for TUI: {err}");
+                    return;
+                }
+            };
+            let backend = CrosstermBackend::new(tty);
             let _terminal_guard = TerminalRestoreGuard;
 
             if let Err(err) = setup_terminal() {
@@ -2142,80 +2004,50 @@ impl CuMonitor for CuConsoleMon {
 
             #[cfg(feature = "debug_pane")]
             {
-                // redirect stderr, so it doesn't pop in the terminal
+                let stdout_redirect = match gag::BufferRedirect::stdout() {
+                    Ok(redirect) => Some(redirect),
+                    Err(err) => {
+                        eprintln!("Failed to redirect stdout for debug pane: {err}");
+                        None
+                    }
+                };
                 let error_redirect = match gag::BufferRedirect::stderr() {
                     Ok(redirect) => Some(redirect),
                     Err(err) => {
-                        eprintln!(
-                            "Failed to redirect stderr for debug pane; continuing without redirect: {err}"
-                        );
+                        eprintln!("Failed to redirect stderr for debug pane: {err}");
                         None
                     }
                 };
 
+                let max_lines = terminal.size().unwrap().height.saturating_sub(5);
+                let debug_log = debug_pane::DebugLog::new(max_lines);
+
                 let mut ui = UI::new(
                     config_dup,
-                    None, // FIXME(gbin): Allow somethere an API to get the current mission running
+                    None,
                     taskids,
                     task_stats_ui,
                     error_states,
                     quitting.clone(),
+                    stdout_redirect,
                     error_redirect,
-                    None,
+                    debug_log,
                     pool_stats_ui,
                     copperlist_stats_ui,
                     topology.clone(),
                 );
 
-                #[cfg(debug_assertions)]
-                {
-                    let max_lines = terminal.size().unwrap().height - 5;
-                    let (mut debug_log, tx) = debug_pane::DebugLog::new(max_lines);
-
-                    cu29_log_runtime::register_live_log_listener(
-                        move |entry, format_str, param_names| {
-                            // Rebuild line from structured data, then push to bounded channel.
-                            let params: Vec<String> =
-                                entry.params.iter().map(|v| v.to_string()).collect();
-                            let named_params: HashMap<String, String> = param_names
-                                .iter()
-                                .zip(params.iter())
-                                .map(|(name, value)| (name.to_string(), value.clone()))
-                                .collect();
-                            let line = styled_line_from_structured(
-                                entry.time,
-                                entry.level,
-                                format_str,
-                                params.as_slice(),
-                                &named_params,
-                            );
-                            // Non-blocking: drop log if the bounded channel is full to avoid stalling the runtime.
-                            match tx.try_send(line) {
-                                Ok(_) => {}
-                                Err(std::sync::mpsc::TrySendError::Full(_)) => {}
-                                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                                    // Receiver dropped; nothing else we can do.
-                                }
-                            }
-                        },
-                    );
-
-                    // Drain any pending from the channel into the UI buffer once to size it.
-                    debug_log.update_logs();
-                    ui.debug_output = Some(debug_log);
-                }
                 if let Err(err) = ui.run_app(&mut terminal) {
                     let _ = restore_terminal();
                     eprintln!("CuConsoleMon UI exited with error: {err}");
-                    cu29_log_runtime::unregister_live_log_listener();
                     return;
                 }
-                cu29_log_runtime::unregister_live_log_listener();
             }
 
             #[cfg(not(feature = "debug_pane"))]
             {
-                let stderr_gag = gag::Gag::stderr().unwrap();
+                let _stderr_gag = gag::Gag::stderr().ok();
+                let _stdout_gag = gag::Gag::stdout().ok();
 
                 let mut ui = UI::new(
                     config_dup,
@@ -2232,12 +2064,9 @@ impl CuMonitor for CuConsoleMon {
                     eprintln!("CuConsoleMon UI exited with error: {err}");
                     return;
                 }
-
-                drop(stderr_gag);
             }
 
             quitting.store(true, Ordering::SeqCst);
-            // restoring the terminal
             let _ = restore_terminal();
         });
 
@@ -2310,11 +2139,6 @@ impl CuMonitor for CuConsoleMon {
 
         if let Some(handle) = self.ui_handle.take() {
             let _ = handle.join();
-        }
-
-        #[cfg(debug_assertions)]
-        if !should_start_ui() {
-            unregister_live_log_listener();
         }
 
         self.task_stats
@@ -2394,47 +2218,16 @@ fn init_error_hooks() {
 
 fn setup_terminal() -> io::Result<()> {
     enable_raw_mode()?;
-    // Enable mouse capture for in-app log selection.
-    execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+    let mut tty = std::fs::OpenOptions::new().write(true).open("/dev/tty")?;
+    execute!(tty, EnterAlternateScreen, EnableMouseCapture)?;
     Ok(())
 }
 
 fn restore_terminal() -> io::Result<()> {
-    execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+    if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+        let _ = execute!(tty, LeaveAlternateScreen, DisableMouseCapture);
+    }
     disable_raw_mode()
-}
-
-#[cfg(debug_assertions)]
-fn format_timestamp(time: CuDuration) -> String {
-    // Render CuTime/CuDuration as HH:mm:ss.xxxx (4 fractional digits of a second).
-    let nanos = time.as_nanos();
-    let total_seconds = nanos / 1_000_000_000;
-    let hours = total_seconds / 3600;
-    let minutes = (total_seconds / 60) % 60;
-    let seconds = total_seconds % 60;
-    let fractional_1e4 = (nanos % 1_000_000_000) / 100_000;
-    format!("{hours:02}:{minutes:02}:{seconds:02}.{fractional_1e4:04}")
-}
-
-#[cfg(debug_assertions)]
-fn format_headless_log_line(
-    entry: &cu29_log::CuLogEntry,
-    format_str: &str,
-    param_names: &[&str],
-) -> Option<String> {
-    let params: Vec<String> = entry.params.iter().map(|v| v.to_string()).collect();
-    let named: HashMap<String, String> = param_names
-        .iter()
-        .zip(params.iter())
-        .map(|(k, v)| (k.to_string(), v.clone()))
-        .collect();
-
-    format_message_only(format_str, params.as_slice(), &named)
-        .ok()
-        .map(|msg| {
-            let ts = format_timestamp(entry.time);
-            format!("{} [{:?}] {}", ts, entry.level, msg)
-        })
 }
 
 fn should_start_ui() -> bool {

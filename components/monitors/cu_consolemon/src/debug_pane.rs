@@ -4,21 +4,14 @@ use ratatui::layout::Rect;
 use ratatui::prelude::Stylize;
 use ratatui::style::{Color, Style};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
-use std::sync::atomic::Ordering;
-use std::sync::mpsc::SendError;
-use {
-    log::{Level, LevelFilter, Log, Metadata, Record},
-    std::collections::VecDeque,
-    std::io::Read,
-    std::sync::atomic::AtomicU16,
-    std::sync::mpsc::{Receiver, SyncSender},
-};
+use std::collections::VecDeque;
+use std::io::Read;
+use std::sync::atomic::{AtomicU16, Ordering};
 
 #[derive(Debug)]
 pub struct DebugLog {
-    debug_log: VecDeque<StyledLine>,
+    pub(crate) debug_log: VecDeque<StyledLine>,
     pub(crate) max_rows: AtomicU16,
-    rx: Receiver<StyledLine>,
 }
 
 #[derive(Clone, Debug)]
@@ -36,17 +29,11 @@ pub struct StyledLine {
 }
 
 impl DebugLog {
-    #[allow(dead_code)]
-    pub fn new(max_lines: u16) -> (Self, SyncSender<StyledLine>) {
-        let (tx, rx) = std::sync::mpsc::sync_channel(1000);
-        (
-            Self {
-                debug_log: VecDeque::new(),
-                max_rows: AtomicU16::new(max_lines),
-                rx,
-            },
-            tx,
-        )
+    pub fn new(max_lines: u16) -> Self {
+        Self {
+            debug_log: VecDeque::new(),
+            max_rows: AtomicU16::new(max_lines),
+        }
     }
 
     pub fn push_line(&mut self, line: StyledLine) {
@@ -60,66 +47,9 @@ impl DebugLog {
         }
     }
 
-    pub fn update_logs(&mut self) {
-        let max_row = self.max_rows.load(Ordering::SeqCst) as usize;
-
-        for log in self.rx.try_iter() {
-            self.debug_log.push_back(log);
-            if self.debug_log.len() > max_row {
-                self.debug_log.pop_front();
-            }
-        }
-    }
-
-    #[allow(dead_code)]
     pub fn lines(&self) -> Vec<StyledLine> {
         self.debug_log.iter().cloned().collect()
     }
-}
-
-#[derive(Clone)]
-pub struct LogSubscriber {
-    tx: SyncSender<String>,
-}
-
-impl LogSubscriber {
-    #[allow(dead_code)]
-    pub fn new(tx: SyncSender<String>) -> Self {
-        let log_subscriber = Self { tx };
-        if log::set_boxed_logger(Box::new(log_subscriber.clone())).is_err() {
-            eprintln!("Failed to set `LogSubscriber` as global log subscriber")
-        }
-        log::set_max_level(LevelFilter::Debug);
-        log_subscriber
-    }
-
-    pub fn push_logs(&self, log: String) {
-        if let Err(err) = self.tx.send(log) {
-            let SendError(msg) = err;
-            eprintln!("Error Sending Logs to MPSC Channel: {msg}")
-        }
-    }
-}
-
-impl Log for LogSubscriber {
-    fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= Level::Debug
-    }
-
-    fn log(&self, record: &Record) {
-        if self.enabled(record.metadata()) {
-            let message = format!(
-                "{} [{}] - {}\n",
-                chrono::Local::now().time().format("%H:%M:%S"),
-                record.level(),
-                record.args()
-            );
-
-            self.push_logs(message);
-        }
-    }
-
-    fn flush(&self) {}
 }
 
 pub trait UIExt {
@@ -131,11 +61,21 @@ pub trait UIExt {
 impl UIExt for UI {
     fn update_debug_output(&mut self) {
         if let Some(debug_output) = self.debug_output.as_mut() {
+            if let Some(stdout_redirect) = self.stdout_redirect.as_mut() {
+                let mut buffer = String::new();
+                let _ = stdout_redirect.read_to_string(&mut buffer);
+                if !buffer.is_empty() {
+                    for line in buffer.lines() {
+                        debug_output.push_line(StyledLine {
+                            text: line.to_string(),
+                            runs: vec![],
+                        });
+                    }
+                }
+            }
             if let Some(error_redirect) = self.error_redirect.as_mut() {
                 let mut error_buffer = String::new();
-                if let Err(err) = error_redirect.read_to_string(&mut error_buffer) {
-                    eprintln!("Failed to read stderr buffer for debug pane: {err}");
-                }
+                let _ = error_redirect.read_to_string(&mut error_buffer);
                 if !error_buffer.is_empty() {
                     for line in error_buffer.lines() {
                         debug_output.push_line(StyledLine {
@@ -149,14 +89,13 @@ impl UIExt for UI {
                     }
                 }
             }
-            debug_output.update_logs();
         }
     }
 
     fn draw_debug_output(&mut self, f: &mut Frame, area: Rect) {
         if let Some(debug_output) = self.debug_output.as_mut() {
             let block = Block::default()
-                .title(" Debug Output ")
+                .title(" Output ")
                 .title_bottom(format!("{} log entries", debug_output.debug_log.len()))
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded);
@@ -182,13 +121,7 @@ impl UIExt for UI {
             self.debug_output_lines.clear();
             self.debug_selection.clear();
 
-            #[cfg(debug_assertions)]
-            let text = "Text logger is disabled";
-
-            #[cfg(not(debug_assertions))]
-            let text = "Only available in dev profile";
-
-            let p = Paragraph::new(text.italic());
+            let p = Paragraph::new("Debug pane feature is disabled".italic());
             f.render_widget(p, area);
         }
     }
