@@ -152,18 +152,36 @@ where
                 return Ok(());
             }
 
-            // mark as processing before spawning the next job
-            state.processing = true;
-            state.ready_at = None;
+            // don't set state.processing yet — only do it once we know we'll actually spawn
         }
 
         // clone the last finished output (if any) as the visible result for this polling round
-        let buffered_output = self.output.lock().map_err(|_| {
-            let error = CuError::from("Async task output mutex poisoned");
-            record_async_error(&self.state, error.clone());
-            error
-        })?;
-        *real_output = buffered_output.clone();
+        {
+            let buffered_output = self.output.lock().map_err(|_| {
+                let error = CuError::from("Async task output mutex poisoned");
+                record_async_error(&self.state, error.clone());
+                error
+            })?;
+            *real_output = buffered_output.clone();
+        } // MutexGuard dropped here before any further locking
+
+        // No input payload: buffered output already surfaced above, but skip the expensive
+        // 240KB clone + spawn since the inner task would immediately no-op anyway.
+        {
+            let input_ref: &CuMsg<I> = input;
+            if input_ref.payload().is_none() {
+                return Ok(());
+            }
+        }
+
+        // Mark as processing only now that we know we will actually spawn work.
+        {
+            let mut state = self.state.lock().map_err(|_| {
+                CuError::from("Async task state mutex poisoned while marking as processing")
+            })?;
+            state.processing = true;
+            state.ready_at = None;
+        }
 
         // immediately requeue a task based on the new input
         self.tp.spawn_fifo({
