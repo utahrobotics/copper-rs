@@ -4,6 +4,8 @@ use cu29_clock::{CuTime, RobotClock};
 use cu29_traits::{CuError, CuResult};
 use rayon::ThreadPool;
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "std")]
+use std::time::Instant;
 
 struct AsyncState {
     processing: bool,
@@ -30,6 +32,8 @@ where
     output: Arc<Mutex<CuMsg<O>>>,
     state: Arc<Mutex<AsyncState>>,
     tp: Arc<ThreadPool>,
+    #[cfg(feature = "std")]
+    last_skip_print: Option<Instant>,
 }
 
 /// Resource bundle required by a backgrounded task.
@@ -60,6 +64,8 @@ where
                 last_error: None,
             })),
             tp,
+            #[cfg(feature = "std")]
+            last_skip_print: None,
         })
     }
 }
@@ -96,6 +102,8 @@ where
                 last_error: None,
             })),
             tp: resources.threadpool,
+            #[cfg(feature = "std")]
+            last_skip_print: None,
         })
     }
 
@@ -113,10 +121,19 @@ where
             Ok(mut guard) => guard.preprocess(clock),
             Err(std::sync::TryLockError::WouldBlock) => {
                 #[cfg(feature = "std")]
-                eprintln!(
-                    "[COPPER PERF] CuAsyncTask<{}>::preprocess skipped — background task is running",
-                    std::any::type_name::<T>()
-                );
+                {
+                    let now = Instant::now();
+                    let should_print = self
+                        .last_skip_print
+                        .map_or(true, |t| now.duration_since(t).as_secs() >= 3);
+                    if should_print {
+                        self.last_skip_print = Some(now);
+                        eprintln!(
+                            "[COPPER PERF] CuAsyncTask<{}>::preprocess skipped — background task is running",
+                            std::any::type_name::<T>()
+                        );
+                    }
+                }
                 Ok(())
             }
             Err(std::sync::TryLockError::Poisoned(_)) => {
@@ -132,10 +149,19 @@ where
             Ok(mut guard) => guard.postprocess(clock),
             Err(std::sync::TryLockError::WouldBlock) => {
                 #[cfg(feature = "std")]
-                eprintln!(
-                    "[COPPER PERF] CuAsyncTask<{}>::postprocess skipped — background task is running",
-                    std::any::type_name::<T>()
-                );
+                {
+                    let now = Instant::now();
+                    let should_print = self
+                        .last_skip_print
+                        .map_or(true, |t| now.duration_since(t).as_secs() >= 3);
+                    if should_print {
+                        self.last_skip_print = Some(now);
+                        eprintln!(
+                            "[COPPER PERF] CuAsyncTask<{}>::postprocess skipped — background task is running",
+                            std::any::type_name::<T>()
+                        );
+                    }
+                }
                 Ok(())
             }
             Err(std::sync::TryLockError::Poisoned(_)) => {
