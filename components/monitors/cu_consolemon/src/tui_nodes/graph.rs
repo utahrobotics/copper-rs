@@ -159,15 +159,25 @@ impl<'a> NodeGraph<'a> {
     }
 
     fn nudge(&mut self, idx_node: usize, x: u16) {
-        let rect_me = self.placements[&idx_node];
+        self.nudge_inner(idx_node, x, &mut Set::new());
+    }
+
+    fn nudge_inner(&mut self, idx_node: usize, x: u16, visited: &mut Set<usize>) {
+        if !visited.insert(idx_node) {
+            return;
+        }
+        let Some(&rect_me) = self.placements.get(&idx_node) else {
+            return;
+        };
         if rect_me.x < x {
             self.placements.get_mut(&idx_node).unwrap().x = x;
             for ea_child in get_upstream(&self.connections, idx_node) {
                 if ea_child.from_node == idx_node {
                     continue;
                 }
-                assert!(self.placements.contains_key(&ea_child.from_node));
-                self.nudge(ea_child.from_node, x + rect_me.width + MARGIN);
+                if self.placements.contains_key(&ea_child.from_node) {
+                    self.nudge_inner(ea_child.from_node, x + rect_me.width + MARGIN, visited);
+                }
             }
         }
     }
