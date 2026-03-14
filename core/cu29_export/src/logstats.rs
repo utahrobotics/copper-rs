@@ -1,6 +1,6 @@
 use crate::copperlists_reader;
 use cu29::clock::{CuDuration, OptionCuTime};
-use cu29::config::{CuConfig, CuGraph};
+use cu29::config::{CuConfig, CuGraph, Flavor};
 use cu29::curuntime::{CuExecutionLoop, CuExecutionUnit, compute_runtime_plan};
 use cu29::monitoring::CuDurationStatistics;
 use cu29::prelude::{CopperListTuple, CuMsgMetadataTrait, CuPayloadRawBytes};
