@@ -107,45 +107,41 @@ where
     }
 
     fn preprocess(&mut self, clock: &RobotClock) -> CuResult<()> {
-        #[cfg(feature = "std")]
-        let _preprocess_t = std::time::Instant::now();
-        let result = self
-            .task
-            .lock()
-            .map_err(|_| CuError::from("Async task mutex poisoned in preprocess"))?
-            .preprocess(clock);
-        #[cfg(feature = "std")]
-        {
-            let elapsed = _preprocess_t.elapsed();
-            if elapsed.as_micros() > 200 {
+        // Use try_lock so we never block the main loop waiting for the background task.
+        // If the background thread currently holds the task mutex, skip preprocess this cycle.
+        match self.task.try_lock() {
+            Ok(mut guard) => guard.preprocess(clock),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                #[cfg(feature = "std")]
                 eprintln!(
-                    "[COPPER PERF] CuAsyncTask::preprocess mutex+call took {}µs (background task may have been blocking)",
-                    elapsed.as_micros()
+                    "[COPPER PERF] CuAsyncTask<{}>::preprocess skipped — background task is running",
+                    std::any::type_name::<T>()
                 );
+                Ok(())
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                Err(CuError::from("Async task mutex poisoned in preprocess"))
             }
         }
-        result
     }
 
     fn postprocess(&mut self, clock: &RobotClock) -> CuResult<()> {
-        #[cfg(feature = "std")]
-        let _postprocess_t = std::time::Instant::now();
-        let result = self
-            .task
-            .lock()
-            .map_err(|_| CuError::from("Async task mutex poisoned in postprocess"))?
-            .postprocess(clock);
-        #[cfg(feature = "std")]
-        {
-            let elapsed = _postprocess_t.elapsed();
-            if elapsed.as_micros() > 200 {
+        // Use try_lock so we never block the main loop waiting for the background task.
+        // If the background thread currently holds the task mutex, skip postprocess this cycle.
+        match self.task.try_lock() {
+            Ok(mut guard) => guard.postprocess(clock),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                #[cfg(feature = "std")]
                 eprintln!(
-                    "[COPPER PERF] CuAsyncTask::postprocess mutex+call took {}µs (background task may have been blocking)",
-                    elapsed.as_micros()
+                    "[COPPER PERF] CuAsyncTask<{}>::postprocess skipped — background task is running",
+                    std::any::type_name::<T>()
                 );
+                Ok(())
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                Err(CuError::from("Async task mutex poisoned in postprocess"))
             }
         }
-        result
     }
 
     fn stop(&mut self, clock: &RobotClock) -> CuResult<()> {
