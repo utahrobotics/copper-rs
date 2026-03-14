@@ -1956,19 +1956,39 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                 let kf_manager = &mut runtime.keyframes_manager;
 
                 // Preprocess calls can happen at any time, just packed them up front.
+                let __phase_preprocess_t = ::std::time::Instant::now();
                 #(#preprocess_calls)*
+                let __phase_preprocess_elapsed = __phase_preprocess_t.elapsed();
+                if __phase_preprocess_elapsed.as_micros() > 500 {
+                    ::std::eprintln!("[COPPER PERF phase] ALL preprocess calls took {}µs", __phase_preprocess_elapsed.as_micros());
+                }
 
+                let __phase_culist_t = ::std::time::Instant::now();
                 let culist = cl_manager.inner.create().expect("Ran out of space for copper lists"); // FIXME: error handling
                 let clid = culist.id;
                 kf_manager.reset(clid, clock); // beginning of processing, we empty the serialized frozen states of the tasks.
                 culist.change_state(cu29::copperlist::CopperListState::Processing);
                 culist.msgs.init_zeroed();
+                let __phase_culist_elapsed = __phase_culist_t.elapsed();
+                if __phase_culist_elapsed.as_micros() > 200 {
+                    ::std::eprintln!("[COPPER PERF phase] culist create+init_zeroed took {}µs", __phase_culist_elapsed.as_micros());
+                }
+                let __phase_tasks_t = ::std::time::Instant::now();
                 {
                     let msgs = &mut culist.msgs.0;
                     #(#runtime_plan_code)*
                 } // drop(msgs);
+                let __phase_tasks_elapsed = __phase_tasks_t.elapsed();
+                if __phase_tasks_elapsed.as_micros() > 500 {
+                    ::std::eprintln!("[COPPER PERF phase] ALL task process calls took {}µs", __phase_tasks_elapsed.as_micros());
+                }
                 let (raw_payload_bytes, handle_bytes) = #mission_mod::compute_payload_bytes(&culist);
+                let __phase_monitor_t = ::std::time::Instant::now();
                 let monitor_result = monitor.process_copperlist(&#mission_mod::collect_metadata(&culist));
+                let __phase_monitor_elapsed = __phase_monitor_t.elapsed();
+                if __phase_monitor_elapsed.as_micros() > 500 {
+                    ::std::eprintln!("[COPPER PERF phase] monitor.process_copperlist took {}µs", __phase_monitor_elapsed.as_micros());
+                }
 
                 // here drop the payloads if we don't want them to be logged.
                 #(#preprocess_logging_calls)*
@@ -3828,32 +3848,43 @@ fn generate_task_execution_tokens(
                 quote!()
             };
 
-            (
-                quote! {
-                    {
-                        #comment_tokens
-                        kf_manager.freeze_task(clid, &#task_instance)?;
-                        #call_sim_callback
-                        let cumsg_output = &mut msgs.#output_culist_index;
-                        #maybe_sim_tick
-                        let maybe_error = if doit {
-                            #output_start_time
-                            let result = {
-                                #rt_guard
-                                #task_instance.process(clock, cumsg_output)
+            {
+                let task_name_str = &task_specs.ids[tid];
+                (
+                    quote! {
+                        {
+                            #comment_tokens
+                            let __task_wall_t = ::std::time::Instant::now();
+                            kf_manager.freeze_task(clid, &#task_instance)?;
+                            #call_sim_callback
+                            let cumsg_output = &mut msgs.#output_culist_index;
+                            #maybe_sim_tick
+                            let maybe_error = if doit {
+                                #output_start_time
+                                let result = {
+                                    #rt_guard
+                                    #task_instance.process(clock, cumsg_output)
+                                };
+                                #output_end_time
+                                result
+                            } else {
+                                Ok(())
                             };
-                            #output_end_time
-                            result
-                        } else {
-                            Ok(())
-                        };
-                        if let Err(error) = maybe_error {
-                            #monitoring_action
+                            let __task_wall_elapsed = __task_wall_t.elapsed();
+                            if __task_wall_elapsed.as_micros() > 500 {
+                                ::std::eprintln!(
+                                    "[COPPER PERF task] [src] task[{}] {} wall={}µs (incl freeze_task)",
+                                    #tid, #task_name_str, __task_wall_elapsed.as_micros()
+                                );
+                            }
+                            if let Err(error) = maybe_error {
+                                #monitoring_action
+                            }
                         }
-                    }
-                },
-                logging_tokens,
-            )
+                    },
+                    logging_tokens,
+                )
+            }
         }
         CuTaskType::Sink => {
             let input_exprs: Vec<proc_macro2::TokenStream> = step
@@ -3932,32 +3963,43 @@ fn generate_task_execution_tokens(
                 quote! { let doit = true; }
             };
 
-            (
-                quote! {
-                    {
-                        #comment_tokens
-                        kf_manager.freeze_task(clid, &#task_instance)?;
-                        #call_sim_callback
-                        let cumsg_input = &#inputs_type;
-                        let cumsg_output = &mut msgs.#output_culist_index;
-                        let maybe_error = if doit {
-                            #output_start_time
-                            let result = {
-                                #rt_guard
-                                #task_instance.process(clock, cumsg_input)
+            {
+                let task_name_str = &task_specs.ids[tid];
+                (
+                    quote! {
+                        {
+                            #comment_tokens
+                            let __task_wall_t = ::std::time::Instant::now();
+                            kf_manager.freeze_task(clid, &#task_instance)?;
+                            #call_sim_callback
+                            let cumsg_input = &#inputs_type;
+                            let cumsg_output = &mut msgs.#output_culist_index;
+                            let maybe_error = if doit {
+                                #output_start_time
+                                let result = {
+                                    #rt_guard
+                                    #task_instance.process(clock, cumsg_input)
+                                };
+                                #output_end_time
+                                result
+                            } else {
+                                Ok(())
                             };
-                            #output_end_time
-                            result
-                        } else {
-                            Ok(())
-                        };
-                        if let Err(error) = maybe_error {
-                            #monitoring_action
+                            let __task_wall_elapsed = __task_wall_t.elapsed();
+                            if __task_wall_elapsed.as_micros() > 500 {
+                                ::std::eprintln!(
+                                    "[COPPER PERF task] [sink] task[{}] {} wall={}µs (incl freeze_task)",
+                                    #tid, #task_name_str, __task_wall_elapsed.as_micros()
+                                );
+                            }
+                            if let Err(error) = maybe_error {
+                                #monitoring_action
+                            }
                         }
-                    }
-                },
-                quote! {},
-            )
+                    },
+                    quote! {},
+                )
+            }
         }
         CuTaskType::Regular => {
             let input_exprs: Vec<proc_macro2::TokenStream> = step
@@ -4046,32 +4088,51 @@ fn generate_task_execution_tokens(
                 quote!()
             };
 
-            (
-                quote! {
-                    {
-                        #comment_tokens
-                        kf_manager.freeze_task(clid, &#task_instance)?;
-                        #call_sim_callback
-                        let cumsg_input = &#inputs_type;
-                        let cumsg_output = &mut msgs.#output_culist_index;
-                        let maybe_error = if doit {
-                            #output_start_time
-                            let result = {
-                                #rt_guard
-                                #task_instance.process(clock, cumsg_input, cumsg_output)
+            {
+                let task_name_str = &task_specs.ids[tid];
+                (
+                    quote! {
+                        {
+                            #comment_tokens
+                            let __task_wall_t = ::std::time::Instant::now();
+                            let __freeze_t = ::std::time::Instant::now();
+                            kf_manager.freeze_task(clid, &#task_instance)?;
+                            let __freeze_elapsed = __freeze_t.elapsed();
+                            if __freeze_elapsed.as_micros() > 200 {
+                                ::std::eprintln!(
+                                    "[COPPER PERF freeze] task[{}] {} freeze_task={}µs",
+                                    #tid, #task_name_str, __freeze_elapsed.as_micros()
+                                );
+                            }
+                            #call_sim_callback
+                            let cumsg_input = &#inputs_type;
+                            let cumsg_output = &mut msgs.#output_culist_index;
+                            let maybe_error = if doit {
+                                #output_start_time
+                                let result = {
+                                    #rt_guard
+                                    #task_instance.process(clock, cumsg_input, cumsg_output)
+                                };
+                                #output_end_time
+                                result
+                            } else {
+                                Ok(())
                             };
-                            #output_end_time
-                            result
-                        } else {
-                            Ok(())
-                        };
-                        if let Err(error) = maybe_error {
-                            #monitoring_action
+                            let __task_wall_elapsed = __task_wall_t.elapsed();
+                            if __task_wall_elapsed.as_micros() > 500 {
+                                ::std::eprintln!(
+                                    "[COPPER PERF task] [regular] task[{}] {} wall={}µs (incl freeze_task)",
+                                    #tid, #task_name_str, __task_wall_elapsed.as_micros()
+                                );
+                            }
+                            if let Err(error) = maybe_error {
+                                #monitoring_action
+                            }
                         }
-                    }
-                },
-                logging_tokens,
-            )
+                    },
+                    logging_tokens,
+                )
+            }
         }
     }
 }
