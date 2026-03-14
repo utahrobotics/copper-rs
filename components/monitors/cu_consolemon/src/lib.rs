@@ -2205,11 +2205,12 @@ fn init_error_hooks() {
     std::panic::set_hook(Box::new(move |info| {
         let _ = restore_terminal();
         let bt = Backtrace::force_capture();
-        // stderr may be gagged; print to stdout so the panic is visible.
-        println!("CuConsoleMon panic: {info}");
-        println!("Backtrace:\n{bt}");
-        let _ = stdout().flush();
-        // Exit immediately so the process doesn't hang after the TUI restores.
+        // stdout/stderr may be gagged; write directly to /dev/tty so the panic is visible.
+        if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+            let _ = writeln!(tty, "CuConsoleMon panic: {info}");
+            let _ = writeln!(tty, "Backtrace:\n{bt}");
+            let _ = tty.flush();
+        }
         process::exit(1);
     }));
 
