@@ -76,16 +76,7 @@ impl<P: CopperListTuple + Default, const NBCL: usize> CopperListsManager<P, NBCL
             if is_top && cl.get_state() == CopperListState::DoneProcessing {
                 if let Some(logger) = &mut self.logger {
                     cl.change_state(CopperListState::BeingSerialized);
-                    #[cfg(feature = "std")]
-                    let _t = std::time::Instant::now();
                     logger.log(cl)?;
-                    #[cfg(feature = "std")]
-                    {
-                        let elapsed = _t.elapsed();
-                        if elapsed.as_micros() > 500 {
-                            eprintln!("[COPPER PERF] CopperListsManager::end_of_processing logger.log took {}µs", elapsed.as_micros());
-                        }
-                    }
                     self.last_encoded_bytes = logger.last_log_bytes().unwrap_or(0) as u64;
                 }
                 cl.change_state(CopperListState::Free);
@@ -161,19 +152,9 @@ impl KeyFramesManager {
                     culistid, self.inner.culistid
                 )));
             }
-            #[cfg(feature = "std")]
-            let _t = std::time::Instant::now();
-            let result = self.inner
+            self.inner
                 .add_frozen_task(task)
-                .map_err(|e| CuError::from(format!("Failed to serialize task: {e}")));
-            #[cfg(feature = "std")]
-            {
-                let elapsed = _t.elapsed();
-                if elapsed.as_micros() > 200 {
-                    eprintln!("[COPPER PERF] KeyFramesManager::freeze_task took {}µs", elapsed.as_micros());
-                }
-            }
-            result
+                .map_err(|e| CuError::from(format!("Failed to serialize task: {e}")))
         } else {
             Ok(0)
         }
@@ -187,16 +168,7 @@ impl KeyFramesManager {
     pub fn end_of_processing(&mut self, culistid: u32) -> CuResult<()> {
         if self.is_keyframe(culistid) {
             let logger = self.logger.as_mut().unwrap();
-            #[cfg(feature = "std")]
-            let _t = std::time::Instant::now();
             logger.log(&self.inner)?;
-            #[cfg(feature = "std")]
-            {
-                let elapsed = _t.elapsed();
-                if elapsed.as_micros() > 500 {
-                    eprintln!("[COPPER PERF] KeyFramesManager::end_of_processing logger.log took {}µs", elapsed.as_micros());
-                }
-            }
             self.last_encoded_bytes = logger.last_log_bytes().unwrap_or(0) as u64;
             // Clear the lock so the next CL can rebuild normally unless re-locked.
             self.locked = false;
