@@ -109,11 +109,16 @@ const TAB_DEFS: &[TabDef] = &[
         label: "MEM",
         key: "5",
     },
+    TabDef {
+        screen: Screen::Tasks,
+        label: "TSK",
+        key: "6",
+    },
     #[cfg(feature = "debug_pane")]
     TabDef {
         screen: Screen::DebugOutput,
         label: "LOG",
-        key: "6",
+        key: "7",
     },
 ];
 
@@ -126,6 +131,7 @@ enum Screen {
     Latency,
     MemoryPools,
     CopperList,
+    Tasks,
     #[cfg(feature = "debug_pane")]
     DebugOutput,
 }
@@ -932,6 +938,7 @@ struct UI {
     active_screen: Screen,
     sysinfo: String,
     task_stats: Arc<Mutex<TaskStats>>,
+    task_statuses: Arc<Mutex<Vec<TaskStatus>>>,
     quitting: Arc<AtomicBool>,
     tab_hitboxes: Vec<TabHitbox>,
     help_hitboxes: Vec<HelpHitbox>,
@@ -987,6 +994,7 @@ impl UI {
             active_screen: Screen::Neofetch,
             sysinfo: sysinfo::pfetch_info(),
             task_stats,
+            task_statuses,
             quitting,
             tab_hitboxes: Vec::new(),
             help_hitboxes: Vec::new(),
@@ -1029,6 +1037,7 @@ impl UI {
             active_screen: Screen::Neofetch,
             sysinfo: sysinfo::pfetch_info(),
             task_stats,
+            task_statuses,
             quitting,
             tab_hitboxes: Vec::new(),
             help_hitboxes: Vec::new(),
@@ -1417,6 +1426,58 @@ impl UI {
         f.render_widget(disk_table, layout[1]);
     }
 
+    fn draw_task_status(&self, f: &mut Frame, area: Rect) {
+        let header_cells = ["Task", "Status"].iter().map(|h| {
+            Cell::from(Line::from(*h)).style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
+        });
+        let header = Row::new(header_cells)
+            .style(Style::default().fg(Color::Yellow))
+            .bottom_margin(1);
+
+        let statuses = self.task_statuses.lock().unwrap();
+        let rows: Vec<Row> = self
+            .task_ids
+            .iter()
+            .enumerate()
+            .map(|(i, &name)| {
+                let status = statuses.get(i);
+                let (status_text, style) = match status {
+                    Some(s) if s.is_error => (
+                        format!("ERR: {}", s.error),
+                        Style::default().fg(Color::Red),
+                    ),
+                    Some(s) if !s.status_txt.is_empty() => (
+                        s.status_txt.to_string(),
+                        Style::default().fg(Color::Green),
+                    ),
+                    _ => ("--".to_string(), Style::default().fg(Color::DarkGray)),
+                };
+                Row::new(vec![
+                    Cell::from(Line::from(name)).light_blue(),
+                    Cell::from(Line::from(status_text)).style(style),
+                ])
+            })
+            .collect();
+
+        let table = Table::new(
+            rows,
+            &[Constraint::Length(20), Constraint::Min(30)],
+        )
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .title(" Task Status "),
+        );
+
+        f.render_widget(table, area);
+    }
+
     fn draw_nodes(&mut self, f: &mut Frame, space: Rect) {
         NodesScrollableWidget {
             _marker: Default::default(),
@@ -1499,9 +1560,9 @@ impl UI {
         cursor_x = cursor_x.saturating_add(1);
 
         let tab_hint = if cfg!(feature = "debug_pane") {
-            "1-6"
+            "1-7"
         } else {
-            "1-5"
+            "1-6"
         };
 
         let segments = [
@@ -1591,6 +1652,7 @@ impl UI {
             Screen::Latency => self.draw_latency_table(f, layout[1]),
             Screen::MemoryPools => self.draw_memory_pools(f, layout[1]),
             Screen::CopperList => self.draw_copperlist_stats(f, layout[1]),
+            Screen::Tasks => self.draw_task_status(f, layout[1]),
             #[cfg(feature = "debug_pane")]
             Screen::DebugOutput => self.draw_debug_output(f, layout[1]),
         };
@@ -1848,8 +1910,9 @@ impl UI {
                         KeyCode::Char('3') => self.active_screen = Screen::Latency,
                         KeyCode::Char('4') => self.active_screen = Screen::CopperList,
                         KeyCode::Char('5') => self.active_screen = Screen::MemoryPools,
+                        KeyCode::Char('6') => self.active_screen = Screen::Tasks,
                         #[cfg(feature = "debug_pane")]
-                        KeyCode::Char('6') => self.active_screen = Screen::DebugOutput,
+                        KeyCode::Char('7') => self.active_screen = Screen::DebugOutput,
                         KeyCode::Char('r') => {
                             if self.active_screen == Screen::Latency {
                                 self.task_stats.lock().unwrap().reset()
