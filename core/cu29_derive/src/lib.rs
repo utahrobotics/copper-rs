@@ -1307,10 +1307,20 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                         quote! {
                             #call_sim_callback
                             if doit {
+                                let __pre_t = ::std::time::Instant::now();
                                 let maybe_error = {
                                     #rt_guard
                                     tasks.#task_index.preprocess(clock)
                                 };
+                                let __pre_elapsed = __pre_t.elapsed();
+                                if __pre_elapsed.as_micros() > 200 {
+                                    ::std::eprintln!(
+                                        "[COPPER PERF preprocess] task[{}] {} took {}µs",
+                                        #index,
+                                        #mission_mod::TASKS_IDS[#index],
+                                        __pre_elapsed.as_micros()
+                                    );
+                                }
                                 if let Err(error) = maybe_error {
                                     #monitoring_action
                                 }

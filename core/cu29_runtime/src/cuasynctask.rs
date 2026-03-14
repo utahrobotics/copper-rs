@@ -107,17 +107,45 @@ where
     }
 
     fn preprocess(&mut self, clock: &RobotClock) -> CuResult<()> {
-        self.task
+        #[cfg(feature = "std")]
+        let _preprocess_t = std::time::Instant::now();
+        let result = self
+            .task
             .lock()
             .map_err(|_| CuError::from("Async task mutex poisoned in preprocess"))?
-            .preprocess(clock)
+            .preprocess(clock);
+        #[cfg(feature = "std")]
+        {
+            let elapsed = _preprocess_t.elapsed();
+            if elapsed.as_micros() > 200 {
+                eprintln!(
+                    "[COPPER PERF] CuAsyncTask::preprocess mutex+call took {}µs (background task may have been blocking)",
+                    elapsed.as_micros()
+                );
+            }
+        }
+        result
     }
 
     fn postprocess(&mut self, clock: &RobotClock) -> CuResult<()> {
-        self.task
+        #[cfg(feature = "std")]
+        let _postprocess_t = std::time::Instant::now();
+        let result = self
+            .task
             .lock()
             .map_err(|_| CuError::from("Async task mutex poisoned in postprocess"))?
-            .postprocess(clock)
+            .postprocess(clock);
+        #[cfg(feature = "std")]
+        {
+            let elapsed = _postprocess_t.elapsed();
+            if elapsed.as_micros() > 200 {
+                eprintln!(
+                    "[COPPER PERF] CuAsyncTask::postprocess mutex+call took {}µs (background task may have been blocking)",
+                    elapsed.as_micros()
+                );
+            }
+        }
+        result
     }
 
     fn stop(&mut self, clock: &RobotClock) -> CuResult<()> {
