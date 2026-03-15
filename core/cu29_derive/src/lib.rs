@@ -1307,10 +1307,15 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                         quote! {
                             #call_sim_callback
                             if doit {
+                                let __pre_t = std::time::Instant::now();
                                 let maybe_error = {
                                     #rt_guard
                                     tasks.#task_index.preprocess(clock)
                                 };
+                                let __pre_elapsed = __pre_t.elapsed();
+                                if __pre_elapsed.as_micros() > 600 {
+                                    eprintln!("[DBG timing] preprocess '{}' took {:?}", #mission_mod::TASKS_IDS[#index], __pre_elapsed);
+                                }
                                 if let Err(error) = maybe_error {
                                     #monitoring_action
                                 }
@@ -1359,10 +1364,15 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                         quote! {
                             #call_sim_callback
                             if doit {
+                                let __post_t = std::time::Instant::now();
                                 let maybe_error = {
                                     #rt_guard
                                     tasks.#task_index.postprocess(clock)
                                 };
+                                let __post_elapsed = __post_t.elapsed();
+                                if __post_elapsed.as_micros() > 600 {
+                                    eprintln!("[DBG timing] postprocess '{}' took {:?}", #mission_mod::TASKS_IDS[#index], __post_elapsed);
+                                }
                                 if let Err(error) = maybe_error {
                                     #monitoring_action
                                 }
@@ -1950,9 +1960,16 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
 
                 let culist = cl_manager.inner.create().expect("Ran out of space for copper lists"); // FIXME: error handling
                 let clid = culist.id;
-                kf_manager.reset(clid, clock); // beginning of processing, we empty the serialized frozen states of the tasks.
-                culist.change_state(cu29::copperlist::CopperListState::Processing);
-                culist.msgs.init_zeroed();
+                {
+                    let __reset_t = std::time::Instant::now();
+                    kf_manager.reset(clid, clock); // beginning of processing, we empty the serialized frozen states of the tasks.
+                    culist.change_state(cu29::copperlist::CopperListState::Processing);
+                    culist.msgs.init_zeroed();
+                    let __reset_elapsed = __reset_t.elapsed();
+                    if __reset_elapsed.as_micros() > 600 {
+                        eprintln!("[DBG timing] kf_manager.reset+init_zeroed took {:?}", __reset_elapsed);
+                    }
+                }
                 {
                     let msgs = &mut culist.msgs.0;
                     #(#runtime_plan_code)*
@@ -1963,8 +1980,22 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                 // here drop the payloads if we don't want them to be logged.
                 #(#preprocess_logging_calls)*
 
-                cl_manager.end_of_processing(clid)?;
-                kf_manager.end_of_processing(clid)?;
+                {
+                    let __eop_t = std::time::Instant::now();
+                    cl_manager.end_of_processing(clid)?;
+                    let __cl_elapsed = __eop_t.elapsed();
+                    if __cl_elapsed.as_micros() > 600 {
+                        eprintln!("[DBG timing] cl_manager.end_of_processing took {:?}", __cl_elapsed);
+                    }
+                }
+                {
+                    let __kf_eop_t = std::time::Instant::now();
+                    kf_manager.end_of_processing(clid)?;
+                    let __kf_eop_elapsed = __kf_eop_t.elapsed();
+                    if __kf_eop_elapsed.as_micros() > 600 {
+                        eprintln!("[DBG timing] kf_manager.end_of_processing took {:?}", __kf_eop_elapsed);
+                    }
+                }
                 monitor_result?;
                 let stats = cu29::monitoring::CopperListIoStats {
                     raw_culist_bytes: core::mem::size_of::<CuList>() as u64 + raw_payload_bytes,
@@ -3822,16 +3853,28 @@ fn generate_task_execution_tokens(
                 quote! {
                     {
                         #comment_tokens
-                        kf_manager.freeze_task(clid, &#task_instance)?;
+                        {
+                            let __kf_t = std::time::Instant::now();
+                            kf_manager.freeze_task(clid, &#task_instance)?;
+                            let __kf_elapsed = __kf_t.elapsed();
+                            if __kf_elapsed.as_micros() > 600 {
+                                eprintln!("[DBG timing] freeze_task (src) '{}' took {:?}", #mission_mod::TASKS_IDS[#tid], __kf_elapsed);
+                            }
+                        }
                         #call_sim_callback
                         let cumsg_output = &mut msgs.#output_culist_index;
                         #maybe_sim_tick
                         let maybe_error = if doit {
                             #output_start_time
+                            let __proc_t = std::time::Instant::now();
                             let result = {
                                 #rt_guard
                                 #task_instance.process(clock, cumsg_output)
                             };
+                            let __proc_elapsed = __proc_t.elapsed();
+                            if __proc_elapsed.as_micros() > 600 {
+                                eprintln!("[DBG timing] process (src) '{}' took {:?}", #mission_mod::TASKS_IDS[#tid], __proc_elapsed);
+                            }
                             #output_end_time
                             result
                         } else {
@@ -3926,16 +3969,28 @@ fn generate_task_execution_tokens(
                 quote! {
                     {
                         #comment_tokens
-                        kf_manager.freeze_task(clid, &#task_instance)?;
+                        {
+                            let __kf_t = std::time::Instant::now();
+                            kf_manager.freeze_task(clid, &#task_instance)?;
+                            let __kf_elapsed = __kf_t.elapsed();
+                            if __kf_elapsed.as_micros() > 600 {
+                                eprintln!("[DBG timing] freeze_task (sink) '{}' took {:?}", #mission_mod::TASKS_IDS[#tid], __kf_elapsed);
+                            }
+                        }
                         #call_sim_callback
                         let cumsg_input = &#inputs_type;
                         let cumsg_output = &mut msgs.#output_culist_index;
                         let maybe_error = if doit {
                             #output_start_time
+                            let __proc_t = std::time::Instant::now();
                             let result = {
                                 #rt_guard
                                 #task_instance.process(clock, cumsg_input)
                             };
+                            let __proc_elapsed = __proc_t.elapsed();
+                            if __proc_elapsed.as_micros() > 600 {
+                                eprintln!("[DBG timing] process (sink) '{}' took {:?}", #mission_mod::TASKS_IDS[#tid], __proc_elapsed);
+                            }
                             #output_end_time
                             result
                         } else {
@@ -4040,16 +4095,28 @@ fn generate_task_execution_tokens(
                 quote! {
                     {
                         #comment_tokens
-                        kf_manager.freeze_task(clid, &#task_instance)?;
+                        {
+                            let __kf_t = std::time::Instant::now();
+                            kf_manager.freeze_task(clid, &#task_instance)?;
+                            let __kf_elapsed = __kf_t.elapsed();
+                            if __kf_elapsed.as_micros() > 600 {
+                                eprintln!("[DBG timing] freeze_task (regular) '{}' took {:?}", #mission_mod::TASKS_IDS[#tid], __kf_elapsed);
+                            }
+                        }
                         #call_sim_callback
                         let cumsg_input = &#inputs_type;
                         let cumsg_output = &mut msgs.#output_culist_index;
                         let maybe_error = if doit {
                             #output_start_time
+                            let __proc_t = std::time::Instant::now();
                             let result = {
                                 #rt_guard
                                 #task_instance.process(clock, cumsg_input, cumsg_output)
                             };
+                            let __proc_elapsed = __proc_t.elapsed();
+                            if __proc_elapsed.as_micros() > 600 {
+                                eprintln!("[DBG timing] process (regular) '{}' took {:?}", #mission_mod::TASKS_IDS[#tid], __proc_elapsed);
+                            }
                             #output_end_time
                             result
                         } else {
