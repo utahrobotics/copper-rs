@@ -26,7 +26,7 @@ mod bundle_resources;
 mod resources;
 mod utils;
 
-const DEFAULT_CLNB: usize = 2; // We can double buffer for now until we add the parallel copperlist execution support.
+const DEFAULT_CLNB: usize = 2; // double buffering
 
 #[inline]
 fn int2sliceindex(i: u32) -> syn::Index {
@@ -645,6 +645,12 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
         Ok(cuconfig) => cuconfig,
         Err(e) => return return_error(e.to_string()),
     };
+    let nbcl = copper_config
+        .logging
+        .as_ref()
+        .and_then(|l| l.copperlist_count)
+        .unwrap_or(DEFAULT_CLNB);
+    let nbcl_lit = proc_macro2::Literal::usize_unsuffixed(nbcl);
     let copper_config_content = match read_to_string(config_full_path(config_file.as_str())) {
         Ok(ok) => ok,
         Err(e) => {
@@ -670,11 +676,11 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
     // add that to a new field
     let runtime_field: Field = if sim_mode {
         parse_quote! {
-            copper_runtime: cu29::curuntime::CuRuntime<CuSimTasks, CuBridges, CuStampedDataSet, #monitor_type, #DEFAULT_CLNB>
+            copper_runtime: cu29::curuntime::CuRuntime<CuSimTasks, CuBridges, CuStampedDataSet, #monitor_type, #nbcl_lit>
         }
     } else {
         parse_quote! {
-            copper_runtime: cu29::curuntime::CuRuntime<CuTasks, CuBridges, CuStampedDataSet, #monitor_type, #DEFAULT_CLNB>
+            copper_runtime: cu29::curuntime::CuRuntime<CuTasks, CuBridges, CuStampedDataSet, #monitor_type, #nbcl_lit>
         }
     };
 
@@ -1958,7 +1964,7 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                 // Preprocess calls can happen at any time, just packed them up front.
                 #(#preprocess_calls)*
 
-                let culist = cl_manager.inner.create().expect("Ran out of space for copper lists"); // FIXME: error handling
+                let culist = cl_manager.create()?; // FIXME: error handling
                 let clid = culist.id;
                 {
                     let __reset_t = std::time::Instant::now();
@@ -2034,6 +2040,7 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
             #stop_all_tasks {
                 #(#stop_calls)*
                 self.copper_runtime.monitor.stop(&self.copper_runtime.clock)?;
+                self.copper_runtime.copperlists_manager.finish_pending()?;
                 Ok(())
             }
 
@@ -2177,7 +2184,7 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
 
                 #[cfg(target_os = "none")]
                 ::cu29::prelude::info!("CuApp new: building runtime");
-                let copper_runtime = CuRuntime::<#mission_mod::#tasks_type, #mission_mod::CuBridges, #mission_mod::CuStampedDataSet, #monitor_type, #DEFAULT_CLNB>::new_with_resources(
+                let copper_runtime = CuRuntime::<#mission_mod::#tasks_type, #mission_mod::CuBridges, #mission_mod::CuStampedDataSet, #monitor_type, #nbcl_lit>::new_with_resources(
                     clock,
                     &config,
                     Some(#mission),
@@ -2210,7 +2217,7 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
 
                 /// Mutable access to the underlying runtime (used by tools such as deterministic re-sim).
                 #[inline]
-                pub fn copper_runtime_mut(&mut self) -> &mut CuRuntime<#mission_mod::#tasks_type, #mission_mod::CuBridges, #mission_mod::CuStampedDataSet, #monitor_type, #DEFAULT_CLNB> {
+                pub fn copper_runtime_mut(&mut self) -> &mut CuRuntime<#mission_mod::#tasks_type, #mission_mod::CuBridges, #mission_mod::CuStampedDataSet, #monitor_type, #nbcl_lit> {
                     &mut self.copper_runtime
                 }
             }
@@ -2587,7 +2594,7 @@ pub fn copper_runtime(args: TokenStream, input: TokenStream) -> TokenStream {
                         .expect("Failed to create the given monitor.");
                     let copperlist_info = ::cu29::monitoring::CopperListInfo::new(
                         core::mem::size_of::<CuList>(),
-                        #DEFAULT_CLNB,
+                        #nbcl_lit,
                     );
                     monitor.set_copperlist_info(copperlist_info);
                     monitor

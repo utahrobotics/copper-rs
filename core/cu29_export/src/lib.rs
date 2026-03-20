@@ -432,13 +432,18 @@ fn copperlist_total_bytes(log_base: &Path) -> CuResult<u64> {
 fn read_next_entry<T: Decode<()>>(src: &mut impl Read) -> Option<T> {
     let entry = decode_from_std_read::<T, _, _>(src, standard());
     match entry {
-        Ok(entry) => Some(entry),
-        Err(DecodeError::UnexpectedEnd { .. }) => None,
+        Ok(entry) => {
+            Some(entry)},
+        Err(DecodeError::UnexpectedEnd { .. }) => {
+            eprintln!("[COPPERLIST READER] unexpected end.");
+            None
+        },
         Err(DecodeError::Io { inner, additional }) => {
+            eprintln!("[COPPERLIST READER] io err: {inner}");
             if inner.kind() == std::io::ErrorKind::UnexpectedEof {
                 None
             } else {
-                println!("Error {inner:?} additional:{additional}");
+                eprintln!("[COPPERLIST READER] Error {inner:?} additional:{additional}");
                 None
             }
         }

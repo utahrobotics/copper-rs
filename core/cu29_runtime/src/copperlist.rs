@@ -34,6 +34,7 @@ pub enum CopperListState {
     Initialized,
     Processing,
     DoneProcessing,
+    QueuedForSerialization,
     BeingSerialized,
 }
 
@@ -44,6 +45,7 @@ impl Display for CopperListState {
             CopperListState::Initialized => write!(f, "Initialized"),
             CopperListState::Processing => write!(f, "Processing"),
             CopperListState::DoneProcessing => write!(f, "DoneProcessing"),
+            CopperListState::QueuedForSerialization => write!(f, "QueuedForSerialization"),
             CopperListState::BeingSerialized => write!(f, "BeingSerialized"),
         }
     }
@@ -186,6 +188,20 @@ impl<P: CopperListTuple, const N: usize> CuListsManager<P, N> {
     pub fn clear(&mut self) {
         self.insertion_index = 0;
         self.length = 0;
+    }
+
+    /// Returns the next copper-list id that will be assigned by [`create`](Self::create).
+    #[inline]
+    pub fn next_cl_id(&self) -> u32 {
+        self.current_cl_id
+    }
+
+    /// Returns the most recently assigned copper-list id.
+    ///
+    /// Before the first call to [`create`](Self::create), this returns `0`.
+    #[inline]
+    pub fn last_cl_id(&self) -> u32 {
+        self.current_cl_id.saturating_sub(1)
     }
 
     #[inline]
