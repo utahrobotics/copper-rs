@@ -423,9 +423,6 @@ impl CuTask for AprilTags {
                 use apriltag_nalgebra::PoseExt;
                 let pose_na = pose_estimations[best_idx].pose.to_na();
 
-                let rot_matrix = pose_na.rotation.to_rotation_matrix();
-                let m = rot_matrix.matrix();
-
                 let encodable_pose = EncodableIsometry::from_na(&pose_na);
 
                 let CuArrayVec(detections) = &mut result.poses;
