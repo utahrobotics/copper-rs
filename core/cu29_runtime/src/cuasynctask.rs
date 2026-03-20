@@ -1,5 +1,5 @@
 use crate::config::ComponentConfig;
-use crate::cutask::{CuMsg, CuMsgPayload, CuTask, Freezable};
+use crate::cutask::{CuMsg, CuMsgMetadata, CuMsgPayload, CuTask, Freezable};
 use cu29_clock::{CuTime, RobotClock};
 use cu29_traits::{CuError, CuResult};
 use rayon::ThreadPool;
@@ -59,7 +59,7 @@ where
                 ready_at: None,
                 last_error: None,
             })),
-            tp,
+            tp
         })
     }
 }
@@ -95,7 +95,7 @@ where
                 ready_at: None,
                 last_error: None,
             })),
-            tp: resources.threadpool,
+            tp: resources.threadpool
         })
     }
 
@@ -151,7 +151,8 @@ where
                 return Err(error);
             }
             if state.processing {
-                // background task still running
+                // background task still running, clear payload so caller sees no data
+                real_output.clear_payload();
                 return Ok(());
             }
 
@@ -159,20 +160,23 @@ where
                 && clock.now() < ready_at
             {
                 // result not yet allowed to surface based on recorded completion time
+                real_output.clear_payload();
                 return Ok(());
             }
 
-            // don't set state.processing yet — only do it once we know we'll actually spawn
+            // don't set state.processing yet only do it once we know we'll actually spawn
         }
 
         // clone the last finished output (if any) as the visible result for this polling round
         {
-            let buffered_output = self.output.lock().map_err(|_| {
+            let mut buffered_output = self.output.lock().map_err(|_| {
                 let error = CuError::from("Async task output mutex poisoned");
                 record_async_error(&self.state, error.clone());
                 error
             })?;
             *real_output = buffered_output.clone();
+            // dont set output on every idle tick
+            buffered_output.clear_payload();
         } // MutexGuard dropped here before any further locking
 
         // No input payload: buffered output already surfaced above, but skip the expensive
@@ -213,6 +217,11 @@ where
                     }
                 };
                 let output_ref: &mut CuMsg<O> = &mut output_guard;
+
+                // Each async run starts from an empty output so a task that chooses not
+                // to publish does not leak the previous payload into the next cycle.
+                output_ref.clear_payload();
+                output_ref.metadata = CuMsgMetadata::default();
 
                 // Track the actual processing interval so replay can honor it.
                 if output_ref.metadata.process_time.start.is_none() {
