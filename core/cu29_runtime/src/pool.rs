@@ -11,7 +11,7 @@ use std::alloc::{Layout, alloc, dealloc};
 use std::fmt::Debug;
 use std::mem::{align_of, size_of};
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 type PoolID = ArrayString<64>;
 
@@ -35,6 +35,20 @@ const MAX_POOLS: usize = 16;
 
 fn lock_unpoison<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poison) => poison.into_inner(),
+    }
+}
+
+fn rwlock_read_unpoison<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    match lock.read() {
+        Ok(guard) => guard,
+        Err(poison) => poison.into_inner(),
+    }
+}
+
+fn rwlock_write_unpoison<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    match lock.write() {
         Ok(guard) => guard,
         Err(poison) => poison.into_inner(),
     }
@@ -142,11 +156,13 @@ impl<T: ArrayLike> DerefMut for CuHandleInner<T> {
 }
 
 /// A shareable handle to an Array coming from a pool (either host or device).
+/// Uses RwLock so multiple readers can share
+/// concurrent access without blocking each other.
 #[derive(Clone, Debug)]
-pub struct CuHandle<T: ArrayLike>(Arc<Mutex<CuHandleInner<T>>>);
+pub struct CuHandle<T: ArrayLike>(Arc<RwLock<CuHandleInner<T>>>);
 
 impl<T: ArrayLike> Deref for CuHandle<T> {
-    type Target = Arc<Mutex<CuHandleInner<T>>>;
+    type Target = Arc<RwLock<CuHandleInner<T>>>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -156,18 +172,18 @@ impl<T: ArrayLike> Deref for CuHandle<T> {
 impl<T: ArrayLike> CuHandle<T> {
     /// Create a new CuHandle not part of a Pool (not for onboard usages, use pools instead)
     pub fn new_detached(inner: T) -> Self {
-        CuHandle(Arc::new(Mutex::new(CuHandleInner::Detached(inner))))
+        CuHandle(Arc::new(RwLock::new(CuHandleInner::Detached(inner))))
     }
 
-    /// Safely access the inner value, applying a closure to it.
+    /// Safely access the inner value, applying a closure to it (shared/read lock).
     pub fn with_inner<R>(&self, f: impl FnOnce(&CuHandleInner<T>) -> R) -> R {
-        let lock = lock_unpoison(&self.0);
+        let lock = rwlock_read_unpoison(&self.0);
         f(&*lock)
     }
 
-    /// Mutably access the inner value, applying a closure to it.
+    /// Mutably access the inner value, applying a closure to it (exclusive/write lock).
     pub fn with_inner_mut<R>(&self, f: impl FnOnce(&mut CuHandleInner<T>) -> R) -> R {
-        let mut lock = lock_unpoison(&self.0);
+        let mut lock = rwlock_write_unpoison(&self.0);
         f(&mut *lock)
     }
 }
@@ -177,7 +193,7 @@ where
     T: ArrayLike,
 {
     fn raw_bytes(&self) -> usize {
-        lock_unpoison(&self.0).deref().len() * size_of::<T::Element>()
+        rwlock_read_unpoison(&self.0).deref().len() * size_of::<T::Element>()
     }
 
     fn handle_bytes(&self) -> usize {
@@ -190,7 +206,7 @@ where
     <T as ArrayLike>::Element: 'static,
 {
     fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
-        let inner = lock_unpoison(&self.0);
+        let inner = rwlock_read_unpoison(&self.0);
         match inner.deref() {
             CuHandleInner::Pooled(pooled) => pooled.deref().encode(encoder),
             CuHandleInner::Detached(detached) => detached.encode(encoder),
@@ -207,7 +223,7 @@ impl<T: ArrayLike> Default for CuHandle<T> {
 impl<U: ElementType + Decode<()> + 'static> Decode<()> for CuHandle<Vec<U>> {
     fn decode<D: Decoder<Context = ()>>(decoder: &mut D) -> Result<Self, DecodeError> {
         let vec: Vec<U> = Vec::decode(decoder)?;
-        Ok(CuHandle(Arc::new(Mutex::new(CuHandleInner::Detached(vec)))))
+        Ok(CuHandle(Arc::new(RwLock::new(CuHandleInner::Detached(vec)))))
     }
 }
 
@@ -288,14 +304,14 @@ impl<T: ArrayLike> CuPool<T> for CuHostMemoryPool<T> {
     fn acquire(&self) -> Option<CuHandle<T>> {
         let owned_object = self.pool.try_pull_owned(); // Use the owned version
 
-        owned_object.map(|reusable| CuHandle(Arc::new(Mutex::new(CuHandleInner::Pooled(reusable)))))
+        owned_object.map(|reusable| CuHandle(Arc::new(RwLock::new(CuHandleInner::Pooled(reusable)))))
     }
 
     fn copy_from<O: ArrayLike<Element = T::Element>>(&self, from: &mut CuHandle<O>) -> CuHandle<T> {
         let to_handle = self.acquire().expect("No available buffers in the pool");
 
-        match lock_unpoison(&from.0).deref() {
-            CuHandleInner::Detached(source) => match lock_unpoison(&to_handle.0).deref_mut() {
+        match rwlock_read_unpoison(&from.0).deref() {
+            CuHandleInner::Detached(source) => match rwlock_write_unpoison(&to_handle.0).deref_mut() {
                 CuHandleInner::Detached(destination) => {
                     destination.copy_from_slice(source);
                 }
@@ -303,7 +319,7 @@ impl<T: ArrayLike> CuPool<T> for CuHostMemoryPool<T> {
                     destination.copy_from_slice(source);
                 }
             },
-            CuHandleInner::Pooled(source) => match lock_unpoison(&to_handle.0).deref_mut() {
+            CuHandleInner::Pooled(source) => match rwlock_write_unpoison(&to_handle.0).deref_mut() {
                 CuHandleInner::Detached(destination) => {
                     destination.copy_from_slice(source);
                 }
@@ -511,7 +527,7 @@ mod cuda {
         fn acquire(&self) -> Option<CuHandle<CudaSliceWrapper<E>>> {
             self.pool
                 .try_pull_owned()
-                .map(|x| CuHandle(Arc::new(Mutex::new(CuHandleInner::Pooled(x)))))
+                .map(|x| CuHandle(Arc::new(RwLock::new(CuHandleInner::Pooled(x)))))
         }
 
         fn copy_from<O>(&self, from_handle: &mut CuHandle<O>) -> CuHandle<CudaSliceWrapper<E>>
@@ -521,8 +537,8 @@ mod cuda {
             let to_handle = self.acquire().expect("No available buffers in the pool");
 
             {
-                let from_lock = lock_unpoison(&from_handle.0);
-                let mut to_lock = lock_unpoison(&to_handle.0);
+                let from_lock = rwlock_read_unpoison(&from_handle.0);
+                let mut to_lock = rwlock_write_unpoison(&to_handle.0);
 
                 match &mut *to_lock {
                     CuHandleInner::Detached(CudaSliceWrapper(to)) => {
