@@ -52,6 +52,10 @@ impl_cu_msg_pack!(T1, T2);
 impl_cu_msg_pack!(T1, T2, T3);
 impl_cu_msg_pack!(T1, T2, T3, T4);
 impl_cu_msg_pack!(T1, T2, T3, T4, T5);
+impl_cu_msg_pack!(T1, T2, T3, T4, T5, T6);
+impl_cu_msg_pack!(T1, T2, T3, T4, T5, T6, T7);
+
+
 
 // A convenience macro to get from a payload or a list of payloads to a proper CuMsg or CuMsgPack
 // declaration for your tasks used for input messages.
