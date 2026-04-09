@@ -3626,6 +3626,7 @@ fn build_execution_plan(
                 cnx.missions.clone(),
                 None,
                 None,
+                cnx.src_port,
             )
             .map_err(|e| CuError::from(e.to_string()))?;
     }

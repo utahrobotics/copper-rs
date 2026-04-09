@@ -834,6 +834,9 @@ pub enum CuTaskType {
 pub struct CuOutputPack {
     pub culist_index: u32,
     pub msg_types: Vec<String>,
+    /// For each output slot, the edge IDs that fan out from it.
+    /// Used to resolve `src_port` for a given incoming edge.
+    pub slot_edges: Vec<Vec<usize>>,
 }
 
 #[derive(Debug, Clone)]
@@ -949,22 +952,39 @@ fn sort_inputs_by_cnx_id(input_msg_indices_types: &mut [CuInputMsg]) {
     input_msg_indices_types.sort_by_key(|input| input.edge_id);
 }
 
-fn collect_output_msg_types(graph: &CuGraph, node_id: NodeId) -> Vec<String> {
-    let mut edge_ids = graph.get_src_edges(node_id).unwrap_or_default();
-    edge_ids.sort();
+fn collect_output_msg_types(graph: &CuGraph, node_id: NodeId) -> (Vec<String>, Vec<Vec<usize>>) {
+    let mut src_edge_ids = graph.get_src_edges(node_id).unwrap_or_default();
+    src_edge_ids.sort();
 
-    let mut msg_types = Vec::new();
-    let mut seen = Vec::new();
-    for edge_id in edge_ids {
+    let mut msg_types: Vec<String> = Vec::new();
+    // For each output slot, the list of edge IDs that map to it.
+    let mut slot_edges: Vec<Vec<usize>> = Vec::new();
+
+    for edge_id in src_edge_ids {
         if let Some(edge) = graph.edge(edge_id) {
-            if seen.iter().any(|msg| msg == &edge.msg) {
-                continue;
+            // If src_port is explicitly set on the connection, use it to create/extend slots
+            if let Some(explicit_port) = edge.src_port {
+                // Extend slots to accommodate the explicit port index
+                while slot_edges.len() <= explicit_port {
+                    msg_types.push(String::new());
+                    slot_edges.push(Vec::new());
+                }
+                if msg_types[explicit_port].is_empty() {
+                    msg_types[explicit_port] = edge.msg.clone();
             }
-            seen.push(edge.msg.clone());
+                slot_edges[explicit_port].push(edge_id);
+            } else {
+                // Default: fan-out, deduplicate by msg type
+                if let Some(pos) = msg_types.iter().position(|msg| msg == &edge.msg) {
+                    slot_edges[pos].push(edge_id);
+                } else {
             msg_types.push(edge.msg.clone());
+                    slot_edges.push(vec![edge_id]);
         }
     }
-    msg_types
+        }
+    }
+    (msg_types, slot_edges)
 }
 /// Explores a subbranch and build the partial plan out of it.
 fn plan_tasks_tree_branch(
@@ -991,7 +1011,7 @@ fn plan_tasks_tree_branch(
             CuTaskType::Source => {
                 #[cfg(all(feature = "std", feature = "macro_debug"))]
                 eprintln!("    → Source node, assign output index {next_culist_output_index}");
-                let msg_types = collect_output_msg_types(graph, id);
+                let (msg_types, slot_edges) = collect_output_msg_types(graph, id);
                 if msg_types.is_empty() {
                     panic!(
                         "Source node '{}' has no outgoing connections",
@@ -1001,6 +1021,7 @@ fn plan_tasks_tree_branch(
                 output_msg_pack = Some(CuOutputPack {
                     culist_index: next_culist_output_index,
                     msg_types,
+                    slot_edges,
                 });
                 next_culist_output_index += 1;
             }
@@ -1024,12 +1045,12 @@ fn plan_tasks_tree_branch(
                         eprintln!("      ✓ Input from {pid} ready: {output_pack:?}");
                         let msg_type = edge.msg.as_str();
                         let src_port = output_pack
-                            .msg_types
+                            .slot_edges
                             .iter()
-                            .position(|msg| msg == msg_type)
+                            .position(|edges| edges.contains(&edge_id))
                             .unwrap_or_else(|| {
                                 panic!(
-                                    "Missing output port for message type '{msg_type}' on node {pid}"
+                                    "Missing output port for edge {edge_id} (msg type '{msg_type}') on node {pid}"
                                 )
                             });
                         input_msg_indices_types.push(CuInputMsg {
@@ -1047,6 +1068,7 @@ fn plan_tasks_tree_branch(
                 output_msg_pack = Some(CuOutputPack {
                     culist_index: next_culist_output_index,
                     msg_types: Vec::from(["()".to_string()]),
+                    slot_edges: Vec::new(),
                 });
                 next_culist_output_index += 1;
             }
@@ -1070,12 +1092,12 @@ fn plan_tasks_tree_branch(
                         eprintln!("      ✓ Input from {pid} ready: {output_pack:?}");
                         let msg_type = edge.msg.as_str();
                         let src_port = output_pack
-                            .msg_types
+                            .slot_edges
                             .iter()
-                            .position(|msg| msg == msg_type)
+                            .position(|edges| edges.contains(&edge_id))
                             .unwrap_or_else(|| {
                                 panic!(
-                                    "Missing output port for message type '{msg_type}' on node {pid}"
+                                    "Missing output port for edge {edge_id} (msg type '{msg_type}') on node {pid}"
                                 )
                             });
                         input_msg_indices_types.push(CuInputMsg {
@@ -1090,7 +1112,7 @@ fn plan_tasks_tree_branch(
                         return (next_culist_output_index, handled);
                     }
                 }
-                let msg_types = collect_output_msg_types(graph, id);
+                let (msg_types, slot_edges) = collect_output_msg_types(graph, id);
                 if msg_types.is_empty() {
                     panic!(
                         "Regular node '{}' has no outgoing connections",
@@ -1100,6 +1122,7 @@ fn plan_tasks_tree_branch(
                 output_msg_pack = Some(CuOutputPack {
                     culist_index: next_culist_output_index,
                     msg_types,
+                    slot_edges,
                 });
                 next_culist_output_index += 1;
             }
@@ -1505,6 +1528,7 @@ mod tests {
             })
             .unwrap();
 
+        // dst_a and dst_a2 both fan out from the same "msg::A" slot (port 0)
         assert_eq!(dst_a_step.input_msg_indices_types[0].src_port, 0);
         assert_eq!(dst_b_step.input_msg_indices_types[0].src_port, 1);
         assert_eq!(dst_a2_step.input_msg_indices_types[0].src_port, 0);

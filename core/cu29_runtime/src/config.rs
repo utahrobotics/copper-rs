@@ -739,6 +739,8 @@ struct SerializedCnx {
     dst: String,
     msg: String,
     missions: Option<Vec<String>>,
+    /// Optional explicit output port index on the source task.
+    src_port: Option<usize>,
 }
 
 /// This represents a connection between 2 tasks (nodes) in the configuration graph.
@@ -756,6 +758,12 @@ pub struct Cnx {
     pub src_channel: Option<String>,
     /// Optional channel id when the destination endpoint is a bridge.
     pub dst_channel: Option<String>,
+    /// Optional explicit output port index on the source task.
+    /// When set, this connection reads from the specified output slot instead of
+    /// using the default fan-out behavior (where connections with the same msg type
+    /// share a single output slot). This allows a source to produce distinct values
+    /// of the same type on separate output ports.
+    pub src_port: Option<usize>,
 }
 
 impl From<&Cnx> for SerializedCnx {
@@ -765,6 +773,7 @@ impl From<&Cnx> for SerializedCnx {
             dst: format_endpoint(&cnx.dst, cnx.dst_channel.as_deref()),
             msg: cnx.msg.clone(),
             missions: cnx.missions.clone(),
+            src_port: cnx.src_port,
         }
     }
 }
@@ -924,6 +933,7 @@ impl CuGraph {
         missions: Option<Vec<String>>,
         src_channel: Option<String>,
         dst_channel: Option<String>,
+        src_port: Option<usize>,
     ) -> CuResult<()> {
         let (src_id, dst_id) = (
             self.0
@@ -948,6 +958,7 @@ impl CuGraph {
                 missions,
                 src_channel,
                 dst_channel,
+                src_port,
             },
         );
         Ok(())
@@ -1101,7 +1112,7 @@ impl CuGraph {
     /// msg_type is the type of message exchanged between the two nodes/tasks.
     #[allow(dead_code)]
     pub fn connect(&mut self, source: NodeId, target: NodeId, msg_type: &str) -> CuResult<()> {
-        self.connect_ext(source, target, msg_type, None, None, None)
+        self.connect_ext(source, target, msg_type, None, None, None, None)
     }
 }
 
@@ -1446,6 +1457,7 @@ where
                                     Some(cnx_missions.clone()),
                                     src_channel,
                                     dst_channel,
+                                    c.src_port,
                                 )
                                 .map_err(|e| E::from(e.to_string()))?;
                         }
@@ -1467,7 +1479,7 @@ where
                                     E::from(format!("Destination node not found: {}", c.dst))
                                 })?;
                         graph
-                            .connect_ext(src, dst, &c.msg, None, src_channel, dst_channel)
+                            .connect_ext(src, dst, &c.msg, None, src_channel, dst_channel, c.src_port)
                             .map_err(|e| E::from(e.to_string()))?;
                     }
                 }
@@ -1507,7 +1519,7 @@ where
                     .get_node_id_by_name(dst_name.as_str())
                     .ok_or_else(|| E::from(format!("Destination node not found: {}", c.dst)))?;
                 graph
-                    .connect_ext(src, dst, &c.msg, None, src_channel, dst_channel)
+                    .connect_ext(src, dst, &c.msg, None, src_channel, dst_channel, c.src_port)
                     .map_err(|e| E::from(e.to_string()))?;
             }
         }
