@@ -2653,7 +2653,11 @@ struct CuTaskSpecSet {
     pub ids: Vec<String>,
     pub cutypes: Vec<CuTaskType>,
     pub background_flags: Vec<bool>,
-    pub logging_enabled: Vec<bool>,
+    /// Per-task logging control:
+    /// None = all outputs disabled (legacy enabled: false)
+    /// Some(vec![]) = all outputs logged
+    /// Some(vec![1,2]) = slots 1 and 2 are not logged
+    pub logging_disabled_slots: Vec<Option<Vec<usize>>>,
     pub type_names: Vec<String>,
     pub task_types: Vec<Type>,
     pub instantiation_types: Vec<Type>,
@@ -2687,9 +2691,9 @@ impl CuTaskSpecSet {
             .map(|(_, node)| node.is_background())
             .collect();
 
-        let logging_enabled: Vec<bool> = all_id_nodes
+        let logging_disabled_slots: Vec<Option<Vec<usize>>> = all_id_nodes
             .iter()
-            .map(|(_, node)| node.is_logging_enabled())
+            .map(|(_, node)| node.get_logging_disabled_slots())
             .collect();
 
         let type_names: Vec<String> = all_id_nodes
@@ -2763,7 +2767,7 @@ impl CuTaskSpecSet {
             ids,
             cutypes,
             background_flags,
-            logging_enabled,
+            logging_disabled_slots,
             type_names,
             task_types,
             instantiation_types,
@@ -3689,6 +3693,64 @@ fn build_monitored_ids(task_ids: &[String], bridge_specs: &mut [BridgeSpec]) -> 
     names
 }
 
+/// Generate selective clear_payload tokens based on per-slot logging config.
+/// `disabled_slots`:
+///   - `None` = all outputs disabled (clear all)
+///   - `Some(vec![])` = all outputs logged (no clearing)
+///   - `Some(vec![i, j])` = clear only slots i and j
+fn generate_selective_clear_tokens(
+    disabled_slots: &Option<Vec<usize>>,
+    output_ports: &[syn::Index],
+    output_culist_index: &syn::Index,
+    output_clear_all: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    match disabled_slots {
+        None => {
+            // All logging disabled (legacy enabled: false)
+            quote! {
+                let mut cumsg_output = &mut culist.msgs.0.#output_culist_index;
+                #output_clear_all
+            }
+        }
+        Some(slots) if slots.is_empty() => {
+            // All logging enabled
+            quote!()
+        }
+        Some(slots) => {
+            let num_outputs = output_ports.len();
+            if num_outputs == 1 {
+                // Single output: slot 0 is the only option
+                if slots.contains(&0) {
+                    quote! {
+                        let mut cumsg_output = &mut culist.msgs.0.#output_culist_index;
+                        cumsg_output.clear_payload();
+                    }
+                } else {
+                    quote!()
+                }
+            } else {
+                // Multi output: selectively clear specific tuple fields
+                let clear_stmts: Vec<proc_macro2::TokenStream> = slots
+                    .iter()
+                    .filter(|&&s| s < num_outputs)
+                    .map(|&s| {
+                        let idx = syn::Index::from(s);
+                        quote! { cumsg_output.#idx.clear_payload(); }
+                    })
+                    .collect();
+                if clear_stmts.is_empty() {
+                    quote!()
+                } else {
+                    quote! {
+                        let mut cumsg_output = &mut culist.msgs.0.#output_culist_index;
+                        #(#clear_stmts)*
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn generate_task_execution_tokens(
     step: &CuExecutionStep,
     task_index: usize,
@@ -3817,14 +3879,12 @@ fn generate_task_execution_tokens(
                 quote! { let doit = true; }
             };
 
-            let logging_tokens = if !task_specs.logging_enabled[tid] {
-                quote! {
-                    let mut cumsg_output = &mut culist.msgs.0.#output_culist_index;
-                    #output_clear_payload
-                }
-            } else {
-                quote!()
-            };
+            let logging_tokens = generate_selective_clear_tokens(
+                &task_specs.logging_disabled_slots[tid],
+                &output_ports,
+                &output_culist_index,
+                &output_clear_payload,
+            );
 
             (
                 quote! {
@@ -4035,14 +4095,12 @@ fn generate_task_execution_tokens(
                 quote! { let doit = true; }
             };
 
-            let logging_tokens = if !task_specs.logging_enabled[tid] {
-                quote! {
-                    let mut cumsg_output = &mut culist.msgs.0.#output_culist_index;
-                    #output_clear_payload
-                }
-            } else {
-                quote!()
-            };
+            let logging_tokens = generate_selective_clear_tokens(
+                &task_specs.logging_disabled_slots[tid],
+                &output_ports,
+                &output_culist_index,
+                &output_clear_payload,
+            );
 
             (
                 quote! {

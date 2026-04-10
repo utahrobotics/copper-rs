@@ -430,6 +430,10 @@ impl Display for Value {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NodeLogging {
     enabled: bool,
+    /// Indices of specific output slots to exclude from logging.
+    /// Only meaningful when `enabled` is true.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    disabled_slots: Vec<usize>,
 }
 
 /// Distinguishes regular tasks from bridge nodes so downstream stages can apply
@@ -560,6 +564,23 @@ impl Node {
             logging.enabled
         } else {
             true
+        }
+    }
+
+    /// Returns which output slots should have logging disabled.
+    /// - `None` means all outputs are disabled (legacy `enabled: false`).
+    /// - `Some(vec![])` means all outputs are logged (default).
+    /// - `Some(vec![1, 2])` means slots 1 and 2 are not logged.
+    #[allow(dead_code)]
+    pub fn get_logging_disabled_slots(&self) -> Option<Vec<usize>> {
+        if let Some(logging) = &self.logging {
+            if !logging.enabled {
+                None
+            } else {
+                Some(logging.disabled_slots.clone())
+            }
+        } else {
+            Some(vec![])
         }
     }
 
