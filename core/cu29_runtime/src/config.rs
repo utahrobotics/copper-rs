@@ -1066,11 +1066,12 @@ impl CuGraph {
                 if node.id != node_id {
                     return None;
                 }
-                let edges: Vec<_> = self
+                let mut edges: Vec<_> = self
                     .0
                     .edges_directed(node_index, Incoming)
                     .map(|edge| edge.id().index())
                     .collect();
+                edges.sort();
                 if edges.is_empty() {
                     return None;
                 }
