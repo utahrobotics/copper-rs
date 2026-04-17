@@ -58,7 +58,7 @@ fn format_timestamp(time: CuDuration) -> String {
 }
 
 /// The state of a task.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 pub enum CuTaskState {
     Start,
     Preprocess,
